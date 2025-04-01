@@ -353,6 +353,10 @@ func (s *Server) Run(ctx context.Context) error {
 	logger := klog.FromContext(ctx).WithValues("component", "kcp")
 	ctx = klog.NewContext(ctx, logger)
 
+	go func() {
+		http.ListenAndServe(":6060", nil)
+	}()
+
 	if err := s.AddPostStartHook("kcp-bootstrap-policy", bootstrappolicy.Policy().EnsureRBACPolicy()); err != nil {
 		return err
 	}
