@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"runtime/trace"
 	"time"
 
@@ -594,7 +595,17 @@ func (s *Server) Run(ctx context.Context) error {
 	controllerConfig := s.IdentityConfig
 
 	gvrs := s.addIndexersToInformers(ctx)
-	if err := s.installControllers(ctx, controllerConfig, gvrs); err != nil {
+	err = nil
+	pprof.Do(
+		ctx,
+		pprof.Labels(
+			"stage", "install-controllers",
+		),
+		func(ctx context.Context) {
+			err = s.installControllers(ctx, controllerConfig, gvrs)
+		},
+	)
+	if err != nil {
 		return err
 	}
 
