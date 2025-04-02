@@ -18,6 +18,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 
@@ -107,6 +109,44 @@ func main() {
 			// silence client-go warnings.
 			// apiserver loopback clients should not log self-issued warnings.
 			rest.SetDefaultWarningHandler(rest.NoWarnings{})
+			return nil
+		},
+		PersistentPostRunE: func(*cobra.Command, []string) error {
+			klog.Info("writing leftover goroutines to leftover-goroutines.log")
+
+			grab := func(uri, out string) error {
+				p, err := http.Get(uri)
+				if err != nil {
+					return err
+				}
+				defer p.Body.Close()
+
+				f, err := os.OpenFile(out, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+
+				if _, err := io.Copy(f, p.Body); err != nil {
+					return err
+				}
+				return nil
+			}
+
+			if err := grab(
+				"http://localhost:6060/debug/pprof/goroutine?debug=2",
+				"leftover-goroutines.log",
+			); err != nil {
+				return err
+			}
+
+			if err := grab(
+				"http://localhost:6060/debug/pprof/block",
+				"pprof-block.out",
+			); err != nil {
+				return err
+			}
+
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
