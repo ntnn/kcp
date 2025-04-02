@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/trace"
 	"time"
 
 	extensionsapiserver "k8s.io/apiextensions-apiserver/pkg/apiserver"
@@ -369,6 +370,18 @@ func (s *Server) Run(ctx context.Context) error {
 			time.Sleep(1 * time.Second)
 		}
 	}()
+
+	// Start tracing
+	traceFile, err := os.Create("trace.out")
+	if err != nil {
+		panic(err)
+	}
+	defer traceFile.Close()
+
+	if err := trace.Start(traceFile); err != nil {
+		panic(err)
+	}
+	defer trace.Stop()
 
 	if err := s.AddPostStartHook("kcp-bootstrap-policy", bootstrappolicy.Policy().EnsureRBACPolicy()); err != nil {
 		return err
