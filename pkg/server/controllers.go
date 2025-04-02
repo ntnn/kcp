@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -114,8 +115,16 @@ type controllerWrapper struct {
 }
 
 func (s *Server) startControllers(ctx context.Context) {
-	for _, controller := range s.controllers {
-		go s.runController(ctx, controller)
+	for name, controller := range s.controllers {
+		pprof.Do(
+			ctx,
+			pprof.Labels(
+				"controller", name,
+			),
+			func(ctx context.Context) {
+				go s.runController(ctx, controller)
+			},
+		)
 	}
 }
 
