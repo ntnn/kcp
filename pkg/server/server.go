@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"time"
 
 	extensionsapiserver "k8s.io/apiextensions-apiserver/pkg/apiserver"
@@ -355,6 +356,18 @@ func (s *Server) Run(ctx context.Context) error {
 
 	go func() {
 		http.ListenAndServe(":6060", nil)
+	}()
+
+	f, err := os.Create("goroutines.log")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	go func() {
+		for {
+			f.WriteString(fmt.Sprintf("Goroutines: %d\n", runtime.NumGoroutine()))
+			time.Sleep(1 * time.Second)
+		}
 	}()
 
 	if err := s.AddPostStartHook("kcp-bootstrap-policy", bootstrappolicy.Policy().EnsureRBACPolicy()); err != nil {
