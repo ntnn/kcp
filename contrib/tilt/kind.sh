@@ -24,7 +24,7 @@ case $(uname -m) in
     arm)    dpkg --print-architecture | grep -q "arm64" && ARCH="arm64" || ARCH="arm" ;;
 esac
 
-if [ ! -f "/usr/local/bin/kind" ]; then
+if ! command -v kind &>/dev/null; then
  echo "Installing KIND"
  curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-$ARCH
  chmod +x ./kind
@@ -33,7 +33,7 @@ else
     echo "KIND already installed"
 fi
 
-if [ ! -f "$HOME/.local/bin/tilt" ]; then
+if ! command -v tilt &>/dev/null; then
  echo "Installing TILT"
  curl -fsSL https://raw.githubusercontent.com/tilt-dev/tilt/master/scripts/install.sh | bash
 else
