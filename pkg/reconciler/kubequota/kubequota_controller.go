@@ -19,6 +19,7 @@ package kubequota
 import (
 	"context"
 	"fmt"
+	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -243,12 +244,23 @@ func (c *Controller) process(ctx context.Context, key string) error {
 	ctx = klog.NewContext(ctx, logger)
 	c.cancelFuncs[clusterName] = cancel
 
-	if err := c.startQuotaForLogicalCluster(ctx, clusterName); err != nil {
+	err = nil
+	pprof.Do(
+		ctx,
+		pprof.Labels(
+			"subcontroller", "kubequota",
+			"workspace", clusterName.String(),
+		),
+		func(ctx context.Context) {
+			err = c.startQuotaForLogicalCluster(ctx, clusterName)
+		},
+	)
+	if err != nil {
 		cancel()
-		return fmt.Errorf("error starting quota controller for cluster %q: %w", clusterName, err)
+		err = fmt.Errorf("error starting quota controller for cluster %q: %w", clusterName, err)
 	}
 
-	return nil
+	return err
 }
 
 func (c *Controller) startQuotaForLogicalCluster(ctx context.Context, clusterName logicalcluster.Name) error {
@@ -277,7 +289,17 @@ func (c *Controller) startQuotaForLogicalCluster(ctx context.Context, clusterNam
 		Registry:             generic.NewRegistry(quotaConfiguration.Evaluators()),
 	}
 
-	resourceQuotaController, err := resourcequota.NewController(ctx, resourceQuotaControllerOptions)
+	var resourceQuotaController *resourcequota.Controller
+	var err error
+	pprof.Do(
+		ctx,
+		pprof.Labels(
+			"comment", "resourceQuotaController",
+		),
+		func(ctx context.Context) {
+			resourceQuotaController, err = resourcequota.NewController(ctx, resourceQuotaControllerOptions)
+		},
+	)
 	if err != nil {
 		return err
 	}
@@ -298,9 +320,26 @@ func (c *Controller) startQuotaForLogicalCluster(ctx context.Context, clusterNam
 			resourceQuotaController.UpdateMonitors(ctx, c.dynamicDiscoverySharedInformerFactory.ServerPreferredResources)
 		},
 	}
-	go quotaController.Start(ctx)
+	pprof.Do(
+		ctx,
+		pprof.Labels(
+			"comment", "quotaController",
+		),
+		func(ctx context.Context) {
+			go quotaController.Start(ctx)
+		},
+	)
 
-	apisChanged := c.dynamicDiscoverySharedInformerFactory.Subscribe("quota-" + clusterName.String())
+	var apisChanged <-chan struct{}
+	pprof.Do(
+		ctx,
+		pprof.Labels(
+			"comment", "apisChanged",
+		),
+		func(ctx context.Context) {
+			apisChanged = c.dynamicDiscoverySharedInformerFactory.Subscribe("quota-" + clusterName.String())
+		},
+	)
 
 	go func() {
 		for {
@@ -314,13 +353,21 @@ func (c *Controller) startQuotaForLogicalCluster(ctx context.Context, clusterNam
 		}
 	}()
 
-	// Do this in a goroutine to avoid holding up a worker in the event UpdateMonitors stalls for whatever reason
-	go func() {
-		// Make sure the monitors are synced at least once
-		resourceQuotaController.UpdateMonitors(ctx, c.dynamicDiscoverySharedInformerFactory.ServerPreferredResources)
+	pprof.Do(
+		ctx,
+		pprof.Labels(
+			"comment", "inital sync and loop",
+		),
+		func(ctx context.Context) {
+			// Do this in a goroutine to avoid holding up a worker in the event UpdateMonitors stalls for whatever reason
+			go func() {
+				// Make sure the monitors are synced at least once
+				resourceQuotaController.UpdateMonitors(ctx, c.dynamicDiscoverySharedInformerFactory.ServerPreferredResources)
 
-		go resourceQuotaController.Run(ctx, c.workersPerLogicalCluster)
-	}()
+				go resourceQuotaController.Run(ctx, c.workersPerLogicalCluster)
+			}()
+		},
+	)
 
 	return nil
 }
