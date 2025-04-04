@@ -210,7 +210,7 @@ func (s *Server) installKubeNamespaceController(ctx context.Context, config *res
 	// the constructor sets up event handlers on shared informers, which instructs the factory
 	// which informers need to be started. The shared informer factories are started in their
 	// own post-start hook.
-	c := namespace.NewNamespaceController(
+	c, err := namespace.NewNamespaceController(
 		ctx,
 		kubeClient,
 		metadata,
@@ -219,6 +219,9 @@ func (s *Server) installKubeNamespaceController(ctx context.Context, config *res
 		time.Duration(5)*time.Minute,
 		corev1.FinalizerKubernetes,
 	)
+	if err != nil {
+		return err
+	}
 
 	return s.registerController(&controllerWrapper{
 		Name: controllerName,
