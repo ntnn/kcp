@@ -17,6 +17,7 @@ limitations under the License.
 package framework
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -34,6 +35,9 @@ func TestServer(t *testing.T) {
 func TestServerCreateConfigMap(t *testing.T) {
 	_, kubeClient, _ := StartTestServer(t)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	configmap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test",
@@ -47,6 +51,6 @@ func TestServerCreateConfigMap(t *testing.T) {
 	_, err := kubeClient.Cluster(core.RootCluster.Path()).
 		CoreV1().
 		ConfigMaps(metav1.NamespaceDefault).
-		Create(t.Context(), configmap, metav1.CreateOptions{})
+		Create(ctx, configmap, metav1.CreateOptions{})
 	require.Nil(t, err)
 }
