@@ -114,27 +114,25 @@ func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernete
 
 	kcpServerClientConfig := rest.CopyConfig(completedConfig.GenericConfig.LoopbackClientConfig)
 
-	if err := wait.PollImmediate(1*time.Second, 60*time.Second, func() (done bool, err error) {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
+	if err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 60*time.Second, true,
+		func(ctx context.Context) (done bool, err error) {
+			healthzConfig := rest.CopyConfig(kcpServerClientConfig)
+			kcpClient, err := client.NewForConfig(healthzConfig)
+			if err != nil {
+				// this happens because we race the API server start
+				tb.Log(err)
+				return false, nil
+			}
 
-		healthzConfig := rest.CopyConfig(kcpServerClientConfig)
-		kcpClient, err := client.NewForConfig(healthzConfig)
-		if err != nil {
-			// this happens because we race the API server start
-			tb.Log(err)
-			return false, nil
-		}
+			healthStatus := 0
+			kcpClient.Discovery().RESTClient().Get().AbsPath("/healthz").Do(ctx).StatusCode(&healthStatus)
+			if healthStatus != http.StatusOK {
+				return false, nil
+			}
 
-		healthStatus := 0
-		kcpClient.Discovery().RESTClient().Get().AbsPath("/healthz").Do(ctx).StatusCode(&healthStatus)
-		if healthStatus != http.StatusOK {
-			return false, nil
-		}
-
-		return true, nil
-	}); err != nil {
+			return true, nil
+		},
+	); err != nil {
 		tb.Fatal(err)
 	}
 
