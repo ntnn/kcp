@@ -47,7 +47,8 @@ import (
 func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernetesclientset.ClusterInterface, func()) {
 	tb.Helper()
 
-	ctx, cancel := context.WithCancel(tb.Context())
+	ctx, cancel := context.WithCancel(context.Background())
+	tb.Cleanup(cancel)
 
 	kcpOptions := options.NewOptions(tb.TempDir())
 
