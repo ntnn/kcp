@@ -24,8 +24,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"sync/atomic"
-	"unsafe"
 
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/klog/v2"
@@ -46,12 +44,14 @@ func DefaultTransportWrapper(rt http.RoundTripper) http.RoundTripper {
 		return rt
 	}
 
-	// This function may be called from different goroutines on the same
-	// `rt` at the same time, causing a data race.
-	// To preven this race .DialContext is swapped atomically.
-	defaultDialContext := DefaultDialContext()
-	trDialContext := unsafe.Pointer(&tr.DialContext)
-	atomic.StorePointer(&trDialContext, unsafe.Pointer(&defaultDialContext))
+	tr.DialContext = DefaultDialContext()
+
+	// // This function may be called from different goroutines on the same
+	// // `rt` at the same time, causing a data race.
+	// // To preven this race .DialContext is swapped atomically.
+	// defaultDialContext := DefaultDialContext()
+	// trDialContext := unsafe.Pointer(&tr.DialContext)
+	// atomic.StorePointer(&trDialContext, unsafe.Pointer(&defaultDialContext))
 
 	return rt
 }

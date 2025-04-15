@@ -25,7 +25,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"sync"
 
 	apiextensionsapiserver "k8s.io/apiextensions-apiserver/pkg/apiserver"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -208,15 +207,26 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 
 	// break connections on the tcp layer. Setting the client timeout would
 	// also apply to watches, which we don't want.
-	// To prevent data races when wrapping the default transport in
-	// multiple goroutines the wrapping is done in a once.
-	var wrapDefaultTransportWrapper = sync.Once{}
-	c.GenericConfig.LoopbackClientConfig.Wrap(func(rt http.RoundTripper) http.RoundTripper {
-		wrapDefaultTransportWrapper.Do(func() {
-			rt = network.DefaultTransportWrapper(rt)
-		})
-		return rt
-	})
+	transport := network.DefaultTransportWrapper(http.DefaultTransport.(*http.Transport).Clone())
+
+	c.GenericConfig.LoopbackClientConfig.Transport = transport
+	// Required
+	// c.GenericConfig.LoopbackClientConfig.TLSClientConfig.Insecure = false
+	c.GenericConfig.LoopbackClientConfig.TLSClientConfig = rest.TLSClientConfig{
+		Insecure: false,
+	}
+
+	// network.DefaultTransportWrapper(c.GenericConfig.LoopbackClientConfig.Transport)
+
+	// // To prevent data races when wrapping the default transport in
+	// // multiple goroutines the wrapping is done in a once.
+	// var wrapDefaultTransportWrapper = sync.Once{}
+	// c.GenericConfig.LoopbackClientConfig.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+	// 	wrapDefaultTransportWrapper.Do(func() {
+	// 		rt = network.DefaultTransportWrapper(rt)
+	// 	})
+	// 	return rt
+	// })
 
 	// Set effective version to the default kube version of the vendored libs.
 	c.GenericConfig.EffectiveVersion = utilversion.DefaultKubeEffectiveVersion()
