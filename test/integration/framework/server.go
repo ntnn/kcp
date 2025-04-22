@@ -83,7 +83,8 @@ func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernete
 		tb.Fatalf("failed to complete server config: %v", err)
 	}
 
-	if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(ctx); err != nil {
+	etcdCtx, etcdCancel := context.WithCancel(ctx)
+	if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(etcdCtx); err != nil {
 		tb.Fatalf("failed to run embedded etcd server: %v", err)
 	}
 
@@ -92,11 +93,24 @@ func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernete
 		tb.Fatalf("failed to create server: %v", err)
 	}
 
+	kcpCtx, kcpCancel := context.WithCancel(ctx)
+	kcpWait := make(chan struct{})
+
 	go func() {
-		if err := s.Run(ctx); err != nil {
+		defer close(kcpWait)
+		if err := s.Run(kcpCtx); err != nil {
 			tb.Fatalf("failed to run server: %v", err)
 		}
 	}()
+
+	retCancel := func() {
+		kcpCancel()
+		// Killing etcd instantly after killing kcp will lead to
+		// a longer wait time as kcp will try to finish writing to etcd
+		// and error on timeout.
+		<-kcpWait
+		etcdCancel()
+	}
 
 	kcpServerClientConfig := rest.CopyConfig(completedConfig.GenericConfig.LoopbackClientConfig)
 
@@ -132,5 +146,5 @@ func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernete
 		tb.Fatal(err)
 	}
 
-	return kcpClusterClient, kubeClusterClient, cancel
+	return kcpClusterClient, kubeClusterClient, retCancel
 }
