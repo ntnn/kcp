@@ -69,7 +69,8 @@ export LOGCHECK # so hack scripts can use it
 
 CODE_GENERATOR_VER := f78b79a2f905778087cbd266cda10d47997f0bdf
 CODE_GENERATOR_BIN := code-generator
-CODE_GENERATOR := $(TOOLS_GOBIN_DIR)/$(CODE_GENERATOR_BIN)-$(CODE_GENERATOR_VER)
+# CODE_GENERATOR := $(TOOLS_GOBIN_DIR)/$(CODE_GENERATOR_BIN)-$(CODE_GENERATOR_VER)
+CODE_GENERATOR := go run ../kcp-code-generator
 export CODE_GENERATOR # so hack scripts can use it
 
 KCP_APIGEN_BIN := apigen

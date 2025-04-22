@@ -51,6 +51,7 @@ const (
 
 type scopeableInformerFactory interface {
 	Cluster(logicalcluster.Name) kcpkubernetesinformers.ScopedDynamicSharedInformerFactory
+	// ContextAwareCluster(context.Context, logicalcluster.Name) kcpkubernetesinformers.ScopedDynamicSharedInformerFactory
 }
 
 // Controller manages per-workspace resource quota controllers.
