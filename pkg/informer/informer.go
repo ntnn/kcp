@@ -282,6 +282,37 @@ func (d *scopedDiscoveringDynamicSharedInformerFactory) ForResource(gvr schema.G
 	return clusterInformer.Cluster(d.cluster), nil
 }
 
+func (d *DiscoveringDynamicSharedInformerFactory) ContextAwareCluster(ctx context.Context, cluster logicalcluster.Name) kcpinformers.ScopedDynamicSharedInformerFactory {
+	informerFactory := &scopedContextAwareDiscoveringDynamicSharedInformerFactory{
+		DiscoveringDynamicSharedInformerFactory: d,
+		cluster:                                 cluster,
+		ctx:                                     ctx,
+	}
+
+	// go func() {
+	// 	<-ctx.Done()
+	// 	informerFactory.TODODROP()
+	// }()
+
+	return informerFactory
+}
+
+type scopedContextAwareDiscoveringDynamicSharedInformerFactory struct {
+	*DiscoveringDynamicSharedInformerFactory
+	cluster logicalcluster.Name
+	// TODO not a good idea, maybe replace with ctx.Done() and then
+	// build a new context from there?
+	ctx context.Context
+}
+
+func (d *scopedContextAwareDiscoveringDynamicSharedInformerFactory) ForResource(gvr schema.GroupVersionResource) (informers.GenericInformer, error) {
+	clusterInformer, err := d.DiscoveringDynamicSharedInformerFactory.ContextAwareForResource(d.ctx, gvr)
+	if err != nil {
+		return nil, err
+	}
+	return clusterInformer.Cluster(d.cluster), nil
+}
+
 // ForResource returns the GenericInformer for gvr, creating it if needed. The GenericInformer must be started
 // by calling Start on the GenericDiscoveringDynamicSharedInformerFactory before the GenericInformer can be used.
 func (d *GenericDiscoveringDynamicSharedInformerFactory[Informer, Lister, GenericInformer]) ForResource(gvr schema.GroupVersionResource) (GenericInformer, error) {
@@ -299,6 +330,56 @@ func (d *GenericDiscoveringDynamicSharedInformerFactory[Informer, Lister, Generi
 	defer d.informersLock.Unlock()
 
 	return d.informerForResourceLockHeld(gvr), nil
+}
+
+func (d *GenericDiscoveringDynamicSharedInformerFactory[Informer, Lister, GenericInformer]) ContextAwareForResource(ctx context.Context, gvr schema.GroupVersionResource) (GenericInformer, error) {
+	// TODO needed?
+	d.informersLock.Lock()
+	defer d.informersLock.Unlock()
+	// TODO end
+
+	cacheIndexers := cache.Indexers{}
+	for k, v := range d.indexers {
+		if k == cache.NamespaceIndex {
+			// Don't allow overriding NamespaceIndex
+			continue
+		}
+
+		cacheIndexers[k] = v
+	}
+
+	inf := d.newInformer(gvr, resyncPeriod, cacheIndexers)
+
+	handler, err := inf.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: d.filterFunc,
+		Handler: cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				for _, h := range d.handlers.Load().([]GVREventHandler) {
+					h.OnAdd(gvr, obj)
+				}
+			},
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				for _, h := range d.handlers.Load().([]GVREventHandler) {
+					h.OnUpdate(gvr, oldObj, newObj)
+				}
+			},
+			DeleteFunc: func(obj interface{}) {
+				for _, h := range d.handlers.Load().([]GVREventHandler) {
+					h.OnDelete(gvr, obj)
+				}
+			},
+		},
+	})
+	if err != nil {
+		return inf, err
+	}
+
+	go func() {
+		<-ctx.Done()
+		utilruntime.HandleError(inf.Informer().RemoveEventHandler(handler))
+	}()
+
+	return inf, nil
 }
 
 // informerForResourceLockHeld returns the GenericInformer for gvr, creating it if needed. The caller must have the write
