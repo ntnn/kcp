@@ -116,8 +116,7 @@ func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernete
 
 	if err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 60*time.Second, true,
 		func(ctx context.Context) (done bool, err error) {
-			healthzConfig := rest.CopyConfig(kcpServerClientConfig)
-			kcpClient, err := client.NewForConfig(healthzConfig)
+			kcpClient, err := client.NewForConfig(kcpServerClientConfig)
 			if err != nil {
 				// this happens because we race the API server start
 				tb.Log(err)
