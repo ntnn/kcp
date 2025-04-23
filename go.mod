@@ -22,6 +22,7 @@ require (
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.6
 	github.com/stretchr/testify v1.9.0
+	go.uber.org/goleak v1.3.0
 	go.uber.org/multierr v1.11.0
 	golang.org/x/sys v0.30.0
 	gopkg.in/square/go-jose.v2 v2.6.0
@@ -201,3 +202,5 @@ replace (
 	k8s.io/sample-cli-plugin => github.com/kcp-dev/kubernetes/staging/src/k8s.io/sample-cli-plugin v0.0.0-20250313100806-0011b8c72acd
 	k8s.io/sample-controller => github.com/kcp-dev/kubernetes/staging/src/k8s.io/sample-controllerd v0.0.0-20250313100806-0011b8c72acd
 )
+
+replace go.uber.org/goleak => ../../goleak/
