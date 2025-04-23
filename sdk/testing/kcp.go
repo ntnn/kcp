@@ -36,9 +36,13 @@ var fs embed.FS
 func PrivateKcpServer(t TestingT, options ...kcptestingserver.Option) kcptestingserver.RunningServer {
 	t.Helper()
 
-	serverName := "main"
-
-	cfg := &kcptestingserver.Config{Name: serverName}
+	cfg := &kcptestingserver.Config{
+		Name:         t.Name(),
+		ArtifactDir:  filepath.Join(t.TempDir(), "artifacts"),
+		DataDir:      filepath.Join(t.TempDir(), "data"),
+		ClientCADir:  filepath.Join(t.TempDir(), "ca"),
+		LogToConsole: false,
+	}
 	for _, opt := range options {
 		opt(cfg)
 	}
@@ -62,7 +66,7 @@ func PrivateKcpServer(t TestingT, options ...kcptestingserver.Option) kcptesting
 	}
 
 	f := kcptestingserver.NewFixture(t, *cfg)
-	return f[serverName]
+	return f[t.Name()]
 }
 
 // SharedKcpServer returns a kcp server fixture intended to be shared

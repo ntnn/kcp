@@ -82,6 +82,10 @@ type externalKCPServer struct {
 	caDir                string
 }
 
+func (s *externalKCPServer) Cancel() {
+	return
+}
+
 func (s *externalKCPServer) CADirectory() string {
 	return s.caDir
 }

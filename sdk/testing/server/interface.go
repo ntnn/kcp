@@ -33,4 +33,7 @@ type RunningServer interface {
 	Artifact(t TestingT, producer func() (runtime.Object, error))
 	ClientCAUserConfig(t TestingT, config *rest.Config, name string, groups ...string) *rest.Config
 	CADirectory() string
+	// Cancel only works on in process servers. It is a noop on external
+	// servers.
+	Cancel()
 }

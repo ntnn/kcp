@@ -16,6 +16,8 @@ limitations under the License.
 
 package server
 
+import "context"
+
 // Config qualify a kcp server to start
 //
 // Deprecated for use outside this package. Prefer PrivateKcpServer().
@@ -26,8 +28,9 @@ type Config struct {
 	DataDir     string
 	ClientCADir string
 
-	LogToConsole bool
-	RunInProcess bool
+	LogToConsole    bool
+	RunInProcess    bool
+	RunInProcessCtx context.Context //nolint:containedctx
 }
 
 // Option a function that wish to modify a given kcp configuration.
@@ -62,6 +65,13 @@ func WithClientCA(clientCADir string) Option {
 func WithRunInProcess() Option {
 	return func(cfg *Config) {
 		cfg.RunInProcess = true
+	}
+}
+
+func WithRunInProcessWithContext(ctx context.Context) Option {
+	return func(cfg *Config) {
+		cfg.RunInProcess = true
+		cfg.RunInProcessCtx = ctx
 	}
 }
 
