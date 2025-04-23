@@ -12,11 +12,11 @@ var (
 		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/v3.(*watchGrpcStream).run"),
 
 		// TODOs
-		goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/registry/generic/registry.(*Store).startObservingCount"),
-		goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/server/healthz.(*log).Check.func1"),
-		goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/storage/cacher.(*watchCache).waitUntilFreshAndBlock"),
-		goleak.IgnoreCreatedBy("k8s.io/client-go/util/workqueue.newDelayingQueue[...]"),
-		goleak.IgnoreCreatedBy("k8s.io/client-go/util/workqueue.newQueue[...]"),
+		// goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/registry/generic/registry.(*Store).startObservingCount"),
+		// goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/server/healthz.(*log).Check.func1"),
+		// goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/storage/cacher.(*watchCache).waitUntilFreshAndBlock"),
+		// goleak.IgnoreCreatedBy("k8s.io/client-go/util/workqueue.newDelayingQueue[...]"),
+		// goleak.IgnoreCreatedBy("k8s.io/client-go/util/workqueue.newQueue[...]"),
 
 		// expected kube leaks
 		goleak.IgnoreTopFunction("k8s.io/apiserver/pkg/storage/cacher.(*watchCache).waitUntilFreshAndBlock.func2"),

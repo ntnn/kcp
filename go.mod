@@ -202,5 +202,3 @@ replace (
 	k8s.io/sample-cli-plugin => github.com/kcp-dev/kubernetes/staging/src/k8s.io/sample-cli-plugin v0.0.0-20250313100806-0011b8c72acd
 	k8s.io/sample-controller => github.com/kcp-dev/kubernetes/staging/src/k8s.io/sample-controllerd v0.0.0-20250313100806-0011b8c72acd
 )
-
-replace go.uber.org/goleak => ../../goleak/
