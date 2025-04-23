@@ -8,32 +8,27 @@ import (
 
 var (
 	IgnoreEtcdGoroutines = []goleak.Option{
-		goleak.IgnoreTopFunction("go.etcd.io/etcd/server/v3/etcdserver/api/v3rpc.(*watchServer).Watch"),
-		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/v3.(*watchGrpcStream).run"),
+		// ignore klog
+		goleak.IgnoreCreatedBy("k8s.io/klog/v2.(*flushDaemon).run"),
 
-		// TODOs
-		// goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/registry/generic/registry.(*Store).startObservingCount"),
-		// goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/server/healthz.(*log).Check.func1"),
-		// goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/storage/cacher.(*watchCache).waitUntilFreshAndBlock"),
-		// goleak.IgnoreCreatedBy("k8s.io/client-go/util/workqueue.newDelayingQueue[...]"),
-		// goleak.IgnoreCreatedBy("k8s.io/client-go/util/workqueue.newQueue[...]"),
+		// ignore if etcd leaks stuff
+		goleak.IgnoreCreatedBy("github.com/kcp-dev/embeddedetcd.(*Server).Run"),
+		goleak.IgnoreCreatedBy("go.etcd.io/etcd/client/v3.(*watchGrpcStream).run"),
+
+		// random grpc leaks
+		goleak.IgnoreCreatedBy("google.golang.org/grpc.(*acBalancerWrapper).Connect"),
+		goleak.IgnoreCreatedBy("google.golang.org/grpc/internal/grpcsync.NewCallbackSerializer"),
+
+		// expected kcp leaks
+		goleak.IgnoreCreatedBy("github.com/kcp-dev/kcp/pkg/informer.NewGenericDiscoveringDynamicSharedInformerFactory[...]"),
 
 		// expected kube leaks
-		goleak.IgnoreTopFunction("k8s.io/apiserver/pkg/storage/cacher.(*watchCache).waitUntilFreshAndBlock.func2"),
-		goleak.IgnoreTopFunction("k8s.io/apimachinery/pkg/util/wait.BackoffUntil"),
-		goleak.IgnoreTopFunction("k8s.io/client-go/util/workqueue.(*delayingType[...]).waitingLoop"),
-		goleak.IgnoreTopFunction("k8s.io/client-go/util/workqueue.(*Typed[...]).updateUnfinishedWorkLoop"),
-
-		// new kube leaks? o.O
-		goleak.IgnoreTopFunction("k8s.io/apiserver/pkg/storage/storagebackend/factory.newETCD3Check.func2"),
-
-		// random grpc leaks that need to be investigated
-		goleak.IgnoreTopFunction("google.golang.org/grpc/internal/grpcsync.NewCallbackSerializer"),
-		goleak.IgnoreTopFunction("google.golang.org/grpc.(*addrConn).resetTransport"),
-		goleak.IgnoreTopFunction("google.golang.org/grpc/internal/grpcsync.(*CallbackSerializer).run"),
-
-		// Leaks in KCP that are just a todo:
-		goleak.IgnoreTopFunction("github.com/kcp-dev/kcp/pkg/informer.NewGenericDiscoveringDynamicSharedInformerFactory[...].func3"),
+		goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/registry/generic/registry.(*Store).startObservingCount"),
+		goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/server/healthz.(*log).Check.func1"),
+		goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/storage/cacher.(*watchCache).waitUntilFreshAndBlock"),
+		goleak.IgnoreCreatedBy("k8s.io/apiserver/pkg/storage/storagebackend/factory.newETCD3Check"),
+		goleak.IgnoreCreatedBy("k8s.io/client-go/util/workqueue.newDelayingQueue[...]"),
+		goleak.IgnoreCreatedBy("k8s.io/client-go/util/workqueue.newQueue[...]"),
 	}
 )
 

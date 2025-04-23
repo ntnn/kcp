@@ -18,15 +18,11 @@ package framework
 
 import (
 	"context"
-	"errors"
-	"net"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"k8s.io/client-go/rest"
-	"k8s.io/component-base/cli"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/cli/globalflag"
 	"k8s.io/component-base/logs"
@@ -40,22 +36,30 @@ import (
 	"github.com/kcp-dev/kcp/pkg/server"
 	kcpclientset "github.com/kcp-dev/kcp/sdk/client/clientset/versioned/cluster"
 
+	kcptesting "github.com/kcp-dev/kcp/sdk/testing"
 	kcptestingserver "github.com/kcp-dev/kcp/sdk/testing/server"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	genericapiserver "k8s.io/apiserver/pkg/server"
 )
 
 func init() {
 	kcptestingserver.RunInProcessFunc = RunKCPInProcess
 }
 
-func RunKCPInProcess(tb kcptestingserver.TestingT, dataDir string, args []string) (<-chan struct{}, error) {
+func RunKCPInProcess(kcpCtx context.Context, tb kcptestingserver.TestingT, dataDir string, args []string) (<-chan struct{}, error) {
 	kcpOptions := options.NewOptions(dataDir)
 	// kcpOptions.Server.GenericControlPlane.Logs.Verbosity = logsapiv1.VerbosityLevel(2)
 	// kcpOptions.Server.Extra.AdditionalMappingsFile = additionalMappingsFile
 
 	fss := cliflag.NamedFlagSets{}
 	kcpOptions.AddFlags(&fss)
+
+	// Setting up a separate context that will be cancelled in the
+	// goroutine running kcp.
+	// This context cannot come from kcpCtx because kcpCtx gets
+	// cancelled to signal the shutdown. When the shutdown happens kcp
+	// will need to finish writing to etcd before etcd can shutdown,
+	// otherwise there will be goroutines popping up in the leak tests.
+	etcdCtx, etcdCancel := context.WithCancel(context.Background())
 
 	startCmd := &cobra.Command{
 		PersistentPreRunE: func(*cobra.Command, []string) error {
@@ -82,9 +86,7 @@ func RunKCPInProcess(tb kcptestingserver.TestingT, dataDir string, args []string
 			logger := klog.FromContext(cmd.Context())
 			logger.Info("running with selected batteries", "batteries", strings.Join(completedKcpOptions.Server.Extra.BatteriesIncluded, ","))
 
-			ctx := genericapiserver.SetupSignalContext()
-
-			serverConfig, err := server.NewConfig(ctx, completedKcpOptions.Server)
+			serverConfig, err := server.NewConfig(kcpCtx, completedKcpOptions.Server)
 			if err != nil {
 				return err
 			}
@@ -96,7 +98,7 @@ func RunKCPInProcess(tb kcptestingserver.TestingT, dataDir string, args []string
 
 			// the etcd server must be up before NewServer because storage decorators access it right away
 			if completedConfig.EmbeddedEtcd.Config != nil {
-				if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(ctx); err != nil {
+				if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(etcdCtx); err != nil {
 					return err
 				}
 			}
@@ -105,16 +107,22 @@ func RunKCPInProcess(tb kcptestingserver.TestingT, dataDir string, args []string
 			if err != nil {
 				return err
 			}
-			return s.Run(ctx)
+			return s.Run(kcpCtx)
 		},
 	}
 
 	globalflag.AddGlobalFlags(fss.FlagSet("global"), startCmd.Name(), logs.SkipLoggingConfigurationFlags())
 
+	if err := startCmd.ValidateArgs(args); err != nil {
+		return nil, err
+	}
+
 	stopCh := make(chan struct{})
 	go func() {
 		defer close(stopCh)
-		if err := cli.RunNoErrOutput(startCmd); err != nil {
+		defer etcdCancel()
+		logs.InitLogs()
+		if err := startCmd.Execute(); err != nil {
 			tb.Errorf("error in kcp: %w", err)
 		}
 	}()
@@ -131,135 +139,24 @@ func RunKCPInProcess(tb kcptestingserver.TestingT, dataDir string, args []string
 func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernetesclientset.ClusterInterface, func()) {
 	tb.Helper()
 
-	// server := kcptesting.PrivateKcpServer(
-	// 	tb,
-	// 	kcptestingserver.WithScratchDirectories(
-	// 		filepath.Join(tb.TempDir(), "artifact"),
-	// 		filepath.Join(tb.TempDir(), "data"),
-	// 	),
-	// 	kcptestingserver.WithRunInProcess(),
-	// )
-	//
-	// kcpClusterClient, err := kcpclientset.NewForConfig(server.BaseConfig(tb))
-	// if err != nil {
-	// 	tb.Fatal(err)
-	// }
-	//
-	// kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(server.BaseConfig(tb))
-	// if err != nil {
-	// 	tb.Fatal(err)
-	// }
-	//
-	// return kcpClusterClient, kubeClusterClient, func() { return }
+	server := kcptesting.PrivateKcpServer(
+		tb,
+		kcptestingserver.WithScratchDirectories(
+			filepath.Join(tb.TempDir(), "artifact"),
+			filepath.Join(tb.TempDir(), "data"),
+		),
+		kcptestingserver.WithRunInProcess(),
+	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	tb.Cleanup(cancel)
-
-	kcpOptions := options.NewOptions(tb.TempDir())
-
-	etcdClientPort, etcdPeerPort, kcpBindPort, err := unusedPorts()
-	if err != nil {
-		tb.Fatalf("failed to get three available ports: %v", err)
-	}
-
-	kcpOptions.Server.EmbeddedEtcd.ClientPort = strconv.Itoa(etcdClientPort)
-	kcpOptions.Server.EmbeddedEtcd.PeerPort = strconv.Itoa(etcdPeerPort)
-	kcpOptions.Server.EmbeddedEtcd.Directory = filepath.Join(tb.TempDir(), "etcd")
-
-	kcpOptions.Server.GenericControlPlane.SecureServing.BindAddress = net.ParseIP("127.0.0.1")
-	kcpOptions.Server.GenericControlPlane.SecureServing.BindPort = kcpBindPort
-
-	completedKcpOptions, err := kcpOptions.Complete()
-	if err != nil {
-		tb.Fatalf("failed to complete kcp options: %v", err)
-	}
-
-	if errs := completedKcpOptions.Validate(); len(errs) > 0 {
-		tb.Fatalf("failed to validate kcp options: %v", errors.Join(errs...))
-	}
-
-	serverConfig, err := server.NewConfig(ctx, completedKcpOptions.Server)
-	if err != nil {
-		tb.Fatalf("failed to create server config: %v", err)
-	}
-
-	completedConfig, err := serverConfig.Complete()
-	if err != nil {
-		tb.Fatalf("failed to complete server config: %v", err)
-	}
-
-	etcdCtx, etcdCancel := context.WithCancel(ctx)
-	if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(etcdCtx); err != nil {
-		tb.Fatalf("failed to run embedded etcd server: %v", err)
-	}
-
-	s, err := server.NewServer(completedConfig)
-	if err != nil {
-		tb.Fatalf("failed to create server: %v", err)
-	}
-
-	kcpCtx, kcpCancel := context.WithCancel(ctx)
-	kcpWait := make(chan struct{})
-
-	go func() {
-		defer close(kcpWait)
-		if err := s.Run(kcpCtx); err != nil {
-			tb.Fatalf("failed to run server: %v", err)
-		}
-	}()
-
-	retCancel := func() {
-		kcpCancel()
-		// Killing etcd instantly after killing kcp will lead to
-		// a longer wait time as kcp will try to finish writing to etcd
-		// and error on timeout.
-		<-kcpWait
-		etcdCancel()
-	}
-
-	kcpServerClientConfig := rest.CopyConfig(completedConfig.GenericConfig.LoopbackClientConfig)
-
-	if err := kcptestingserver.WaitForReady(ctx, kcpServerClientConfig); err != nil {
-		tb.Fatal(err)
-	}
-
-	// getting an odd error that prevents logical clusters from being
-	// created because of an unmarshalling error? o.O
-	//
-	// E0423 11:44:16.499599    3563 apibinder_initializer_reconcile.go:199] "error initializing APIBindings" err="an error on the server (\"could not unmarshal user info for cluster \\\"1m4x1xy6vg7hfy26\\\": unexpected end of JSON input\") has prevented the request from succeeding (post apibindings.apis.kcp.io)" component="kcp" postStartHook="kcp-start-controllers" reconciler="kcp-apibinder-initializer" key="1m4x1xy6vg7hfy26|cluster" logicalcluster.workspace="1m4x1xy6vg7hfy26" logicalcluster.namespace="" logicalcluster.name="cluster" logicalcluster.apiVersion="" workspacetype.path="root" workspacetype.name="organization"
-
-	// time.Sleep(5 * time.Second)
-
-	// if err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 60*time.Second, true,
-	// 	func(ctx context.Context) (done bool, err error) {
-	// 		kcpClient, err := client.NewForConfig(kcpServerClientConfig)
-	// 		if err != nil {
-	// 			// this happens because we race the API server start
-	// 			tb.Log(err)
-	// 			return false, nil
-	// 		}
-	//
-	// 		healthStatus := 0
-	// 		kcpClient.Discovery().RESTClient().Get().AbsPath("/healthz").Do(ctx).StatusCode(&healthStatus)
-	// 		if healthStatus != http.StatusOK {
-	// 			return false, nil
-	// 		}
-	//
-	// 		return true, nil
-	// 	},
-	// ); err != nil {
-	// 	tb.Fatal(err)
-	// }
-
-	kcpClusterClient, err := kcpclientset.NewForConfig(kcpServerClientConfig)
+	kcpClusterClient, err := kcpclientset.NewForConfig(server.BaseConfig(tb))
 	if err != nil {
 		tb.Fatal(err)
 	}
 
-	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(kcpServerClientConfig)
+	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(server.BaseConfig(tb))
 	if err != nil {
 		tb.Fatal(err)
 	}
 
-	return kcpClusterClient, kubeClusterClient, retCancel
+	return kcpClusterClient, kubeClusterClient, server.Cancel
 }
