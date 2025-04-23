@@ -21,7 +21,7 @@ import (
 func TestWorkspaceDeletionLeak(t *testing.T) {
 	kcpClient, _, cancel := framework.StartTestServer(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 
 	curGoroutines := goleak.IgnoreCurrent()
 

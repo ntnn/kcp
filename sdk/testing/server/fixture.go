@@ -306,6 +306,7 @@ func (c *kcpServer) Run(opts ...RunOption) error {
 	// run kcp start in-process for easier debugging
 	if runOpts.runInProcess {
 		if RunInProcessFunc == nil {
+			cleanup()
 			return fmt.Errorf("RunInProcessFunc is not set")
 		}
 		rootDir := ".kcp"

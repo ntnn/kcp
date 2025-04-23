@@ -20,23 +20,107 @@ import (
 	"context"
 	"errors"
 	"net"
-	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
-	"time"
 
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
+	"k8s.io/component-base/cli"
+	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/component-base/cli/globalflag"
+	"k8s.io/component-base/logs"
+	"k8s.io/klog/v2"
 
-	"github.com/kcp-dev/client-go/apiextensions/client"
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
 	"github.com/kcp-dev/embeddedetcd"
+	"github.com/spf13/cobra"
 
 	"github.com/kcp-dev/kcp/cmd/kcp/options"
 	"github.com/kcp-dev/kcp/pkg/server"
 	kcpclientset "github.com/kcp-dev/kcp/sdk/client/clientset/versioned/cluster"
+
+	kcptestingserver "github.com/kcp-dev/kcp/sdk/testing/server"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	genericapiserver "k8s.io/apiserver/pkg/server"
 )
+
+func init() {
+	kcptestingserver.RunInProcessFunc = RunKCPInProcess
+}
+
+func RunKCPInProcess(tb kcptestingserver.TestingT, dataDir string, args []string) (<-chan struct{}, error) {
+	kcpOptions := options.NewOptions(dataDir)
+	// kcpOptions.Server.GenericControlPlane.Logs.Verbosity = logsapiv1.VerbosityLevel(2)
+	// kcpOptions.Server.Extra.AdditionalMappingsFile = additionalMappingsFile
+
+	fss := cliflag.NamedFlagSets{}
+	kcpOptions.AddFlags(&fss)
+
+	startCmd := &cobra.Command{
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			// silence client-go warnings.
+			// apiserver loopback clients should not log self-issued warnings.
+			rest.SetDefaultWarningHandler(rest.NoWarnings{})
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// run as early as possible to avoid races later when some components (e.g. grpc) start early using klog
+			// if err := logsapiv1.ValidateAndApply(kcpOptions.Server.GenericControlPlane.Logs, kcpfeatures.DefaultFeatureGate); err != nil {
+			// 	return err
+			// }
+
+			completedKcpOptions, err := kcpOptions.Complete()
+			if err != nil {
+				return err
+			}
+
+			if errs := completedKcpOptions.Validate(); len(errs) > 0 {
+				return utilerrors.NewAggregate(errs)
+			}
+
+			logger := klog.FromContext(cmd.Context())
+			logger.Info("running with selected batteries", "batteries", strings.Join(completedKcpOptions.Server.Extra.BatteriesIncluded, ","))
+
+			ctx := genericapiserver.SetupSignalContext()
+
+			serverConfig, err := server.NewConfig(ctx, completedKcpOptions.Server)
+			if err != nil {
+				return err
+			}
+
+			completedConfig, err := serverConfig.Complete()
+			if err != nil {
+				return err
+			}
+
+			// the etcd server must be up before NewServer because storage decorators access it right away
+			if completedConfig.EmbeddedEtcd.Config != nil {
+				if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(ctx); err != nil {
+					return err
+				}
+			}
+
+			s, err := server.NewServer(completedConfig)
+			if err != nil {
+				return err
+			}
+			return s.Run(ctx)
+		},
+	}
+
+	globalflag.AddGlobalFlags(fss.FlagSet("global"), startCmd.Name(), logs.SkipLoggingConfigurationFlags())
+
+	stopCh := make(chan struct{})
+	go func() {
+		defer close(stopCh)
+		if err := cli.RunNoErrOutput(startCmd); err != nil {
+			tb.Errorf("error in kcp: %w", err)
+		}
+	}()
+
+	return stopCh, nil
+}
 
 // StartTestServer starts a KCP server for testing purposes.
 //
@@ -46,6 +130,27 @@ import (
 // the server is implicitly stopped when the test ends.
 func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernetesclientset.ClusterInterface, func()) {
 	tb.Helper()
+
+	// server := kcptesting.PrivateKcpServer(
+	// 	tb,
+	// 	kcptestingserver.WithScratchDirectories(
+	// 		filepath.Join(tb.TempDir(), "artifact"),
+	// 		filepath.Join(tb.TempDir(), "data"),
+	// 	),
+	// 	kcptestingserver.WithRunInProcess(),
+	// )
+	//
+	// kcpClusterClient, err := kcpclientset.NewForConfig(server.BaseConfig(tb))
+	// if err != nil {
+	// 	tb.Fatal(err)
+	// }
+	//
+	// kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(server.BaseConfig(tb))
+	// if err != nil {
+	// 	tb.Fatal(err)
+	// }
+	//
+	// return kcpClusterClient, kubeClusterClient, func() { return }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tb.Cleanup(cancel)
@@ -114,26 +219,37 @@ func StartTestServer(tb testing.TB) (kcpclientset.ClusterInterface, kcpkubernete
 
 	kcpServerClientConfig := rest.CopyConfig(completedConfig.GenericConfig.LoopbackClientConfig)
 
-	if err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 60*time.Second, true,
-		func(ctx context.Context) (done bool, err error) {
-			kcpClient, err := client.NewForConfig(kcpServerClientConfig)
-			if err != nil {
-				// this happens because we race the API server start
-				tb.Log(err)
-				return false, nil
-			}
-
-			healthStatus := 0
-			kcpClient.Discovery().RESTClient().Get().AbsPath("/healthz").Do(ctx).StatusCode(&healthStatus)
-			if healthStatus != http.StatusOK {
-				return false, nil
-			}
-
-			return true, nil
-		},
-	); err != nil {
+	if err := kcptestingserver.WaitForReady(ctx, kcpServerClientConfig); err != nil {
 		tb.Fatal(err)
 	}
+
+	// getting an odd error that prevents logical clusters from being
+	// created because of an unmarshalling error? o.O
+	//
+	// E0423 11:44:16.499599    3563 apibinder_initializer_reconcile.go:199] "error initializing APIBindings" err="an error on the server (\"could not unmarshal user info for cluster \\\"1m4x1xy6vg7hfy26\\\": unexpected end of JSON input\") has prevented the request from succeeding (post apibindings.apis.kcp.io)" component="kcp" postStartHook="kcp-start-controllers" reconciler="kcp-apibinder-initializer" key="1m4x1xy6vg7hfy26|cluster" logicalcluster.workspace="1m4x1xy6vg7hfy26" logicalcluster.namespace="" logicalcluster.name="cluster" logicalcluster.apiVersion="" workspacetype.path="root" workspacetype.name="organization"
+
+	// time.Sleep(5 * time.Second)
+
+	// if err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 60*time.Second, true,
+	// 	func(ctx context.Context) (done bool, err error) {
+	// 		kcpClient, err := client.NewForConfig(kcpServerClientConfig)
+	// 		if err != nil {
+	// 			// this happens because we race the API server start
+	// 			tb.Log(err)
+	// 			return false, nil
+	// 		}
+	//
+	// 		healthStatus := 0
+	// 		kcpClient.Discovery().RESTClient().Get().AbsPath("/healthz").Do(ctx).StatusCode(&healthStatus)
+	// 		if healthStatus != http.StatusOK {
+	// 			return false, nil
+	// 		}
+	//
+	// 		return true, nil
+	// 	},
+	// ); err != nil {
+	// 	tb.Fatal(err)
+	// }
 
 	kcpClusterClient, err := kcpclientset.NewForConfig(kcpServerClientConfig)
 	if err != nil {
