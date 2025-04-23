@@ -18,6 +18,44 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
+func TestWorkspaceLifecycle(t *testing.T) {
+	kcpClient, _, _ := framework.StartTestServer(t)
+
+	ctx := context.Background()
+
+	t.Logf("Create a workspace with a shard")
+	workspace, err := kcpClient.TenancyV1alpha1().Workspaces().Cluster(core.RootCluster.Path()).Create(ctx, &tenancyv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "ws-lifecycle"}}, metav1.CreateOptions{})
+	// workspace, err := kcpClient.Cluster(core.RootCluster.Path()).TenancyV1alpha1().Workspaces().Create(
+	// 	ctx,
+	// 	&tenancyv1alpha1.Workspace{
+	// 		ObjectMeta: metav1.ObjectMeta{Name: "ws-lifecycle"},
+	// 	},
+	// 	metav1.CreateOptions{},
+	// )
+	require.NoError(t, err, "failed to create workspace")
+
+	t.Logf("Wait until the %q workspace is ready", workspace.Name)
+	require.Eventually(t,
+		func() bool {
+			workspace, err := kcpClient.Cluster(core.RootCluster.Path()).TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
+			require.NoError(t, err, "failed to get workspace")
+			t.Logf("workspace status phase: %v", workspace.Status.Phase)
+			return workspace.Status.Phase == corev1alpha1.LogicalClusterPhaseReady
+		},
+		1*time.Minute,
+		100*time.Millisecond,
+	)
+
+	err = kcpClient.Cluster(core.RootCluster.Path()).TenancyV1alpha1().Workspaces().Delete(ctx, workspace.Name, metav1.DeleteOptions{})
+	require.NoError(t, err, "failed to delete workspace %s", workspace.Name)
+
+	t.Logf("Ensure workspace is removed")
+	require.Eventually(t, func() bool {
+		_, err := kcpClient.Cluster(core.RootCluster.Path()).TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, wait.ForeverTestTimeout, 100*time.Millisecond)
+}
+
 func TestWorkspaceDeletionLeak(t *testing.T) {
 	kcpClient, _, cancel := framework.StartTestServer(t)
 
