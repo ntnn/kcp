@@ -58,8 +58,9 @@ type Plugin struct {
 
 	getAPIBindings func(clusterName logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error)
 
-	managerLock   sync.Mutex
-	managersCache map[logicalcluster.Name]generic.Source
+	managerLock    sync.Mutex
+	managersCache  map[logicalcluster.Name]generic.Source
+	managersCancel map[logicalcluster.Name]func()
 }
 
 var (
@@ -72,9 +73,10 @@ var (
 
 func NewMutatingAdmissionWebhook(configFile io.Reader) (*Plugin, error) {
 	p := &Plugin{
-		managerLock:   sync.Mutex{},
-		managersCache: make(map[logicalcluster.Name]generic.Source),
-		Handler:       admission.NewHandler(admission.Connect, admission.Create, admission.Delete, admission.Update),
+		managerLock:    sync.Mutex{},
+		managersCache:  make(map[logicalcluster.Name]generic.Source),
+		managersCancel: make(map[logicalcluster.Name]func()),
+		Handler:        admission.NewHandler(admission.Connect, admission.Create, admission.Delete, admission.Update),
 	}
 	if configFile != nil {
 		config, err := io.ReadAll(configFile)
@@ -100,14 +102,22 @@ func (p *Plugin) Admit(ctx context.Context, attr admission.Attributes, o admissi
 	}
 	clusterName := cluster.Name
 
+	clusterNameForGroupResource, err := p.getSourceClusterForGroupResource(clusterName, attr.GetResource().GroupResource())
+	if err != nil {
+		return err
+	}
+
+	hookSource, cancel := p.hookSource(clusterNameForGroupResource, attr)
+	if hookSource == nil {
+		return fmt.Errorf("error creating hooksource")
+	}
+	if cancel != nil {
+		defer cancel()
+	}
+
 	var config io.Reader
 	if len(p.config) > 0 {
 		config = bytes.NewReader(p.config)
-	}
-
-	hookSource, err := p.getHookSource(clusterName, attr.GetResource().GroupResource())
-	if err != nil {
-		return err
 	}
 
 	plugin, err := mutating.NewMutatingWebhook(config)
@@ -116,9 +126,9 @@ func (p *Plugin) Admit(ctx context.Context, attr admission.Attributes, o admissi
 	}
 
 	plugin.SetExternalKubeClientSet(p.kubeClusterClient.Cluster(clusterName.Path()))
-	plugin.SetNamespaceInformer(p.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(clusterName))
+	plugin.SetNamespaceInformer(p.localKubeSharedInformerFactory.Core().V1().Namespaces().ClusterWithContext(ctx, clusterName))
 	plugin.SetHookSource(hookSource)
-	plugin.SetReadyFuncFromKCP(p.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(clusterName))
+	plugin.SetReadyFuncFromKCP(p.localKubeSharedInformerFactory.Core().V1().Namespaces().ClusterWithContext(ctx, clusterName))
 
 	if err := plugin.ValidateInitialization(); err != nil {
 		return fmt.Errorf("error validating MutatingWebhook initialization: %w", err)
@@ -135,24 +145,140 @@ func (p *Plugin) Admit(ctx context.Context, attr admission.Attributes, o admissi
 		}
 	}
 
+	// if attr.GetOperation() == admission.Delete && attr.GetResource().Resource == "logicalclusters" {
+	// 	// ntnn.Logf("clusterName=%q clusterNameForGroupResource=%q attr.GetName=%q", clusterName, clusterNameForGroupResource, attr.GetName())
+	//
+	// 	var targetName logicalcluster.Name
+	// 	targetName = clusterName
+	//
+	// 	clusterClient := p.kubeClusterClient.ClusterWithContext(ctx, targetName.Path())
+	// 	discoveryClient := clusterClient.Discovery()
+	// 	if discoveryClient == nil {
+	// 		ntnn.Panic(fmt.Errorf("discovery client nil"))
+	// 	}
+	//
+	// 	resources, err := discoveryClient.ServerPreferredResources()
+	// 	ntnn.Panic(err)
+	//
+	// 	clusterInformer := p.globalKubeSharedInformerFactory.Cluster(targetName)
+	// 	ctx, cancel := context.WithCancel(context.Background())
+	// 	defer cancel()
+	// 	clusterInformer.Start(ctx.Done())
+	//
+	// 	hasResources := func() bool {
+	// 		for _, group := range resources {
+	// 			for _, resource := range group.APIResources {
+	// 				gvr := schema.GroupVersionResource{
+	// 					// Group:    group.GroupVersion,
+	// 					Group:    resource.Group,
+	// 					Version:  resource.Version,
+	// 					Resource: resource.Name,
+	// 				}
+	// 				if group.GroupVersion == "v1" {
+	// 					gvr.Version = "v1"
+	// 					gvr.Group = ""
+	// 				}
+	//
+	// 				gvrInformer, err := clusterInformer.ForResource(gvr)
+	// 				if err != nil {
+	// 					ntnn.Errorf(err, "error getting informer gvr=%q apiResource=%#v", gvr, resource)
+	// 					continue
+	// 				}
+	// 				// if ntnn.Errorf(err, "getting informer clusterName=%q gvr=%q apiResource=%#v", targetName, gvr, resource) {
+	// 				// 	continue
+	// 				// }
+	// 				// ntnn.Logf("got informer clusterName=%q gvr=%q apiResource=%#v", targetName, gvr, resource)
+	//
+	// 				ret, err := gvrInformer.Lister().List(labels.Everything())
+	// 				if err != nil {
+	// 					// ntnn.Errorf(err, "getting resources clusterName=%q gvr=%q apiResource=%#v", targetName, gvr, resource)
+	// 					continue
+	// 				}
+	//
+	// 				ntnn.Logf("got resources %d clusterName=%q gvr=%q apiResource=%#v", len(ret), targetName, gvr, resource)
+	// 				if len(ret) > 0 {
+	// 					return true
+	// 				}
+	// 			}
+	// 		}
+	// 		return false
+	// 	}
+	//
+	// 	hasResources()
+	//
+	// 	go func() {
+	//
+	// 		for hasResources() {
+	// 			time.Sleep(1 * time.Second)
+	// 		}
+	//
+	// 		p.dropHookSource(ctx, clusterNameForGroupResource)
+	// 	}()
+	// }
+
 	return plugin.Admit(ctx, attr, o)
 }
 
-func (p *Plugin) getHookSource(clusterName logicalcluster.Name, groupResource schema.GroupResource) (generic.Source, error) {
-	clusterNameForGroupResource, err := p.getSourceClusterForGroupResource(clusterName, groupResource)
-	if err != nil {
-		return nil, err
-	}
+func (p *Plugin) hookSource(
+	clusterName logicalcluster.Name,
+	attr admission.Attributes,
+) (generic.Source, func()) {
+	// if attr.GetOperation() != admission.Delete {
+	// 	// on most operations use the existing hooksource
+	// 	return p.getHookSource(clusterName), nil
+	// }
+	//
+	// if attr.GetResource().Resource == "logicalclusters" {
+	// 	// on deletion of logical cluster delete the respective informer
+	// 	return p.getHookSource(clusterName), func() { p.dropHookSource(clusterName) }
+	// }
+	//
+	// if p.hasHookSource(clusterName) {
+	// 	return p.getHookSource(clusterName), nil
+	// }
 
+	ctx, cancel := context.WithCancel(context.Background())
+	return p.newHookSource(ctx, clusterName), cancel
+}
+
+func (p *Plugin) newHookSource(ctx context.Context, clusterName logicalcluster.Name) generic.Source {
+	return configuration.NewMutatingWebhookConfigurationManagerForInformer(
+		p.globalKubeSharedInformerFactory.Admissionregistration().V1().MutatingWebhookConfigurations().ClusterWithContext(ctx, clusterName),
+	)
+}
+
+func (p *Plugin) hasHookSource(clusterName logicalcluster.Name) bool {
+	_, ok := p.managersCache[clusterName]
+	return ok
+}
+
+func (p *Plugin) getHookSource(clusterName logicalcluster.Name) generic.Source {
 	p.managerLock.Lock()
 	defer p.managerLock.Unlock()
-	if _, ok := p.managersCache[clusterNameForGroupResource]; !ok {
-		p.managersCache[clusterNameForGroupResource] = configuration.NewMutatingWebhookConfigurationManagerForInformer(
-			p.globalKubeSharedInformerFactory.Admissionregistration().V1().MutatingWebhookConfigurations().Cluster(clusterNameForGroupResource),
-		)
+
+	if !p.hasHookSource(clusterName) {
+		ctx, cancel := context.WithCancel(context.Background())
+		p.managersCache[clusterName] = p.newHookSource(ctx, clusterName)
+		p.managersCancel[clusterName] = cancel
 	}
 
-	return p.managersCache[clusterNameForGroupResource], nil
+	return p.managersCache[clusterName]
+}
+
+func (p *Plugin) dropHookSource(clusterName logicalcluster.Name) {
+	p.managerLock.Lock()
+	defer p.managerLock.Unlock()
+
+	if !p.hasHookSource(clusterName) {
+		return
+	}
+
+	cancel := p.managersCancel[clusterName]
+	cancel()
+	delete(p.managersCache, clusterName)
+	delete(p.managersCancel, clusterName)
+
+	return
 }
 
 func (p *Plugin) getSourceClusterForGroupResource(clusterName logicalcluster.Name, groupResource schema.GroupResource) (logicalcluster.Name, error) {

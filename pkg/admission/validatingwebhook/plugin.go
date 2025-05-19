@@ -57,8 +57,9 @@ type Plugin struct {
 
 	getAPIBindings func(clusterName logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error)
 
-	managerLock   sync.Mutex
-	managersCache map[logicalcluster.Name]generic.Source
+	managerLock    sync.Mutex
+	managersCache  map[logicalcluster.Name]generic.Source
+	managersCancel map[logicalcluster.Name]func()
 }
 
 var (
@@ -71,9 +72,10 @@ var (
 
 func NewValidatingAdmissionWebhook(configFile io.Reader) (*Plugin, error) {
 	p := &Plugin{
-		managerLock:   sync.Mutex{},
-		managersCache: make(map[logicalcluster.Name]generic.Source),
-		Handler:       admission.NewHandler(admission.Connect, admission.Create, admission.Delete, admission.Update),
+		managerLock:    sync.Mutex{},
+		managersCache:  make(map[logicalcluster.Name]generic.Source),
+		managersCancel: make(map[logicalcluster.Name]func()),
+		Handler:        admission.NewHandler(admission.Connect, admission.Create, admission.Delete, admission.Update),
 	}
 	if configFile != nil {
 		config, err := io.ReadAll(configFile)
@@ -99,14 +101,22 @@ func (p *Plugin) Validate(ctx context.Context, attr admission.Attributes, o admi
 	}
 	clusterName := cluster.Name
 
+	clusterNameForGroupResource, err := p.getSourceClusterForGroupResource(clusterName, attr.GetResource().GroupResource())
+	if err != nil {
+		return err
+	}
+
+	hookSource, cancel := p.hookSource(clusterNameForGroupResource, attr)
+	if hookSource == nil {
+		return fmt.Errorf("error creating hooksource")
+	}
+	if cancel != nil {
+		defer cancel()
+	}
+
 	var config io.Reader
 	if len(p.config) > 0 {
 		config = bytes.NewReader(p.config)
-	}
-
-	hookSource, err := p.getHookSource(clusterName, attr.GetResource().GroupResource())
-	if err != nil {
-		return err
 	}
 
 	plugin, err := validating.NewValidatingAdmissionWebhook(config)
@@ -137,21 +147,66 @@ func (p *Plugin) Validate(ctx context.Context, attr admission.Attributes, o admi
 	return plugin.Validate(ctx, attr, o)
 }
 
-func (p *Plugin) getHookSource(clusterName logicalcluster.Name, groupResource schema.GroupResource) (generic.Source, error) {
-	clusterNameForGroupResource, err := p.getSourceClusterForGroupResource(clusterName, groupResource)
-	if err != nil {
-		return nil, err
-	}
+func (p *Plugin) hookSource(
+	clusterName logicalcluster.Name,
+	attr admission.Attributes,
+) (generic.Source, func()) {
+	// if attr.GetOperation() != admission.Delete {
+	// 	// on most operations use the existing hooksource
+	// 	return p.getHookSource(clusterName), nil
+	// }
+	//
+	// if attr.GetResource().Resource == "logicalclusters" {
+	// 	// on deletion of logical cluster delete the respective informer
+	// 	return p.getHookSource(clusterName), func() { p.dropHookSource(clusterName) }
+	// }
+	//
+	// if p.hasHookSource(clusterName) {
+	// 	return p.getHookSource(clusterName), nil
+	// }
 
+	ctx, cancel := context.WithCancel(context.Background())
+	return p.newHookSource(ctx, clusterName), cancel
+}
+
+func (p *Plugin) newHookSource(ctx context.Context, clusterName logicalcluster.Name) generic.Source {
+	return configuration.NewValidatingWebhookConfigurationManagerForInformer(
+		p.globalKubeSharedInformerFactory.Admissionregistration().V1().ValidatingWebhookConfigurations().ClusterWithContext(ctx, clusterName),
+	)
+}
+
+func (p *Plugin) hasHookSource(clusterName logicalcluster.Name) bool {
+	_, ok := p.managersCache[clusterName]
+	return ok
+}
+
+func (p *Plugin) getHookSource(clusterName logicalcluster.Name) generic.Source {
 	p.managerLock.Lock()
 	defer p.managerLock.Unlock()
-	if _, ok := p.managersCache[clusterNameForGroupResource]; !ok {
-		p.managersCache[clusterNameForGroupResource] = configuration.NewValidatingWebhookConfigurationManagerForInformer(
-			p.globalKubeSharedInformerFactory.Admissionregistration().V1().ValidatingWebhookConfigurations().Cluster(clusterNameForGroupResource),
-		)
+
+	if !p.hasHookSource(clusterName) {
+		ctx, cancel := context.WithCancel(context.Background())
+		p.managersCache[clusterName] = p.newHookSource(ctx, clusterName)
+		p.managersCancel[clusterName] = cancel
 	}
 
-	return p.managersCache[clusterNameForGroupResource], nil
+	return p.managersCache[clusterName]
+}
+
+func (p *Plugin) dropHookSource(clusterName logicalcluster.Name) {
+	p.managerLock.Lock()
+	defer p.managerLock.Unlock()
+
+	if !p.hasHookSource(clusterName) {
+		return
+	}
+
+	cancel := p.managersCancel[clusterName]
+	cancel()
+	delete(p.managersCache, clusterName)
+	delete(p.managersCancel, clusterName)
+
+	return
 }
 
 func (p *Plugin) getSourceClusterForGroupResource(clusterName logicalcluster.Name, groupResource schema.GroupResource) (logicalcluster.Name, error) {
