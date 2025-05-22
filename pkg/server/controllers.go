@@ -1678,6 +1678,7 @@ func (s *Server) addIndexersToInformers(_ context.Context) map[schema.GroupVersi
 		s.CacheKcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes(),
 	)
 	workspacemounts.InstallIndexers(
+		s.DynRESTMapper,
 		s.KcpSharedInformerFactory.Tenancy().V1alpha1().Workspaces(),
 	)
 	extraannotationsync.InstallIndexers(
