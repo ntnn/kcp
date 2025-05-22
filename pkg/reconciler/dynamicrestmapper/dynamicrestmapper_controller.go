@@ -386,6 +386,7 @@ func (c *Controller) gatherGVKRsForMappedBoundResource(clusterName logicalcluste
 
 func (c *Controller) process(ctx context.Context, key string, item queueItem) error {
 	logger := logging.WithQueueKey(klog.FromContext(ctx), key)
+	logger.Info("processing item")
 
 	if item.Op == opDelete {
 		logger.V(4).Info("LogicalCluster was removed, removing all its mappings")
@@ -436,6 +437,7 @@ func (c *Controller) process(ctx context.Context, key string, item queueItem) er
 	// Finally, store the new mappings in the RESTMapper for this LogicalCluster.
 
 	logger.V(4).Info("applying mappings")
+	logger.V(2).Info("applying mappings", "toRemove", typeMetaToRemove, "toAdd", typeMetaToAdd)
 
 	c.state.ForCluster(item.ClusterName).apply(typeMetaToRemove, typeMetaToAdd)
 

@@ -17,10 +17,13 @@ limitations under the License.
 package workspacemounts
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
@@ -53,6 +56,28 @@ type workspaceMountsReferenceKey struct {
 	Namespace   string `json:"namespace,omitempty"`
 }
 
+func retryRESTMapping(forCluster *dynamicrestmapper.ForCluster, gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return schema.GroupVersionResource{}, fmt.Errorf("timeout while retrying REST mapping for %s", gvk)
+		default:
+			mapping, err := forCluster.RESTMapping(gvk.GroupKind(), gvk.Version)
+			if err == nil {
+				return mapping.Resource, nil
+			}
+			if meta.IsNoMatchError(err) {
+				// If the error is a NoMatchError, we can retry the mapping
+				// after a short delay.
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+		}
+	}
+}
+
 func newIndexWorkspaceByMountObject(dynamicRESTMapper *dynamicrestmapper.DynamicRESTMapper) cache.IndexFunc {
 	return func(obj interface{}) ([]string, error) {
 		ws, ok := obj.(*tenancyv1alpha1.Workspace)
@@ -75,7 +100,7 @@ func newIndexWorkspaceByMountObject(dynamicRESTMapper *dynamicrestmapper.Dynamic
 		}
 
 		forCluster := dynamicRESTMapper.ForCluster(logicalcluster.From(ws))
-		mapping, err := forCluster.RESTMapping(gvk.GroupKind(), gv.Version)
+		gvr, err := retryRESTMapping(forCluster, gvk)
 		if err != nil {
 			return nil, err // TODO flesh out error
 		}
@@ -84,7 +109,7 @@ func newIndexWorkspaceByMountObject(dynamicRESTMapper *dynamicrestmapper.Dynamic
 			ClusterName: logicalcluster.From(ws).String(),
 			// TODO(sttts): do proper REST mapping
 			// Resource:  strings.ToLower(ws.Spec.Mount.Reference.Kind) + "s",
-			Resource:  mapping.Resource.Resource,
+			Resource:  gvr.Resource,
 			Name:      ws.Spec.Mount.Reference.Name,
 			Namespace: ws.Spec.Mount.Reference.Namespace,
 		}
