@@ -40,7 +40,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
-	utilversion "k8s.io/component-base/version"
+	"k8s.io/component-base/compatibility"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/controlplane"
 	controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver"
@@ -222,7 +222,7 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 	})
 
 	// Set effective version to the default kube version of the vendored libs.
-	c.GenericConfig.EffectiveVersion = utilversion.DefaultKubeEffectiveVersion()
+	c.GenericConfig.EffectiveVersion = compatibility.DefaultKubeEffectiveVersion()
 
 	c.KubeClusterClient, err = kcpkubernetesclientset.NewForConfig(rest.CopyConfig(c.GenericConfig.LoopbackClientConfig))
 	if err != nil {
