@@ -17,6 +17,8 @@ limitations under the License.
 package server
 
 import (
+	"fmt"
+
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/conversion"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -28,6 +30,8 @@ import (
 	apisv1alpha1 "github.com/kcp-dev/kcp/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/kcp/sdk/apis/apis/v1alpha2"
 )
+
+var _ conversion.Factory = &CRConverterFactory{}
 
 type CRConverterFactory struct {
 	delegate *conversion.CRConverterFactory
@@ -57,26 +61,33 @@ func NewCRConverterFactory(serviceResolver webhook.ServiceResolver, authResolver
 	}, nil
 }
 
-func (f *CRConverterFactory) NewConverter(crd *apiextensionsv1.CustomResourceDefinition) (conversion.CRConverter, error) {
+func (f *CRConverterFactory) NewConverter(crd *apiextensionsv1.CustomResourceDefinition) (runtime.ObjectConvertor, runtime.ObjectConvertor, error) {
 	if crd.Spec.Group == apis.GroupName {
-		return &schemaBasedConverter{
+		schemaConverter := conversion.NewCRConverter(&schemaBasedConverter{
 			crd:    crd,
 			scheme: f.scheme,
-		}, nil
+		})
+		return conversion.NewSafeConverterWrapper(schemaConverter), schemaConverter, nil
 	}
 
 	return f.delegate.NewConverter(crd)
 }
+
+// var _ conversion.CRConverterInterface = &schemaBasedConverter{}
 
 type schemaBasedConverter struct {
 	crd    *apiextensionsv1.CustomResourceDefinition
 	scheme *runtime.Scheme
 }
 
-func (s *schemaBasedConverter) Convert(in *unstructured.UnstructuredList, targetGV schema.GroupVersion) (*unstructured.UnstructuredList, error) {
-	out := &unstructured.UnstructuredList{}
+func (s *schemaBasedConverter) Convert(in runtime.Object, targetGV schema.GroupVersion) (runtime.Object, error) {
+	list, isList := in.(*unstructured.UnstructuredList)
+	if !isList {
+		return nil, fmt.Errorf("expected unstructured.UnstructuredList, got %T", in)
+	}
 
-	for _, item := range in.Items {
+	out := &unstructured.UnstructuredList{}
+	for _, item := range list.Items {
 		obj, err := s.scheme.New(item.GroupVersionKind())
 		if err != nil {
 			return nil, err

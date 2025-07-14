@@ -21,8 +21,9 @@ import (
 	"math/rand"
 	"testing"
 
-	fuzz "github.com/google/gofuzz"
+	"github.com/go-test/deep"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/randfill"
 
 	"k8s.io/apimachinery/pkg/api/apitesting/fuzzer"
 	"k8s.io/apimachinery/pkg/api/apitesting/roundtrip"
@@ -131,8 +132,8 @@ func testGenericConversion[V1 runtime.Object, V2 runtime.Object](
 		err = toV1(intermediate, result, nil)
 		require.NoError(t, err)
 
-		require.True(t, apiequality.Semantic.DeepEqual(original, result), "expects original to equal result")
-		require.True(t, apiequality.Semantic.DeepEqual(originalCopy, original), "expects originalCopy to equal original")
+		require.True(t, apiequality.Semantic.DeepEqual(original, result), "expects original to equal result: %#v", deep.Equal(original, result))
+		require.True(t, apiequality.Semantic.DeepEqual(originalCopy, original), "expects originalCopy to equal original: %#v", deep.Equal(originalCopy, original))
 	})
 
 	t.Run("V2->V1->V2", func(t *testing.T) {
@@ -149,15 +150,18 @@ func testGenericConversion[V1 runtime.Object, V2 runtime.Object](
 		err = toV2(intermediate, result, nil)
 		require.NoError(t, err)
 
-		require.True(t, apiequality.Semantic.DeepEqual(original, result), "expects original to equal result")
-		require.True(t, apiequality.Semantic.DeepEqual(originalCopy, original), "expects originalCopy to equal original")
+		// t.Logf("original: %#v", original)
+		// t.Logf("result: %#v", result)
+
+		require.True(t, apiequality.Semantic.DeepEqual(original, result), "expects original to equal result: %#v", deep.Equal(original, result))
+		require.True(t, apiequality.Semantic.DeepEqual(originalCopy, original), "expects originalCopy to equal original: %#v", deep.Equal(originalCopy, original))
 	})
 }
 
 // fuzzInternalObject fuzzes an arbitrary runtime object using the appropriate
 // fuzzer registered with the apitesting package.
-func fuzzInternalObject(t *testing.T, fuzzer *fuzz.Fuzzer, object runtime.Object) runtime.Object {
-	fuzzer.Fuzz(object)
+func fuzzInternalObject(t *testing.T, fuzzer *randfill.Filler, object runtime.Object) runtime.Object {
+	fuzzer.Fill(object)
 
 	j, err := apimeta.TypeAccessor(object)
 	if err != nil {

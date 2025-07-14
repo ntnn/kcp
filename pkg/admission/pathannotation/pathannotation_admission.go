@@ -169,10 +169,10 @@ func (p *pathAnnotationPlugin) ValidateInitialization() error {
 }
 
 func (p *pathAnnotationPlugin) SetKcpInformers(local, global kcpinformers.SharedInformerFactory) {
-	logicalClusterReady := local.Core().V1alpha1().LogicalClusters().Informer().HasSynced
-	p.SetReadyFunc(func() bool {
-		return logicalClusterReady()
-	})
+	// logicalClusterReady := local.Core().V1alpha1().LogicalClusters().Informer().HasSynced
+	// p.SetReadyFunc(func() bool {
+	// 	return logicalClusterReady()
+	// })
 	p.logicalClusterLister = local.Core().V1alpha1().LogicalClusters().Lister()
 	p.getLogicalCluster = func(clusterName logicalcluster.Name, name string) (*corev1alpha1.LogicalCluster, error) {
 		return p.logicalClusterLister.Cluster(clusterName).Get(name)

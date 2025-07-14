@@ -305,11 +305,11 @@ func (o *apiBindingAdmission) SetDeepSARClient(client kcpkubernetesclientset.Clu
 }
 
 func (o *apiBindingAdmission) SetKcpInformers(local, global kcpinformers.SharedInformerFactory) {
-	apiExportsReady := local.Apis().V1alpha2().APIExports().Informer().HasSynced
-	cacheAPIExportsReady := local.Apis().V1alpha2().APIExports().Informer().HasSynced
-	o.SetReadyFunc(func() bool {
-		return apiExportsReady() && cacheAPIExportsReady()
-	})
+	// apiExportsReady := local.Apis().V1alpha2().APIExports().Informer().HasSynced
+	// cacheAPIExportsReady := local.Apis().V1alpha2().APIExports().Informer().HasSynced
+	// o.SetReadyFunc(func() bool {
+	// 	return apiExportsReady() && cacheAPIExportsReady()
+	// })
 	o.apiExportIndexer = local.Apis().V1alpha2().APIExports().Informer().GetIndexer()
 	o.cacheAPIExportIndexer = global.Apis().V1alpha2().APIExports().Informer().GetIndexer()
 

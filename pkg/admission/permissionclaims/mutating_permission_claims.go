@@ -65,11 +65,11 @@ func NewMutatingPermissionClaims() admission.MutationInterface {
 		Handler: admission.NewHandler(admission.Create, admission.Update),
 	}
 
-	p.SetReadyFunc(
-		func() bool {
-			return p.apiBindingsHasSynced()
-		},
-	)
+	// p.SetReadyFunc(
+	// 	func() bool {
+	// 		return p.apiBindingsHasSynced()
+	// 	},
+	// )
 
 	return p
 }

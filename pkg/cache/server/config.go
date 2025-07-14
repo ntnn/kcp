@@ -221,12 +221,15 @@ func NewConfig(opts *cacheserveroptions.CompletedOptions, optionalLocalShardRest
 	return c, nil
 }
 
+var _ conversion.Factory = (*nopCRConversionFactory)(nil)
+
 // nopCRConversionFactory implements conversion.Factory and always returns a no-op converter because we currently have
 // no need to perform CR conversions in the cache server.
 type nopCRConversionFactory struct{}
 
 // NewConverter always returns a no-op converter because we currently have no need to perform CR conversions in the
 // cache server.
-func (n nopCRConversionFactory) NewConverter(_ *apiextensionsv1.CustomResourceDefinition) (conversion.CRConverter, error) {
-	return conversion.NewNOPConverter(), nil
+func (n nopCRConversionFactory) NewConverter(_ *apiextensionsv1.CustomResourceDefinition) (runtime.ObjectConvertor, runtime.ObjectConvertor, error) {
+	nop := conversion.NewNOPConverter()
+	return conversion.NewSafeConverterWrapper(nop), nop, nil
 }

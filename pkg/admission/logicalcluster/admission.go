@@ -210,10 +210,10 @@ func (o *plugin) ValidateInitialization() error {
 }
 
 func (o *plugin) SetKcpInformers(local, global kcpinformers.SharedInformerFactory) {
-	logicalClustersReady := local.Core().V1alpha1().LogicalClusters().Informer().HasSynced
-	o.SetReadyFunc(func() bool {
-		return logicalClustersReady()
-	})
+	// logicalClustersReady := local.Core().V1alpha1().LogicalClusters().Informer().HasSynced
+	// o.SetReadyFunc(func() bool {
+	// 	return logicalClustersReady()
+	// })
 	o.logicalClusterLister = local.Core().V1alpha1().LogicalClusters().Lister()
 }
 

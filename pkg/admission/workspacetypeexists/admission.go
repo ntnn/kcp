@@ -124,7 +124,7 @@ func (o *workspacetypeExists) Admit(ctx context.Context, a admission.Attributes,
 	}
 
 	if !o.WaitForReady() {
-		return admission.NewForbidden(a, fmt.Errorf("not yet ready to handle request"))
+		return admission.NewForbidden(a, fmt.Errorf("not yet ready to handle request TODO1"))
 	}
 
 	if a.GetOperation() != admission.Create {
@@ -259,7 +259,7 @@ func (o *workspacetypeExists) Validate(ctx context.Context, a admission.Attribut
 		}
 	case admission.Create:
 		if !o.WaitForReady() {
-			return admission.NewForbidden(a, fmt.Errorf("not yet ready to handle request"))
+			return admission.NewForbidden(a, fmt.Errorf("not yet ready to handle request TODO2"))
 		}
 
 		wt, err := o.resolveTypeRef(clusterName.Path(), tenancyv1alpha1.WorkspaceTypeReference{
@@ -349,14 +349,14 @@ func (o *workspacetypeExists) ValidateInitialization() error {
 }
 
 func (o *workspacetypeExists) SetKcpInformers(local, global kcpinformers.SharedInformerFactory) {
-	localTypesReady := local.Tenancy().V1alpha1().WorkspaceTypes().Informer().HasSynced
-	globalTypesReady := global.Tenancy().V1alpha1().WorkspaceTypes().Informer().HasSynced
-
-	logicalClusterReady := local.Core().V1alpha1().LogicalClusters().Informer().HasSynced
-
-	o.SetReadyFunc(func() bool {
-		return localTypesReady() && globalTypesReady() && logicalClusterReady()
-	})
+	// localTypesReady := local.Tenancy().V1alpha1().WorkspaceTypes().Informer().HasSynced
+	// globalTypesReady := global.Tenancy().V1alpha1().WorkspaceTypes().Informer().HasSynced
+	//
+	// logicalClusterReady := local.Core().V1alpha1().LogicalClusters().Informer().HasSynced
+	//
+	// o.SetReadyFunc(func() bool {
+	// 	return localTypesReady() && globalTypesReady() && logicalClusterReady()
+	// })
 
 	o.typeIndexer = local.Tenancy().V1alpha1().WorkspaceTypes().Informer().GetIndexer()
 	o.globalTypeIndexer = global.Tenancy().V1alpha1().WorkspaceTypes().Informer().GetIndexer()

@@ -1,0 +1,11 @@
+pkg/admission/workspacetypeexists/admission.go:357:4:	o.SetReadyFunc(func() bool {
+pkg/admission/namespacelifecycle/admission.go:142:4:	l.SetReadyFunc(local.Tenancy().V1alpha1().Workspaces().Informer().HasSynced)
+pkg/admission/apiexportendpointslice/apiexportendpointslice_admission.go:190:4:	o.SetReadyFunc(func() bool {
+pkg/admission/validatingwebhook/plugin.go:120:9:	plugin.SetReadyFuncFromKCP(p.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(clusterName))
+pkg/admission/crdnooverlappinggvr/crdnooverlappinggvr_admission.go:76:4:	p.SetReadyFunc(local.Apis().V1alpha2().APIBindings().Informer().HasSynced)
+pkg/admission/permissionclaims/mutating_permission_claims.go:68:4:	p.SetReadyFunc(
+pkg/admission/apibinding/apibinding_admission.go:310:4:	o.SetReadyFunc(func() bool {
+pkg/admission/pathannotation/pathannotation_admission.go:173:4:	p.SetReadyFunc(func() bool {
+pkg/admission/mutatingwebhook/plugin.go:121:9:	plugin.SetReadyFuncFromKCP(p.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(clusterName))
+pkg/admission/logicalcluster/admission.go:214:4:	o.SetReadyFunc(func() bool {
+pkg/admission/workspace/admission.go:289:4:	o.SetReadyFunc(func() bool {

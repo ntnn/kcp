@@ -185,11 +185,11 @@ func (o *apiExportEndpointSliceAdmission) SetDeepSARClient(client kcpkubernetesc
 }
 
 func (o *apiExportEndpointSliceAdmission) SetKcpInformers(local, global kcpinformers.SharedInformerFactory) {
-	localApiExportsReady := local.Apis().V1alpha2().APIExports().Informer().HasSynced
-	globalApiExportsReady := global.Apis().V1alpha2().APIExports().Informer().HasSynced
-	o.SetReadyFunc(func() bool {
-		return localApiExportsReady() && globalApiExportsReady()
-	})
+	// localApiExportsReady := local.Apis().V1alpha2().APIExports().Informer().HasSynced
+	// globalApiExportsReady := global.Apis().V1alpha2().APIExports().Informer().HasSynced
+	// o.SetReadyFunc(func() bool {
+	// 	return localApiExportsReady() && globalApiExportsReady()
+	// })
 	o.localApiExportIndexer = local.Apis().V1alpha2().APIExports().Informer().GetIndexer()
 	o.globalApiExportIndexer = global.Apis().V1alpha2().APIExports().Informer().GetIndexer()
 }
