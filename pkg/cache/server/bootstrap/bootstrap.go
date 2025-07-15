@@ -18,6 +18,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -81,14 +82,18 @@ func Bootstrap(ctx context.Context, apiExtensionsClusterClient kcpapiextensionsc
 
 	logger := klog.FromContext(ctx)
 	ctx = cacheclient.WithShardInContext(ctx, SystemCacheServerShard)
-	return wait.PollUntilContextCancel(ctx, time.Second, false, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+		var errs error
 		for _, crd := range crds {
 			err := configcrds.CreateSingle(ctx, apiExtensionsClusterClient.Cluster(SystemCRDLogicalCluster.Path()).ApiextensionsV1().CustomResourceDefinitions(), crd)
 			if err != nil {
 				logging.WithObject(logger, crd).Error(err, "failed to create CustomResourceDefinition")
-				return false, nil
+				errors.Join(errs, err)
 			}
 		}
-		return true, nil
+		if errs == nil {
+			return true, nil
+		}
+		return false, errs
 	})
 }
