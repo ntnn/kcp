@@ -165,7 +165,6 @@ func CreateSingle(ctx context.Context, client apiextensionsv1client.CustomResour
 	logger = logging.WithObject(logger, crd)
 
 	if updateNeeded {
-
 		ntnn.Logf("crd needs update %q", rawCRD.Name)
 		rawCRD.ResourceVersion = crd.ResourceVersion
 		_, err := client.Update(ctx, rawCRD, metav1.UpdateOptions{})
