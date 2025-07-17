@@ -20,13 +20,14 @@ import (
 	"context"
 	"strings"
 
+	"github.com/ntnn/go-ntnn"
+
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/kcp"
 	"k8s.io/apimachinery/pkg/labels"
 
 	kcpapiextensionsv1listers "github.com/kcp-dev/client-go/apiextensions/listers/apiextensions/v1"
 	"github.com/kcp-dev/logicalcluster/v3"
-	"github.com/ntnn/go-ntnn"
 
 	"github.com/kcp-dev/kcp/pkg/cache/server/bootstrap"
 )

@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ntnn/go-ntnn"
 	"sigs.k8s.io/yaml"
 
 	crdhelpers "k8s.io/apiextensions-apiserver/pkg/apihelpers"
@@ -40,7 +41,6 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/kcp-dev/kcp/pkg/logging"
-	"github.com/ntnn/go-ntnn"
 )
 
 //go:embed *.yaml

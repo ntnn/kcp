@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ntnn/go-ntnn"
+
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
@@ -29,7 +31,6 @@ import (
 
 	kcpapiextensionsclientset "github.com/kcp-dev/client-go/apiextensions/client"
 	"github.com/kcp-dev/logicalcluster/v3"
-	"github.com/ntnn/go-ntnn"
 
 	configcrds "github.com/kcp-dev/kcp/config/crds"
 	cacheclient "github.com/kcp-dev/kcp/pkg/cache/client"

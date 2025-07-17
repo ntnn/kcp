@@ -24,6 +24,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/ntnn/go-ntnn"
+
 	extensionsapiserver "k8s.io/apiextensions-apiserver/pkg/apiserver"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,7 +47,6 @@ import (
 	flowcontrolrest "k8s.io/kubernetes/pkg/registry/flowcontrol/rest"
 
 	"github.com/kcp-dev/logicalcluster/v3"
-	"github.com/ntnn/go-ntnn"
 
 	configroot "github.com/kcp-dev/kcp/config/root"
 	configrootidentities "github.com/kcp-dev/kcp/config/root-identities"
