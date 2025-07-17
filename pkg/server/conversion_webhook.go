@@ -27,6 +27,7 @@ import (
 	"github.com/kcp-dev/kcp/sdk/apis/apis"
 	apisv1alpha1 "github.com/kcp-dev/kcp/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/kcp/sdk/apis/apis/v1alpha2"
+	"github.com/ntnn/go-ntnn"
 )
 
 type CRConverterFactory struct {
@@ -59,12 +60,14 @@ func NewCRConverterFactory(serviceResolver webhook.ServiceResolver, authResolver
 
 func (f *CRConverterFactory) NewConverter(crd *apiextensionsv1.CustomResourceDefinition) (conversion.CRConverter, error) {
 	if crd.Spec.Group == apis.GroupName {
+		ntnn.Logf("creating crConverter for %q", crd.ObjectMeta.Name)
 		return &schemaBasedConverter{
 			crd:    crd,
 			scheme: f.scheme,
 		}, nil
 	}
 
+	ntnn.Logf("passing CRD converter creation to delete for %q", crd.ObjectMeta.Name)
 	return f.delegate.NewConverter(crd)
 }
 
