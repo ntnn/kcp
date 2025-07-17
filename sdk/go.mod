@@ -115,3 +115,67 @@ require (
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.1 // indirect
 	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
 )
+
+replace k8s.io/kubernetes => ../../kubernetes
+
+replace k8s.io/metrics => ../../kubernetes/staging/src/k8s.io/metrics
+
+replace k8s.io/kms => ../../kubernetes/staging/src/k8s.io/kms
+
+replace k8s.io/component-helpers => ../../kubernetes/staging/src/k8s.io/component-helpers
+
+replace k8s.io/client-go => ../../kubernetes/staging/src/k8s.io/client-go
+
+replace k8s.io/kube-aggregator => ../../kubernetes/staging/src/k8s.io/kube-aggregator
+
+replace k8s.io/cloud-provider => ../../kubernetes/staging/src/k8s.io/cloud-provider
+
+replace k8s.io/cluster-bootstrap => ../../kubernetes/staging/src/k8s.io/cluster-bootstrap
+
+replace k8s.io/cri-api => ../../kubernetes/staging/src/k8s.io/cri-api
+
+replace k8s.io/apiextensions-apiserver => ../../kubernetes/staging/src/k8s.io/apiextensions-apiserver
+
+replace k8s.io/cri-client => ../../kubernetes/staging/src/k8s.io/cri-client
+
+replace k8s.io/mount-utils => ../../kubernetes/staging/src/k8s.io/mount-utils
+
+replace k8s.io/pod-security-admission => ../../kubernetes/staging/src/k8s.io/pod-security-admission
+
+replace k8s.io/kube-controller-manager => ../../kubernetes/staging/src/k8s.io/kube-controller-manager
+
+replace k8s.io/dynamic-resource-allocation => ../../kubernetes/staging/src/k8s.io/dynamic-resource-allocation
+
+replace k8s.io/sample-cli-plugin => ../../kubernetes/staging/src/k8s.io/sample-cli-plugin
+
+replace k8s.io/sample-controller => ../../kubernetes/staging/src/k8s.io/sample-controller
+
+replace k8s.io/kube-scheduler => ../../kubernetes/staging/src/k8s.io/kube-scheduler
+
+replace k8s.io/cli-runtime => ../../kubernetes/staging/src/k8s.io/cli-runtime
+
+replace k8s.io/csi-translation-lib => ../../kubernetes/staging/src/k8s.io/csi-translation-lib
+
+replace k8s.io/kubelet => ../../kubernetes/staging/src/k8s.io/kubelet
+
+replace k8s.io/externaljwt => ../../kubernetes/staging/src/k8s.io/externaljwt
+
+replace k8s.io/kube-proxy => ../../kubernetes/staging/src/k8s.io/kube-proxy
+
+replace k8s.io/api => ../../kubernetes/staging/src/k8s.io/api
+
+replace k8s.io/apiserver => ../../kubernetes/staging/src/k8s.io/apiserver
+
+replace k8s.io/controller-manager => ../../kubernetes/staging/src/k8s.io/controller-manager
+
+replace k8s.io/kubectl => ../../kubernetes/staging/src/k8s.io/kubectl
+
+replace k8s.io/sample-apiserver => ../../kubernetes/staging/src/k8s.io/sample-apiserver
+
+replace k8s.io/code-generator => ../../kubernetes/staging/src/k8s.io/code-generator
+
+replace k8s.io/endpointslice => ../../kubernetes/staging/src/k8s.io/endpointslice
+
+replace k8s.io/apimachinery => ../../kubernetes/staging/src/k8s.io/apimachinery
+
+replace k8s.io/component-base => ../../kubernetes/staging/src/k8s.io/component-base

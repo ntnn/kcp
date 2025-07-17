@@ -75,6 +75,7 @@ require (
 	github.com/google/gnostic-models v0.6.9 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.3.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway v1.16.0 // indirect
@@ -171,36 +172,36 @@ require (
 
 replace (
 	github.com/kcp-dev/kcp/sdk => ./sdk
-	k8s.io/api => github.com/kcp-dev/kubernetes/staging/src/k8s.io/api v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/apiextensions-apiserver => github.com/kcp-dev/kubernetes/staging/src/k8s.io/apiextensions-apiserver v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/apimachinery => github.com/kcp-dev/kubernetes/staging/src/k8s.io/apimachinery v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/apiserver => github.com/kcp-dev/kubernetes/staging/src/k8s.io/apiserver v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/cli-runtime => github.com/kcp-dev/kubernetes/staging/src/k8s.io/cli-runtime v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/client-go => github.com/kcp-dev/kubernetes/staging/src/k8s.io/client-go v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/cloud-provider => github.com/kcp-dev/kubernetes/staging/src/k8s.io/cloud-provider v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/cluster-bootstrap => github.com/kcp-dev/kubernetes/staging/src/k8s.io/cluster-bootstrap v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/code-generator => github.com/kcp-dev/kubernetes/staging/src/k8s.io/code-generator v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/component-base => github.com/kcp-dev/kubernetes/staging/src/k8s.io/component-base v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/component-helpers => github.com/kcp-dev/kubernetes/staging/src/k8s.io/component-helpers v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/controller-manager => github.com/kcp-dev/kubernetes/staging/src/k8s.io/controller-manager v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/cri-api => github.com/kcp-dev/kubernetes/staging/src/k8s.io/cri-api v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/cri-client => github.com/kcp-dev/kubernetes/staging/src/k8s.io/cri-client v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/csi-translation-lib => github.com/kcp-dev/kubernetes/staging/src/k8s.io/csi-translation-lib v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/dynamic-resource-allocation => github.com/kcp-dev/kubernetes/staging/src/k8s.io/dynamic-resource-allocation v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/endpointslice => github.com/kcp-dev/kubernetes/staging/src/k8s.io/endpointslice v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/externaljwt => github.com/kcp-dev/kubernetes/staging/src/k8s.io/externaljwt v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/kms => github.com/kcp-dev/kubernetes/staging/src/k8s.io/kms v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/kube-aggregator => github.com/kcp-dev/kubernetes/staging/src/k8s.io/kube-aggregator v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/kube-controller-manager => github.com/kcp-dev/kubernetes/staging/src/k8s.io/kube-controller-manager v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/kube-proxy => github.com/kcp-dev/kubernetes/staging/src/k8s.io/kube-proxy v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/kube-scheduler => github.com/kcp-dev/kubernetes/staging/src/k8s.io/kube-scheduler v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/kubectl => github.com/kcp-dev/kubernetes/staging/src/k8s.io/kubectl v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/kubelet => github.com/kcp-dev/kubernetes/staging/src/k8s.io/kubelet v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/kubernetes => github.com/kcp-dev/kubernetes v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/metrics => github.com/kcp-dev/kubernetes/staging/src/k8s.io/metrics v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/mount-utils => github.com/kcp-dev/kubernetes/staging/src/k8s.io/mount-utils v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/pod-security-admission => github.com/kcp-dev/kubernetes/staging/src/k8s.io/pod-security-admission v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/sample-apiserver => github.com/kcp-dev/kubernetes/staging/src/k8s.io/sample-apiserver v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/sample-cli-plugin => github.com/kcp-dev/kubernetes/staging/src/k8s.io/sample-cli-plugin v0.0.0-20250425143807-ddbe171670d8
-	k8s.io/sample-controller => github.com/kcp-dev/kubernetes/staging/src/k8s.io/sample-controller v0.0.0-20250425143807-ddbe171670d8
+	k8s.io/api => ../kubernetes/staging/src/k8s.io/api
+	k8s.io/apiextensions-apiserver => ../kubernetes/staging/src/k8s.io/apiextensions-apiserver
+	k8s.io/apimachinery => ../kubernetes/staging/src/k8s.io/apimachinery
+	k8s.io/apiserver => ../kubernetes/staging/src/k8s.io/apiserver
+	k8s.io/cli-runtime => ../kubernetes/staging/src/k8s.io/cli-runtime
+	k8s.io/client-go => ../kubernetes/staging/src/k8s.io/client-go
+	k8s.io/cloud-provider => ../kubernetes/staging/src/k8s.io/cloud-provider
+	k8s.io/cluster-bootstrap => ../kubernetes/staging/src/k8s.io/cluster-bootstrap
+	k8s.io/code-generator => ../kubernetes/staging/src/k8s.io/code-generator
+	k8s.io/component-base => ../kubernetes/staging/src/k8s.io/component-base
+	k8s.io/component-helpers => ../kubernetes/staging/src/k8s.io/component-helpers
+	k8s.io/controller-manager => ../kubernetes/staging/src/k8s.io/controller-manager
+	k8s.io/cri-api => ../kubernetes/staging/src/k8s.io/cri-api
+	k8s.io/cri-client => ../kubernetes/staging/src/k8s.io/cri-client
+	k8s.io/csi-translation-lib => ../kubernetes/staging/src/k8s.io/csi-translation-lib
+	k8s.io/dynamic-resource-allocation => ../kubernetes/staging/src/k8s.io/dynamic-resource-allocation
+	k8s.io/endpointslice => ../kubernetes/staging/src/k8s.io/endpointslice
+	k8s.io/externaljwt => ../kubernetes/staging/src/k8s.io/externaljwt
+	k8s.io/kms => ../kubernetes/staging/src/k8s.io/kms
+	k8s.io/kube-aggregator => ../kubernetes/staging/src/k8s.io/kube-aggregator
+	k8s.io/kube-controller-manager => ../kubernetes/staging/src/k8s.io/kube-controller-manager
+	k8s.io/kube-proxy => ../kubernetes/staging/src/k8s.io/kube-proxy
+	k8s.io/kube-scheduler => ../kubernetes/staging/src/k8s.io/kube-scheduler
+	k8s.io/kubectl => ../kubernetes/staging/src/k8s.io/kubectl
+	k8s.io/kubelet => ../kubernetes/staging/src/k8s.io/kubelet
+	k8s.io/kubernetes => ../kubernetes
+	k8s.io/metrics => ../kubernetes/staging/src/k8s.io/metrics
+	k8s.io/mount-utils => ../kubernetes/staging/src/k8s.io/mount-utils
+	k8s.io/pod-security-admission => ../kubernetes/staging/src/k8s.io/pod-security-admission
+	k8s.io/sample-apiserver => ../kubernetes/staging/src/k8s.io/sample-apiserver
+	k8s.io/sample-cli-plugin => ../kubernetes/staging/src/k8s.io/sample-cli-plugin
+	k8s.io/sample-controller => ../kubernetes/staging/src/k8s.io/sample-controller
 )
