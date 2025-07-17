@@ -90,7 +90,7 @@ func Bootstrap(ctx context.Context, apiExtensionsClusterClient kcpapiextensionsc
 			if err != nil {
 				ntnn.Logf("error creating crd %q %v", crd, err)
 				logging.WithObject(logger, crd).Error(err, "failed to create CustomResourceDefinition")
-				errors.Join(errs, err)
+				errs = errors.Join(errs, err)
 			}
 		}
 		if errs == nil {
