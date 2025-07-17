@@ -40,6 +40,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/kcp-dev/kcp/pkg/logging"
+	"github.com/ntnn/go-ntnn"
 )
 
 //go:embed *.yaml
@@ -129,6 +130,8 @@ func CreateSingle(ctx context.Context, client apiextensionsv1client.CustomResour
 	start := time.Now()
 	logger.V(2).Info("bootstrapping CRD")
 
+	ntnn.Logf("creating crd %q", rawCRD.Name)
+
 	updateNeeded := false
 	crd, err := client.Get(ctx, rawCRD.Name, metav1.GetOptions{})
 	if err != nil {
@@ -145,12 +148,15 @@ func CreateSingle(ctx context.Context, client apiextensionsv1client.CustomResour
 					}
 					updateNeeded = true
 				} else {
+					ntnn.Logf("error creating crd %q: %v", rawCRD.Name, err)
 					return fmt.Errorf("error creating CRD %s: %w", rawCRD.Name, err)
 				}
 			} else {
+				ntnn.Logf("created crd %q", rawCRD.Name)
 				logging.WithObject(logger, crd).WithValues("duration", time.Since(start).String()).Info("bootstrapped CRD")
 			}
 		} else {
+			ntnn.Logf("error getting crd %q: %v", rawCRD.Name, err)
 			return fmt.Errorf("error fetching CRD %s: %w", rawCRD.Name, err)
 		}
 	} else {
@@ -159,9 +165,12 @@ func CreateSingle(ctx context.Context, client apiextensionsv1client.CustomResour
 	logger = logging.WithObject(logger, crd)
 
 	if updateNeeded {
+
+		ntnn.Logf("crd needs update %q", rawCRD.Name)
 		rawCRD.ResourceVersion = crd.ResourceVersion
 		_, err := client.Update(ctx, rawCRD, metav1.UpdateOptions{})
 		if err != nil {
+			ntnn.Logf("error updating crd %q: %v", rawCRD.Name, err)
 			return err
 		}
 		logger.WithValues("duration", time.Since(start).String()).Info("updated CRD")
@@ -173,8 +182,10 @@ func CreateSingle(ctx context.Context, client apiextensionsv1client.CustomResour
 		crd, err := client.Get(ctx, rawCRD.Name, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
+				ntnn.Logf("polling crd establishment %q: not found", rawCRD.Name)
 				return false, fmt.Errorf("CRD %s was deleted before being established", rawCRD.Name)
 			}
+			ntnn.Logf("polling crd establishment %q: error fetching: %v", rawCRD.Name, err)
 			return false, fmt.Errorf("error fetching CRD %s: %w", rawCRD.Name, err)
 		}
 		var reason string
@@ -185,6 +196,7 @@ func CreateSingle(ctx context.Context, client apiextensionsv1client.CustomResour
 			reason = fmt.Sprintf("CRD is not established: %s: %s", condition.Reason, condition.Message)
 		}
 		if reason != lastMsg {
+			ntnn.Logf("polling crd establishment %q: reason: %v", rawCRD.Name, reason)
 			logger.Info(reason)
 			lastMsg = reason
 		}

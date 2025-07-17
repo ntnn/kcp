@@ -18,6 +18,7 @@ package server
 
 import (
 	"context"
+	"strings"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apiextensions-apiserver/pkg/kcp"
@@ -25,6 +26,7 @@ import (
 
 	kcpapiextensionsv1listers "github.com/kcp-dev/client-go/apiextensions/listers/apiextensions/v1"
 	"github.com/kcp-dev/logicalcluster/v3"
+	"github.com/ntnn/go-ntnn"
 
 	"github.com/kcp-dev/kcp/pkg/cache/server/bootstrap"
 )
@@ -59,7 +61,16 @@ func (c *crdLister) List(ctx context.Context, selector labels.Selector) ([]*apie
 	// since all available CRDs are stored in bootstrap.SystemCRDLogicalCluster
 	// and there is only a single registry per a CRD
 	// there is no need to filter by a shard or a cluster
-	return c.lister.List(selector)
+	ret, err := c.lister.List(selector)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(ret))
+	for i := range ret {
+		names[i] = ret[i].ObjectMeta.Name
+	}
+	ntnn.LogfChanged("crdLister: listing crds:\n  selector: %v\n  %d: %v", selector, len(ret), strings.Join(names, ","))
+	return ret, nil
 }
 
 func (c *crdLister) Refresh(crd *apiextensionsv1.CustomResourceDefinition) (*apiextensionsv1.CustomResourceDefinition, error) {
@@ -71,5 +82,9 @@ func (c *crdLister) Get(ctx context.Context, name string) (*apiextensionsv1.Cust
 	// since all available CRDs are stored in bootstrap.SystemCRDLogicalCluster
 	// and there is only a single registry per a CRD
 	// there is no need to filter by a shard or a cluster
-	return c.lister.Cluster(c.cluster).Get(name)
+	ret, err := c.lister.Cluster(c.cluster).Get(name)
+	if err != nil {
+		return nil, err
+	}
+	return ret, nil
 }

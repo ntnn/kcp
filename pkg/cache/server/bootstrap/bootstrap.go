@@ -29,6 +29,7 @@ import (
 
 	kcpapiextensionsclientset "github.com/kcp-dev/client-go/apiextensions/client"
 	"github.com/kcp-dev/logicalcluster/v3"
+	"github.com/ntnn/go-ntnn"
 
 	configcrds "github.com/kcp-dev/kcp/config/crds"
 	cacheclient "github.com/kcp-dev/kcp/pkg/cache/client"
@@ -87,6 +88,7 @@ func Bootstrap(ctx context.Context, apiExtensionsClusterClient kcpapiextensionsc
 		for _, crd := range crds {
 			err := configcrds.CreateSingle(ctx, apiExtensionsClusterClient.Cluster(SystemCRDLogicalCluster.Path()).ApiextensionsV1().CustomResourceDefinitions(), crd)
 			if err != nil {
+				ntnn.Logf("error creating crd %q %v", crd, err)
 				logging.WithObject(logger, crd).Error(err, "failed to create CustomResourceDefinition")
 				errors.Join(errs, err)
 			}

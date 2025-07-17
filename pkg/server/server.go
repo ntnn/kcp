@@ -45,6 +45,7 @@ import (
 	flowcontrolrest "k8s.io/kubernetes/pkg/registry/flowcontrol/rest"
 
 	"github.com/kcp-dev/logicalcluster/v3"
+	"github.com/ntnn/go-ntnn"
 
 	configroot "github.com/kcp-dev/kcp/config/root"
 	configrootidentities "github.com/kcp-dev/kcp/config/root-identities"
@@ -65,6 +66,10 @@ import (
 
 	_ "net/http/pprof"
 )
+
+func init() {
+	ntnn.LogToFile = "/Users/I567861/SAPDevelop/code/kcp-work/ntnn.log"
+}
 
 const resyncPeriod = 10 * time.Hour
 

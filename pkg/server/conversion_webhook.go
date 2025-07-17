@@ -29,6 +29,7 @@ import (
 	"github.com/kcp-dev/kcp/sdk/apis/apis"
 	apisv1alpha1 "github.com/kcp-dev/kcp/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/kcp/sdk/apis/apis/v1alpha2"
+	"github.com/ntnn/go-ntnn"
 )
 
 var _ conversion.Factory = &CRConverterFactory{}
@@ -63,6 +64,7 @@ func NewCRConverterFactory(serviceResolver webhook.ServiceResolver, authResolver
 
 func (f *CRConverterFactory) NewConverter(crd *apiextensionsv1.CustomResourceDefinition) (runtime.ObjectConvertor, runtime.ObjectConvertor, error) {
 	if crd.Spec.Group == apis.GroupName {
+		ntnn.Logf("creating crConverter for %q", crd.ObjectMeta.Name)
 		schemaConverter := conversion.NewCRConverter(&schemaBasedConverter{
 			crd:    crd,
 			scheme: f.scheme,
@@ -70,6 +72,7 @@ func (f *CRConverterFactory) NewConverter(crd *apiextensionsv1.CustomResourceDef
 		return conversion.NewSafeConverterWrapper(schemaConverter), schemaConverter, nil
 	}
 
+	ntnn.Logf("passing CRD converter creation to delete for %q", crd.ObjectMeta.Name)
 	return f.delegate.NewConverter(crd)
 }
 
@@ -83,6 +86,7 @@ type schemaBasedConverter struct {
 func (s *schemaBasedConverter) Convert(in runtime.Object, targetGV schema.GroupVersion) (runtime.Object, error) {
 	list, isList := in.(*unstructured.UnstructuredList)
 	if !isList {
+		ntnn.Logf("schemaBasedConverter got not list: %T %#v", in, in)
 		return nil, fmt.Errorf("expected unstructured.UnstructuredList, got %T", in)
 	}
 
