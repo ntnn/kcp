@@ -203,5 +203,9 @@ var (
 		// logs flags
 		"log-text-info-buffer-size", // [Alpha] In text format with split output streams, the info messages can be buffered for a while to increase performance. The default value of zero bytes disables buffering. The size can be specified as number of bytes (512), multiples of 1000 (1K), multiples of 1024 (2Ki), or powers of those (3M, 4G, 5Mi, 6Gi). Enable the LoggingAlphaOptions feature gate to use this.
 		"log-text-split-stream",     // [Alpha] In text format, write error messages to stderr and info messages to stdout. The default is to write a single stream to stdout. Enable the LoggingAlphaOptions feature gate to use this.
+
+		// TODO(ntnn): update
+		"emulation-forward-compatible",
+		"runtime-config-emulation-forward-compatible",
 	)
 )
