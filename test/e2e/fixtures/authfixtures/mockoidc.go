@@ -39,14 +39,12 @@ import (
 
 	tenancyv1alpha1 "github.com/kcp-dev/kcp/sdk/apis/tenancy/v1alpha1"
 	kcpclientset "github.com/kcp-dev/kcp/sdk/client/clientset/versioned/cluster"
-	kcptestingserver "github.com/kcp-dev/kcp/sdk/testing/server"
 	"github.com/kcp-dev/kcp/sdk/testing/third_party/library-go/crypto"
 )
 
-func StartMockOIDC(t *testing.T, server kcptestingserver.RunningServer) (*mockoidc.MockOIDC, *crypto.CA) {
+func StartMockOIDC(t *testing.T, caDir string) (*mockoidc.MockOIDC, *crypto.CA) {
 	// start a mock OIDC server that will listen on a random port
 	// (only for discovery and keyset handling, no actual login workflows)
-	caDir := server.CADirectory()
 	caCertFile := filepath.Join(caDir, "mockoidc-ca.crt")
 	caKeyFile := filepath.Join(caDir, "mockoidc-ca.key")
 

@@ -60,8 +60,8 @@ func TestWorkspaceOIDC(t *testing.T) {
 
 	// start a two mock OIDC servers that will listen on random ports
 	// (only for discovery and keyset handling, no actual login workflows)
-	mockA, ca := authfixtures.StartMockOIDC(t, server)
-	mockB, _ := authfixtures.StartMockOIDC(t, server)
+	mockA, ca := authfixtures.StartMockOIDC(t, server.CADirectory())
+	mockB, _ := authfixtures.StartMockOIDC(t, server.CADirectory())
 
 	// setup a new workspace auth config that uses mockoidc's server, one for
 	// each of our mockoidc servers
@@ -267,7 +267,7 @@ func TestUserScope(t *testing.T) {
 	kcpClusterClient, err := kcpclientset.NewForConfig(kcpConfig)
 	require.NoError(t, err)
 
-	mock, ca := authfixtures.StartMockOIDC(t, server)
+	mock, ca := authfixtures.StartMockOIDC(t, server.CADirectory())
 	authConfig := authfixtures.CreateWorkspaceOIDCAuthentication(t, ctx, kcpClusterClient, baseWsPath, mock, ca,
 		[]tenancyv1alpha1.ExtraMapping{
 			{
@@ -356,7 +356,7 @@ func TestForbiddenSystemAccess(t *testing.T) {
 	kcpClusterClient, err := kcpclientset.NewForConfig(kcpConfig)
 	require.NoError(t, err)
 
-	mock, ca := authfixtures.StartMockOIDC(t, server)
+	mock, ca := authfixtures.StartMockOIDC(t, server.CADirectory())
 
 	// create an evil AuthConfig that would not prefix OIDC-provided groups, theoretically allowing
 	// users to become part of system groups.
