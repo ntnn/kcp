@@ -31,6 +31,10 @@ type ForCluster struct {
 	parent      *DynamicRESTMapper
 }
 
+func (v *ForCluster) Reset() {
+	v.parent.deleteMappingsForCluster(v.clusterName)
+}
+
 func (v *ForCluster) clusterMappingOrEmpty(clusterName logicalcluster.Name) *DefaultRESTMapper {
 	if m := v.parent.dynamic[clusterName]; m != nil {
 		return m
