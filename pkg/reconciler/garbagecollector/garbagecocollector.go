@@ -19,6 +19,7 @@ package garbagecollector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -42,7 +43,6 @@ import (
 	"github.com/kcp-dev/kcp/pkg/informer"
 	"github.com/kcp-dev/kcp/pkg/logging"
 	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
-	"github.com/kcp-dev/kcp/pkg/reconciler/garbagecollector/syncmap"
 	"github.com/kcp-dev/kcp/pkg/tombstone"
 )
 
@@ -70,7 +70,7 @@ type GarbageCollector struct {
 
 	// TODO(ntnn): replace with a better structure to manage monitors
 	// will probably need cluster->group->version->resource->registration
-	monitors syncmap.SyncMap[ID, func()]
+	monitors map[schema.GroupVersionResource]func()
 
 	deletionQueue workqueue.TypedRateLimitingInterface[ObjectReference]
 }
@@ -86,7 +86,7 @@ func NewGarbageCollector(options Options) *GarbageCollector {
 	gc.log = logging.WithReconciler(options.Logger, NewControllerName)
 
 	gc.graph = NewGraph()
-	gc.monitors = syncmap.SyncMap[ID, func()]{}
+	gc.monitors = make(map[schema.GroupVersionResource]func())
 	gc.deletionQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
 		workqueue.DefaultTypedControllerRateLimiter[ObjectReference](),
 		workqueue.TypedRateLimitingQueueConfig[ObjectReference]{
@@ -131,16 +131,22 @@ func (gc *GarbageCollector) Start(ctx context.Context) {
 	// deletion queue.
 	crdHandlers := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			gc.handleCRDAdd(tombstone.Obj[*apiextensionsv1.CustomResourceDefinition](obj))
+			gc.updateMonitors(
+				&apiextensionsv1.CustomResourceDefinition{},
+				tombstone.Obj[*apiextensionsv1.CustomResourceDefinition](obj),
+			)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			gc.handleCRDUpdate(
+			gc.updateMonitors(
 				tombstone.Obj[*apiextensionsv1.CustomResourceDefinition](oldObj),
 				tombstone.Obj[*apiextensionsv1.CustomResourceDefinition](newObj),
 			)
 		},
 		DeleteFunc: func(obj interface{}) {
-			gc.handleCRDRemove(tombstone.Obj[*apiextensionsv1.CustomResourceDefinition](obj))
+			gc.updateMonitors(
+				tombstone.Obj[*apiextensionsv1.CustomResourceDefinition](obj),
+				&apiextensionsv1.CustomResourceDefinition{},
+			)
 		},
 	}
 
@@ -182,23 +188,69 @@ func (gc *GarbageCollector) Start(ctx context.Context) {
 // 	// TODO delete deps
 // }
 
-func (gc *GarbageCollector) handleCRDAdd(crd *apiextensionsv1.CustomResourceDefinition) {
-	clusterName := logicalcluster.From(crd)
-
-	id := ID{
-		ClusterName: clusterName,
-		ID:          crd.UID,
+func (gc *GarbageCollector) updateMonitors(oldCrd, newCrd *apiextensionsv1.CustomResourceDefinition) {
+	// Determine added and removed versions.
+	oldVersions := map[schema.GroupVersionResource]bool{}
+	for _, version := range oldCrd.Spec.Versions {
+		if !version.Served {
+			continue
+		}
+		gvr := schema.GroupVersionResource{
+			Group:    oldCrd.Spec.Group,
+			Version:  version.Name,
+			Resource: oldCrd.Spec.Names.Plural,
+		}
+		oldVersions[gvr] = true
 	}
 
-	if _, loaded := gc.monitors.Load(id); loaded {
-		// already being monitored
-		return
+	newVersions := map[schema.GroupVersionResource]bool{}
+	for _, version := range newCrd.Spec.Versions {
+		if !version.Served {
+			continue
+		}
+		gvr := schema.GroupVersionResource{
+			Group:    newCrd.Spec.Group,
+			Version:  version.Name,
+			Resource: newCrd.Spec.Names.Plural,
+		}
+		if _, exists := oldVersions[gvr]; !exists {
+			newVersions[gvr] = true
+		}
 	}
 
+	// Stop monitors for removed versions.
+	for gvr := range oldVersions {
+		if _, exists := newVersions[gvr]; exists {
+			continue
+		}
+		cancel, ok := gc.monitors[gvr]
+		if !ok {
+			// Version was never monitored.
+			continue
+		}
+		cancel()
+	}
+
+	// Start monitors for added versions.
+	for gvr := range newVersions {
+		if _, exists := oldVersions[gvr]; exists {
+			continue
+		}
+		cancel, err := gc.startMonitorForVersion(newCrd, gvr)
+		if err != nil {
+			gc.log.Error(err, "error starting monitor for CRD version", "crd", newCrd.Name, "gvr", gvr)
+			continue
+		}
+		gc.monitors[gvr] = cancel
+	}
+}
+
+func (gc *GarbageCollector) startMonitorForVersion(crd *apiextensionsv1.CustomResourceDefinition, gvr schema.GroupVersionResource) (func(), error) {
 	// Start handler to add/update resources in the graph and to queue
-	// deletion. Add and update directly updates the graph. Only
-	// deletion needs to be queued to cascade deletions when an object
-	// is deleted that owns other objects.
+	// deletion.
+	// Add and update directly updates the graph.
+	// Only deletion needs to be queued to cascade deletions when an
+	// object is deleted that owns other objects.
 	handlers := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			u := tombstone.Obj[*unstructured.Unstructured](obj)
@@ -236,63 +288,23 @@ func (gc *GarbageCollector) handleCRDAdd(crd *apiextensionsv1.CustomResourceDefi
 		},
 	}
 
-	unregisterFuncs := []func(){}
-
-	for _, version := range crd.Spec.Versions {
-		if !version.Served {
-			continue
-		}
-		gvr := schema.GroupVersionResource{
-			Group:    crd.Spec.Group,
-			Version:  version.Name,
-			Resource: crd.Spec.Names.Plural,
-		}
-
-		informer, err := gc.options.SharedInformerFactory.ForResource(gvr)
-		if err != nil {
-			gc.log.Error(err, "error getting informer for CRD", "crd", crd.Name, "gvr", gvr)
-			continue
-		}
-
-		registration, err := informer.Informer().AddEventHandler(handlers)
-		if err != nil {
-			gc.log.Error(err, "error adding event handler for CRD", "crd", crd.Name)
-			return
-		}
-
-		unregisterFuncs = append(unregisterFuncs, func() {
-			if err := informer.Informer().RemoveEventHandler(registration); err != nil {
-				gc.log.Error(err, "error removing event handler for CRD", "crd", crd.Name) // TODO: version etcpp
-			}
-		})
+	informer, err := gc.options.SharedInformerFactory.ForResource(gvr)
+	if err != nil {
+		return nil, fmt.Errorf("error getting informer for GVR %v: %w", gvr, err)
 	}
 
-	gc.monitors.Store(id, func() {
-		for _, unregister := range unregisterFuncs {
-			unregister()
+	registration, err := informer.Informer().AddEventHandler(handlers)
+	if err != nil {
+		return nil, fmt.Errorf("error adding event handler for GVR %v: %w", gvr, err)
+	}
+
+	unregister := func() {
+		if err := informer.Informer().RemoveEventHandler(registration); err != nil {
+			gc.log.Error(err, "error removing event handler for CRD", "crd", crd.Name) // TODO: version etcpp
 		}
-	})
-}
-
-func (gc *GarbageCollector) handleCRDUpdate(oldCrd, newCrd *apiextensionsv1.CustomResourceDefinition) {
-	// TODO(ntnn): handle version adds/removes
-}
-
-func (gc *GarbageCollector) handleCRDRemove(crd *apiextensionsv1.CustomResourceDefinition) {
-	clusterName := logicalcluster.From(crd)
-
-	id := ID{
-		ClusterName: clusterName,
-		ID:          crd.UID,
 	}
 
-	cancel, loaded := gc.monitors.LoadAndDelete(id)
-	if !loaded {
-		// not being monitored
-		return
-	}
-
-	cancel()
+	return unregister, nil
 }
 
 func (gc *GarbageCollector) GVR(or ObjectReference) (schema.GroupVersionResource, error) {
@@ -376,8 +388,8 @@ func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or Obj
 	}
 
 	// metav1.FinalizerDeleteDependents doesn't need special handling.
-	// If dependents exist they will be added to the deletion queue and
-	// this object will be requeued until dependents are gone.
+	// If owned objects exist they will be added to the deletion queue
+	// and this object will be requeued until dependents are gone.
 
 	// Check if there are any owned objects.
 	// If the owned objects were orphaned above this will requeue until
