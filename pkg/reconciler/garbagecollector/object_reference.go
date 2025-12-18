@@ -60,6 +60,23 @@ func ObjectReferenceFrom(obj *unstructured.Unstructured) ObjectReference {
 	return or
 }
 
+// func ObjectReferenceFromPartial(gvk schema.GroupVersionKind, obj *metav1.PartialObjectMetadata) ObjectReference {
+// 	or := ObjectReference{}
+//
+// 	or.APIVersion = gvk.GroupVersion().String()
+// 	or.Kind = gvk.Kind
+// 	or.Name = obj.GetName()
+// 	or.UID = obj.GetUID()
+//
+// 	// TODO(ntnn): handle BlockOwnerDeletion
+// 	// or.BlockOwnerDeletion =
+//
+// 	or.Namespace = obj.GetNamespace()
+// 	or.ClusterName = logicalcluster.From(obj)
+//
+// 	return or
+// }
+
 func ObjectReferenceFromOwnerReference(clusterName logicalcluster.Name, namespace string, ownerRef metav1.OwnerReference) ObjectReference {
 	return ObjectReference{
 		OwnerReference: ownerRef,

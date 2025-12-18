@@ -44,6 +44,7 @@ import (
 	"github.com/kcp-dev/kcp/pkg/logging"
 	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
 	"github.com/kcp-dev/kcp/pkg/tombstone"
+	"github.com/kcp-dev/kcp/pkg/virtual/apiexport/schemas/builtin"
 )
 
 // TODO replace with kcp-garbage-collector once stabilising.
@@ -80,7 +81,7 @@ func NewGarbageCollector(options Options) *GarbageCollector {
 
 	gc.options = options
 	if gc.options.DeletionWorkers <= 0 {
-		gc.options.DeletionWorkers = 2
+		gc.options.DeletionWorkers = 1
 	}
 
 	gc.log = logging.WithReconciler(options.Logger, NewControllerName)
@@ -122,13 +123,35 @@ func (gc *GarbageCollector) Start(ctx context.Context) {
 	// }
 	// defer gc.options.LogicalClusterInformer.Informer().RemoveEventHandler(lcRegistration)
 
-	// A single crd handler will handle all resources as the "default"
-	// kube resources are coming from CRDs in the system:system-crds
-	// logical cluster and will be watched automatically through this
-	// handler.
-	// The CRD informer in turn manages the handlers that will watch the
-	// resources across all clusters and feed changes into the graph and
-	// deletion queue.
+	// Start monitors for builtin APIs
+	// TODO instead of making a wacky list of fake builtin crds update
+	// monitors off of lists of GVRs and use a helper function to
+	// produce the list of GVRs from CRDs for the handler.
+	builtinCRDs := []*apiextensionsv1.CustomResourceDefinition{}
+	for _, builtInAPI := range builtin.BuiltInAPIs {
+		builtinCRDs = append(builtinCRDs, &apiextensionsv1.CustomResourceDefinition{
+			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: builtInAPI.GroupVersion.Group,
+				Names: builtInAPI.Names,
+				Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+					{
+						Name:   builtInAPI.GroupVersion.Version,
+						Served: true,
+					},
+				},
+			},
+		})
+	}
+	for _, crd := range builtinCRDs {
+		gc.updateMonitors(&apiextensionsv1.CustomResourceDefinition{}, crd)
+	}
+
+	// A single crd handler will handle all dynamic resources.
+	// The handler on the CRD informer manages the handlers that will
+	// watch the resources across all clusters and feed changes into the
+	// graph and deletion queue.
+	// TODO(ntnn): might need a separate worker queue to not block? but
+	// should be fine probably.
 	crdHandlers := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			gc.updateMonitors(
@@ -245,6 +268,27 @@ func (gc *GarbageCollector) updateMonitors(oldCrd, newCrd *apiextensionsv1.Custo
 	}
 }
 
+func (gc *GarbageCollector) anyToRef(gvr schema.GroupVersionResource, obj any) (*unstructured.Unstructured, ObjectReference) {
+	// TODO(ntnn): sometimes we get unstructured, sometimes partial metadata
+	u := tombstone.Obj[*unstructured.Unstructured](obj)
+	ref := ObjectReferenceFrom(u)
+
+	switch {
+	case u.GetKind() == "PartialObjectMetadata":
+		clusterName := logicalcluster.From(u)
+		gvk, err := gc.options.DynRESTMapper.ForCluster(clusterName).KindFor(gvr)
+		if err != nil {
+			gc.log.Error(err, "error getting GVK for GVR", "gvr", gvr, "cluster", clusterName)
+			return nil, ObjectReference{}
+		}
+		// Override wrong info from PartialObjectMetadata
+		ref.APIVersion = gvk.GroupVersion().String()
+		ref.Kind = gvk.Kind
+	}
+
+	return u, ref
+}
+
 func (gc *GarbageCollector) startMonitorForVersion(crd *apiextensionsv1.CustomResourceDefinition, gvr schema.GroupVersionResource) (func(), error) {
 	// Start handler to add/update resources in the graph and to queue
 	// deletion.
@@ -253,38 +297,107 @@ func (gc *GarbageCollector) startMonitorForVersion(crd *apiextensionsv1.CustomRe
 	// object is deleted that owns other objects.
 	handlers := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			u := tombstone.Obj[*unstructured.Unstructured](obj)
-			or := ObjectReferenceFrom(u)
+			gc.log.Info("Add event for object", "gvr", gvr, "obj", obj)
+			u, or := gc.anyToRef(gvr, obj)
 			owners := ObjectReferencesFromOwnerReferences(
-				logicalcluster.From(u),
+				or.ClusterName,
 				u.GetNamespace(),
 				u.GetOwnerReferences(),
 			)
+			gc.log.Info("Adding object to graph", "object", or, "owners", owners)
 			gc.graph.Add(or, nil, owners)
+			// partial := tombstone.Obj[*metav1.PartialObjectMetadata](obj)
+			//
+			// clusterName := logicalcluster.From(partial)
+			// gvk, err := gc.options.DynRESTMapper.ForCluster(clusterName).KindFor(gvr)
+			// if err != nil {
+			// 	gc.log.Error(err, "error getting GVK for GVR", "gvr", gvr, "cluster", clusterName)
+			// 	return
+			// }
+			//
+			// ref := ObjectReferenceFromPartial(gvk, partial)
+			//
+			// owners := ObjectReferencesFromOwnerReferences(
+			// 	clusterName,
+			// 	partial.GetNamespace(),
+			// 	partial.GetOwnerReferences(),
+			// )
+			//
+			// gc.log.V(4).Info("Adding object to graph", "object", ref, "owners", owners)
+			// gc.graph.Add(ref, nil, owners)
 		},
 		UpdateFunc: func(oldRaw, newRaw interface{}) {
-			oldObj := tombstone.Obj[*unstructured.Unstructured](oldRaw)
+			gc.log.Info("Update event for object", "gvr", gvr, "oldObj", oldRaw, "newObj", newRaw)
+			oldObj, oldRef := gc.anyToRef(gvr, oldRaw)
+			// oldObj := tombstone.Obj[*unstructured.Unstructured](oldRaw)
 			// oldOR := ObjectReferenceFrom(old)
 			oldOwners := ObjectReferencesFromOwnerReferences(
-				logicalcluster.From(oldObj),
+				oldRef.ClusterName,
 				oldObj.GetNamespace(),
 				oldObj.GetOwnerReferences(),
 			)
 
-			newObj := tombstone.Obj[*unstructured.Unstructured](newRaw)
-			newOR := ObjectReferenceFrom(newObj)
+			newObj, newRef := gc.anyToRef(gvr, newRaw)
+			// newObj := tombstone.Obj[*unstructured.Unstructured](newRaw)
+			// newOR := ObjectReferenceFrom(newObj)
 			newOwners := ObjectReferencesFromOwnerReferences(
-				logicalcluster.From(newObj),
+				newRef.ClusterName,
 				newObj.GetNamespace(),
 				newObj.GetOwnerReferences(),
 			)
 
-			gc.graph.Add(newOR, oldOwners, newOwners)
+			gc.log.Info("Updating object in graph", "object", newRef, "oldOwners", oldOwners, "newOwners", newOwners)
+			gc.graph.Add(newRef, oldOwners, newOwners)
+			// gc.log.Info("Update event for object", "gvr", gvr, "oldObj", oldRaw, "newObj", newRaw)
+			// oldPartial := tombstone.Obj[*metav1.PartialObjectMetadata](oldRaw)
+			//
+			// clusterName := logicalcluster.From(oldPartial)
+			// gvk, err := gc.options.DynRESTMapper.ForCluster(clusterName).KindFor(gvr)
+			// if err != nil {
+			// 	gc.log.Error(err, "error getting GVK for GVR", "gvr", gvr, "cluster", clusterName)
+			// 	return
+			// }
+			//
+			// // oldRef := ObjectReferenceFromPartial(gvk, oldPartial)
+			//
+			// oldOwners := ObjectReferencesFromOwnerReferences(
+			// 	clusterName,
+			// 	oldPartial.GetNamespace(),
+			// 	oldPartial.GetOwnerReferences(),
+			// )
+			//
+			// newPartial := tombstone.Obj[*metav1.PartialObjectMetadata](newRaw)
+			// newRef := ObjectReferenceFromPartial(gvk, newPartial)
+			// newOwners := ObjectReferencesFromOwnerReferences(
+			// 	clusterName,
+			// 	newPartial.GetNamespace(),
+			// 	newPartial.GetOwnerReferences(),
+			// )
+			//
+			// gc.log.Info("Updating object in graph", "object", newRef, "oldOwners", oldOwners, "newOwners", newOwners)
+			// gc.graph.Add(newRef, oldOwners, newOwners)
 		},
 		DeleteFunc: func(obj interface{}) {
-			u := tombstone.Obj[*unstructured.Unstructured](obj)
-			or := ObjectReferenceFrom(u)
-			gc.deletionQueue.Add(or)
+			gc.log.Info("Delete event for object", "gvr", gvr, "obj", obj)
+			obj, ref := gc.anyToRef(gvr, obj)
+			// u := tombstone.Obj[*unstructured.Unstructured](obj)
+			// or := ObjectReferenceFrom(u)
+			gc.log.Info("Queuing object for deletion", "object", ref)
+			gc.deletionQueue.Add(ref)
+			// gc.log.Info("Delete event for object", "gvr", gvr, "obj", obj)
+			// partial := tombstone.Obj[*metav1.PartialObjectMetadata](obj)
+			//
+			// clusterName := logicalcluster.From(partial)
+			// gvk, err := gc.options.DynRESTMapper.ForCluster(clusterName).KindFor(gvr)
+			// if err != nil {
+			// 	gc.log.Error(err, "error getting GVK for GVR", "gvr", gvr, "cluster", clusterName)
+			// 	return
+			// }
+			//
+			// ref := ObjectReferenceFromPartial(gvk, partial)
+			//
+			// gc.log.Info("Queuing object for deletion", "object", ref)
+			// gc.deletionQueue.Add(ref)
 		},
 	}
 
@@ -293,6 +406,7 @@ func (gc *GarbageCollector) startMonitorForVersion(crd *apiextensionsv1.CustomRe
 		return nil, fmt.Errorf("error getting informer for GVR %v: %w", gvr, err)
 	}
 
+	gc.log.Info("Starting monitor for CRD version", "crd", crd.Name, "gvr", gvr)
 	registration, err := informer.Informer().AddEventHandler(handlers)
 	if err != nil {
 		return nil, fmt.Errorf("error adding event handler for GVR %v: %w", gvr, err)
@@ -329,6 +443,7 @@ func (gc *GarbageCollector) processDeletionQueue(ctx context.Context) bool {
 	}
 	defer gc.deletionQueue.Done(or)
 
+	gc.log.Info("Processing deletion queue item", "object", or)
 	requeue, err := gc.processDeletionQueueItem(ctx, or)
 	if err != nil {
 		gc.log.Error(err, "error processing deletion queue item", "object", or)
@@ -345,15 +460,18 @@ func (gc *GarbageCollector) processDeletionQueue(ctx context.Context) bool {
 }
 
 func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or ObjectReference) (bool, error) {
+	gc.log.Info("Processing deletion for object", "object", or)
+
 	gvr, err := gc.GVR(or)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("error getting GVR for object %v: %w", or, err)
 	}
 
 	client := gc.options.MetadataClusterClient.Cluster(or.ClusterName.Path()).
 		Resource(gvr).
 		Namespace(or.Namespace)
 
+	gc.log.Info("Getting latest version of object from API server", "object", or)
 	latest, err := client.Get(ctx, or.Name, metav1.GetOptions{})
 	// TODO(ntnn): this is not good. better would probably to pass the
 	// unstructured through the queue and to only work off of that data
@@ -361,6 +479,7 @@ func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or Obj
 	// If we get a not found error, the object is already gone but the
 	// graph might still have objects for it either because the gc,
 	// queue or graph is lagging behind.
+	gc.log.Info("Got latest version of object from API server", "object", or, "latest", latest)
 	if apierrors.IsNotFound(err) {
 		// Object is already gone, remove it from the graph.
 		gc.graph.Remove(or)
@@ -368,23 +487,6 @@ func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or Obj
 	}
 	if err != nil {
 		return false, err
-	}
-
-	if hasFinalizer(latest, metav1.FinalizerOrphanDependents) {
-		if err := gc.orphanOwned(ctx, or); err != nil {
-			return false, err
-		}
-
-		patch, err := patchRemoveFinalizer(latest, metav1.FinalizerOrphanDependents)
-		if err != nil {
-			return false, err
-		}
-
-		if _, err := client.Patch(ctx, or.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
-			return false, err
-		}
-		// Requeue to continue deletion after orphaning is propagated.
-		return true, nil
 	}
 
 	// metav1.FinalizerDeleteDependents doesn't need special handling.
@@ -396,14 +498,38 @@ func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or Obj
 	// the informers have caught up and the graph is consistent.
 	owned := gc.graph.Owned(or)
 	if len(owned) > 0 {
-		// There are owned objects. Add them to the deletion queue and then requeue.
+		// Orphan resources
+		if hasFinalizer(latest, metav1.FinalizerOrphanDependents) {
+			if err := gc.orphanOwned(ctx, or); err != nil {
+				return false, err
+			}
+			// Requeue until the graph lists no owned objects.
+			return true, nil
+		}
+
+		// Delete owned objects by queueing them for deletion.
 		for _, ownedRef := range owned {
+			gc.log.Info("Queuing owned object for deletion", "ownedObject", ownedRef, "ownerObject", or)
 			gc.deletionQueue.Add(ownedRef)
 		}
 		// Requeue the original object to check later if owned objects are gone.
+		gc.log.Info("Owned objects exist, requeuing deletion", "object", or, "ownedCount", len(owned))
 		return true, nil
 	}
 	// No owned objects. Proceed to delete the object.
+	gc.log.Info("Deleting object from API server", "object", or)
+
+	if hasFinalizer(latest, metav1.FinalizerOrphanDependents) {
+		gc.log.Info("Removing orphan finalizer from object", "object", or)
+		patch, err := patchRemoveFinalizer(latest, metav1.FinalizerOrphanDependents)
+		if err != nil {
+			return false, err
+		}
+
+		if _, err := client.Patch(ctx, or.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
+			return false, err
+		}
+	}
 
 	preconditions := metav1.Preconditions{UID: &or.UID}
 
@@ -433,6 +559,7 @@ func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or Obj
 }
 
 func (gc *GarbageCollector) orphanOwned(ctx context.Context, or ObjectReference) error {
+	// TODO(ntnn): pass owned resources to avoid querying the graph again
 	owned := gc.graph.Owned(or)
 	if len(owned) == 0 {
 		return nil
