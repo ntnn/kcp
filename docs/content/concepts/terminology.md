@@ -218,3 +218,62 @@ available shards.
 
 !!! note
     Depending on how you setup kcp, you might have front proxy running even though you don't have a sharded setup.
+
+## Front Proxy
+
+The Front Proxy (`kcp-front-proxy`) is a stateless reverse proxy that serves as the primary entry point for client
+interactions with kcp clusters. It handles TLS termination, client certificate authentication, and intelligent request
+routing across multiple shards and virtual workspaces.
+
+### Purpose and Use Cases
+
+The primary purposes of the Front Proxy are:
+
+- **Single Entrypoint**: Provides a unified endpoint for clients to interact with all workspaces across different shards,
+  eliminating the need for clients to know about or connect directly to individual kcp servers.
+
+- **Shard Awareness**: Automatically determines which shard hosts a requested workspace and routes requests appropriately.
+  When a new workspace is created, the Front Proxy's scheduler assigns it to an available shard transparently.
+
+- **Virtual Workspace Mounting**: Routes requests to custom virtual workspaces based on configurable path mappings,
+  allowing organizations to mount and serve virtual workspace servers for specialized APIs and functionality.
+
+- **TLS Termination**: Handles TLS connection termination and manages client certificate authentication, forwarding
+  authentication information (such as the client certificate's Common Name and Organizations) to backend API servers
+  via HTTP headers.
+
+- **Authentication and Authorization**: Supports per-workspace authentication when configured with advanced URL patterns
+  (using placeholders like `{cluster}`), enabling differentiated authentication policies based on workspace context.
+
+### Request Routing
+
+The Front Proxy uses configurable path mappings to determine how to route requests:
+
+- **Workspace Requests**: Requests to `/clusters/<workspace-path>` are routed to the appropriate kcp shard that hosts
+  the workspace. The proxy queries the shard index to locate the workspace and forwards the request accordingly.
+
+- **Virtual Workspace Requests**: Requests to `/services/<path>` are routed to configured virtual workspace servers based
+  on path prefix matching. These mappings support placeholder patterns (e.g., `/services/{servicename}/clusters/{cluster}`)
+  for advanced routing and authentication scenarios.
+
+- **Shard Cluster Access**: A fallback mapping (typically `/`) routes requests to the primary kcp shard when a specific
+  cluster context cannot be determined.
+
+### Configuration
+
+The Front Proxy is configured via a `mapping.yaml` file that defines:
+
+- Path prefixes to match incoming requests
+- Backend API server addresses (kcp shards or virtual workspace servers)
+- Server CA certificates for backend verification
+- Client certificate information for mTLS communication with backends
+- Optional URL placeholders for per-workspace authentication
+
+Each mapping rule can specify different backends and authentication credentials, enabling the Front Proxy to serve as
+a flexible gateway for complex multi-shard and multi-workspace architectures.
+
+### Stateless Architecture
+
+The Front Proxy maintains no state between requests, making it horizontally scalable. Multiple Front Proxy instances can
+be deployed behind a load balancer to distribute client connections and provide high availability. Each instance operates
+independently and can handle any incoming request by consulting the shared shard index to make routing decisions.
