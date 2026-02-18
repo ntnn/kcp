@@ -74,10 +74,7 @@ func CreateFromFS(ctx context.Context, client apiextensionsv1client.CustomResour
 	for err := range bootstrapErrChan {
 		bootstrapErrors = append(bootstrapErrors, err)
 	}
-	if err := utilerrors.NewAggregate(bootstrapErrors); err != nil {
-		return fmt.Errorf("could not bootstrap CRDs: %w", err)
-	}
-	return nil
+	return utilerrors.NewAggregate(bootstrapErrors)
 }
 
 // Create creates the given CRDs using the target client and waits
