@@ -494,11 +494,11 @@ func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) err
 	s.KubeSharedInformerFactory.Start(hookCtx.Done())
 	s.ApiExtensionsSharedInformerFactory.Start(hookCtx.Done())
 	s.CacheKubeSharedInformerFactory.Start(hookCtx.Done())
-
-	s.KubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-	s.ApiExtensionsSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-	s.CacheKubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
 	logger.Info("finished starting kube informers")
+
+	// s.KubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+	// s.ApiExtensionsSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+	// s.CacheKubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
 
 	select {
 	case <-hookCtx.Done():
@@ -541,16 +541,17 @@ func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) err
 	}
 	logger.Info("finished bootstrapping the shard workspace")
 
-	go s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().Run(hookCtx.Done())
-	go s.KcpSharedInformerFactory.Apis().V1alpha1().APIExportEndpointSlices().Informer().Run(hookCtx.Done())
-	go s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().Run(hookCtx.Done())
-	go s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookCtx.Done())
-	go s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookCtx.Done())
-	go s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().Run(hookCtx.Done())
-	go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookCtx.Done())
-	go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookCtx.Done())
-
 	logger.Info("starting APIExport, APIBinding and LogicalCluster informers")
+	go s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().Run(hookCtx.Done())
+	go s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookCtx.Done())
+	go s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Apis().V1alpha1().APIExportEndpointSlices().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().Run(hookCtx.Done())
+
+	logger.Info("waiting on APIExport, APIBinding and LogicalCluster informers")
 	if err := wait.PollUntilContextCancel(hookCtx, time.Millisecond*100, true, func(ctx context.Context) (bool, error) {
 		exportsSynced := s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced()
 		cacheExportsSynced := s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced()
@@ -582,12 +583,36 @@ func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) err
 		logger.Info("finished getting kcp APIExport identities for the root shard")
 	}
 
-	s.KcpSharedInformerFactory.Start(hookCtx.Done())
 	s.CacheKcpSharedInformerFactory.Start(hookCtx.Done())
+	s.KcpSharedInformerFactory.Start(hookCtx.Done())
 
-	s.KcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
 	s.CacheKcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+	s.KcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
 
+	go s.updateShard(hookCtx, logger)
+
+	select {
+	case <-hookCtx.Done():
+		return nil // context closed, avoid reporting success below
+	default:
+	}
+
+	logger.Info("finished starting (remaining) kcp informers")
+
+	logger.Info("starting dynamic metadata informer worker")
+	go s.DiscoveringDynamicSharedInformerFactory.StartWorker(hookCtx)
+
+	logger.Info("synced all informers, ready to start controllers")
+	close(s.syncedCh)
+
+	if s.Options.Extra.ShardName == corev1alpha1.RootShard {
+		return s.bootstrapRootWorkspacePhase1(hookCtx)
+	}
+
+	return nil
+}
+
+func (s *Server) updateShard(hookCtx context.Context, logger logr.Logger) {
 	// create or update shard
 	shard := &corev1alpha1.Shard{
 		ObjectMeta: metav1.ObjectMeta{
@@ -628,28 +653,7 @@ func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) err
 		return true, nil
 	}); err != nil {
 		logger.Error(err, "failed reconciling Shard resource in the root workspace")
-		return nil // don't klog.Fatal. This only happens when context is cancelled.
 	}
-
-	select {
-	case <-hookCtx.Done():
-		return nil // context closed, avoid reporting success below
-	default:
-	}
-
-	logger.Info("finished starting (remaining) kcp informers")
-
-	logger.Info("starting dynamic metadata informer worker")
-	go s.DiscoveringDynamicSharedInformerFactory.StartWorker(hookCtx)
-
-	logger.Info("synced all informers, ready to start controllers")
-	close(s.syncedCh)
-
-	if s.Options.Extra.ShardName == corev1alpha1.RootShard {
-		return s.bootstrapRootWorkspacePhase1(hookCtx)
-	}
-
-	return nil
 }
 
 func (s *Server) bootstrapRootWorkspacePhase0(hookCtx context.Context) error {
