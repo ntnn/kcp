@@ -44,6 +44,7 @@ import (
 	autoscalingrest "k8s.io/kubernetes/pkg/registry/autoscaling/rest"
 	flowcontrolrest "k8s.io/kubernetes/pkg/registry/flowcontrol/rest"
 
+	"github.com/go-logr/logr"
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/sdk/apis/core"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -410,236 +411,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.AddPostStartHook(hookName, func(hookContext genericapiserver.PostStartHookContext) error {
 		logger = logger.WithValues("postStartHook", hookName)
 		hookCtx := klog.NewContext(hookContext, logger)
-
-		logger.Info("starting kube informers")
-		s.KubeSharedInformerFactory.Start(hookCtx.Done())
-		s.ApiExtensionsSharedInformerFactory.Start(hookCtx.Done())
-		s.CacheKubeSharedInformerFactory.Start(hookCtx.Done())
-
-		s.KubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-		s.ApiExtensionsSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-		s.CacheKubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-
-		select {
-		case <-hookCtx.Done():
-			return nil // context closed, avoid reporting success below
-		default:
-		}
-
-		logger.Info("finished starting kube informers")
-
-		logger.Info("bootstrapping system CRDs")
-		if err := wait.PollUntilContextCancel(hookCtx, time.Second, true, func(ctx context.Context) (bool, error) {
-			if err := systemcrds.Bootstrap(ctx,
-				s.ApiExtensionsClusterClient.Cluster(SystemCRDClusterName.Path()),
-				s.ApiExtensionsClusterClient.Cluster(SystemCRDClusterName.Path()).Discovery(),
-				s.DynamicClusterClient.Cluster(SystemCRDClusterName.Path()),
-				sets.New(s.Options.Extra.BatteriesIncluded...),
-			); err != nil {
-				logger.Error(err, "failed to bootstrap system CRDs, retrying")
-				return false, nil // keep trying
-			}
-			return true, nil
-		}); err != nil {
-			logger.Error(err, "failed to bootstrap system CRDs")
-			return nil // don't klog.Fatal. This only happens when context is cancelled.
-		}
-		logger.Info("finished bootstrapping system CRDs")
-
-		logger.Info("bootstrapping the shard workspace")
-		if err := wait.PollUntilContextCancel(hookCtx, time.Second, true, func(ctx context.Context) (bool, error) {
-			if err := configshard.Bootstrap(ctx,
-				s.ApiExtensionsClusterClient.Cluster(configshard.SystemShardCluster.Path()).Discovery(),
-				s.DynamicClusterClient.Cluster(configshard.SystemShardCluster.Path()),
-				sets.New(s.Options.Extra.BatteriesIncluded...),
-				s.KcpClusterClient.Cluster(configshard.SystemShardCluster.Path())); err != nil {
-				logger.Error(err, "failed to bootstrap the shard workspace")
-				return false, nil // keep trying
-			}
-			return true, nil
-		}); err != nil {
-			logger.Error(err, "failed to bootstrap the shard workspace")
-			return nil // don't klog.Fatal. This only happens when context is cancelled.
-		}
-		logger.Info("finished bootstrapping the shard workspace")
-
-		go s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().Run(hookContext.Done())
-		go s.KcpSharedInformerFactory.Apis().V1alpha1().APIExportEndpointSlices().Informer().Run(hookContext.Done())
-		go s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().Run(hookContext.Done())
-		go s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookContext.Done())
-		go s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookContext.Done())
-		go s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().Run(hookContext.Done())
-		go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookContext.Done())
-		go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookContext.Done())
-
-		logger.Info("starting APIExport, APIBinding and LogicalCluster informers")
-		if err := wait.PollUntilContextCancel(hookCtx, time.Millisecond*100, true, func(ctx context.Context) (bool, error) {
-			exportsSynced := s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced()
-			cacheExportsSynced := s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced()
-			logicalClusterSynced := s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().HasSynced()
-			return exportsSynced && cacheExportsSynced && logicalClusterSynced, nil
-		}); err != nil {
-			logger.Error(err, "failed to start some of APIExport, APIBinding and LogicalCluster informers")
-			return nil // don't klog.Fatal. This only happens when context is cancelled.
-		}
-		logger.Info("finished starting APIExport, APIBinding and LogicalCluster informers")
-
-		if s.Options.Extra.ShardName == corev1alpha1.RootShard {
-			logger.Info("bootstrapping root workspace phase 0")
-			s.RootShardKcpClusterClient = s.KcpClusterClient
-
-			if s.Options.Extra.RootIdentitiesFile != "" {
-				logger.Info("bootstrapping identities into root workspace", "file", s.Options.Extra.RootIdentitiesFile)
-				logger.Info("creating system namespace in root workspace")
-				if err := configrootidentitiesns.Bootstrap(hookCtx,
-					s.BootstrapApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
-					s.DynamicClusterClient.Cluster(core.RootCluster.Path()),
-					s.KubeClusterClient.Cluster(core.RootCluster.Path()),
-				); err != nil {
-					logger.Error(err, "failed to bootstrap identity secrets namespace")
-					return nil // don't klog.Fatal. This only happens when context is cancelled.
-				}
-				logger.Info("created system namespace in root workspace")
-				logger.Info("bootstrapping root workspace with identities", "file", s.Options.Extra.RootIdentitiesFile)
-				identitiesBytes, err := os.ReadFile(s.Options.Extra.RootIdentitiesFile)
-				if err != nil {
-					logger.Error(err, "failed to read root identities file")
-					return nil // don't klog.Fatal. This only happens when context is cancelled.
-				}
-				if err := configrootidentities.Bootstrap(hookCtx,
-					s.BootstrapApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
-					s.DynamicClusterClient.Cluster(core.RootCluster.Path()),
-					s.KubeClusterClient.Cluster(core.RootCluster.Path()),
-					identitiesBytes,
-				); err != nil {
-					logger.Error(err, "failed to bootstrap root workspace with identities")
-					return nil // don't klog.Fatal. This only happens when context is cancelled.
-				}
-				logger.Info("bootstrapped root workspace with identities", "file", s.Options.Extra.RootIdentitiesFile)
-			}
-
-			// bootstrap root workspace phase 0 only if we are on the root shard, no APIBinding resources yet
-			if err := configrootphase0.Bootstrap(hookCtx,
-				s.KcpClusterClient.Cluster(core.RootCluster.Path()),
-				s.ApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
-				s.DynamicClusterClient.Cluster(core.RootCluster.Path()),
-				sets.New(s.Options.Extra.BatteriesIncluded...),
-			); err != nil {
-				logger.Error(err, "failed to bootstrap root workspace phase 0")
-				return nil // don't klog.Fatal. This only happens when context is cancelled.
-			}
-			logger.Info("bootstrapped root workspace phase 0")
-
-			logger.Info("getting kcp APIExport identities")
-			var identityErr error
-			if err := wait.PollUntilContextCancel(hookCtx, time.Millisecond*500, true, func(ctx context.Context) (bool, error) {
-				if err := s.resolveIdentities(ctx); err != nil {
-					logger.V(3).Info("failed to resolve identities, keeping trying", "err", err)
-					identityErr = err
-					return false, nil
-				}
-				return true, nil
-			}); err != nil {
-				logger.Error(err, "failed to get or create identities: %w", identityErr)
-				return nil // don't klog.Fatal. This only happens when context is cancelled.
-			}
-			logger.Info("finished getting kcp APIExport identities")
-		} else if len(s.Options.Extra.RootShardKubeconfigFile) > 0 {
-			logger.Info("getting kcp APIExport identities for the root shard")
-			if err := wait.PollUntilContextCancel(hookContext, time.Millisecond*500, true, func(ctx context.Context) (bool, error) {
-				if err := s.resolveIdentities(ctx); err != nil {
-					logger.V(3).Info("failed to resolve identities for the root shard, keeping trying", "err", err)
-					return false, nil
-				}
-				return true, nil
-			}); err != nil {
-				logger.Error(err, "failed to get or create identities for the root shard")
-				return nil // don't klog.Fatal. This only happens when context is cancelled.
-			}
-			logger.Info("finished getting kcp APIExport identities for the root shard")
-		}
-
-		s.KcpSharedInformerFactory.Start(hookCtx.Done())
-		s.CacheKcpSharedInformerFactory.Start(hookCtx.Done())
-
-		s.KcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-		s.CacheKcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-
-		// create or update shard
-		shard := &corev1alpha1.Shard{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:        s.Options.Extra.ShardName,
-				Annotations: map[string]string{logicalcluster.AnnotationKey: core.RootCluster.String()},
-				Labels: map[string]string{
-					"name": s.Options.Extra.ShardName,
-				},
-			},
-			Spec: corev1alpha1.ShardSpec{
-				BaseURL:             s.CompletedConfig.ShardBaseURL(),
-				ExternalURL:         s.CompletedConfig.ShardExternalURL(),
-				VirtualWorkspaceURL: s.CompletedConfig.ShardVirtualWorkspaceURL(),
-			},
-		}
-		logger.Info("Creating or updating Shard", "shard", s.Options.Extra.ShardName)
-		if err := wait.PollUntilContextCancel(hookCtx, time.Second, true, func(ctx context.Context) (bool, error) {
-			existingShard, err := s.RootShardKcpClusterClient.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().Get(ctx, shard.Name, metav1.GetOptions{})
-			if err != nil && !errors.IsNotFound(err) {
-				logger.Error(err, "failed getting Shard from the root workspace")
-				return false, nil
-			} else if errors.IsNotFound(err) {
-				if _, err := s.RootShardKcpClusterClient.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().Create(ctx, shard, metav1.CreateOptions{}); err != nil {
-					logger.Error(err, "failed creating Shard in the root workspace")
-					return false, nil
-				}
-				logger.Info("Created Shard", "shard", s.Options.Extra.ShardName)
-				return true, nil
-			}
-			existingShard.Spec.BaseURL = shard.Spec.BaseURL
-			existingShard.Spec.ExternalURL = shard.Spec.ExternalURL
-			existingShard.Spec.VirtualWorkspaceURL = shard.Spec.VirtualWorkspaceURL
-			if _, err := s.RootShardKcpClusterClient.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().Update(hookCtx, existingShard, metav1.UpdateOptions{}); err != nil {
-				logger.Error(err, "failed updating Shard in the root workspace")
-				return false, nil
-			}
-			logger.Info("Updated Shard", "shard", s.Options.Extra.ShardName)
-			return true, nil
-		}); err != nil {
-			logger.Error(err, "failed reconciling Shard resource in the root workspace")
-			return nil // don't klog.Fatal. This only happens when context is cancelled.
-		}
-
-		select {
-		case <-hookCtx.Done():
-			return nil // context closed, avoid reporting success below
-		default:
-		}
-
-		logger.Info("finished starting (remaining) kcp informers")
-
-		logger.Info("starting dynamic metadata informer worker")
-		go s.DiscoveringDynamicSharedInformerFactory.StartWorker(hookCtx)
-
-		logger.Info("synced all informers, ready to start controllers")
-		close(s.syncedCh)
-
-		if s.Options.Extra.ShardName == corev1alpha1.RootShard {
-			// the root ws is only present on the root shard
-			logger.Info("starting bootstrapping root workspace phase 1")
-			if err := configroot.Bootstrap(
-				hookCtx,
-				s.BootstrapApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
-				s.BootstrapDynamicClusterClient.Cluster(core.RootCluster.Path()),
-				s.Options.HomeWorkspaces.HomeCreatorGroups,
-				sets.New(s.Options.Extra.BatteriesIncluded...),
-			); err != nil {
-				logger.Error(err, "failed to bootstrap root workspace phase 1")
-				return nil // don't klog.Fatal. This only happens when context is cancelled.
-			}
-			logger.Info("finished bootstrapping root workspace phase 1")
-			close(s.rootPhase1FinishedCh)
-		}
-
-		return nil
+		return s.startInformers(hookCtx, logger)
 	}); err != nil {
 		return err
 	}
@@ -715,6 +487,252 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	return s.MiniAggregator.GenericAPIServer.PrepareRun().RunWithContext(ctx)
+}
+
+func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) error {
+	logger.Info("starting kube informers")
+	s.KubeSharedInformerFactory.Start(hookCtx.Done())
+	s.ApiExtensionsSharedInformerFactory.Start(hookCtx.Done())
+	s.CacheKubeSharedInformerFactory.Start(hookCtx.Done())
+
+	s.KubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+	s.ApiExtensionsSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+	s.CacheKubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+	logger.Info("finished starting kube informers")
+
+	select {
+	case <-hookCtx.Done():
+		return nil // context closed, avoid reporting success below
+	default:
+	}
+
+	logger.Info("bootstrapping system CRDs")
+	if err := wait.PollUntilContextCancel(hookCtx, time.Second, true, func(ctx context.Context) (bool, error) {
+		if err := systemcrds.Bootstrap(ctx,
+			s.ApiExtensionsClusterClient.Cluster(SystemCRDClusterName.Path()),
+			s.ApiExtensionsClusterClient.Cluster(SystemCRDClusterName.Path()).Discovery(),
+			s.DynamicClusterClient.Cluster(SystemCRDClusterName.Path()),
+			sets.New(s.Options.Extra.BatteriesIncluded...),
+		); err != nil {
+			logger.Error(err, "failed to bootstrap system CRDs, retrying")
+			return false, nil // keep trying
+		}
+		return true, nil
+	}); err != nil {
+		logger.Error(err, "failed to bootstrap system CRDs")
+		return nil // don't klog.Fatal. This only happens when context is cancelled.
+	}
+	logger.Info("finished bootstrapping system CRDs")
+
+	logger.Info("bootstrapping the shard workspace")
+	if err := wait.PollUntilContextCancel(hookCtx, time.Second, true, func(ctx context.Context) (bool, error) {
+		if err := configshard.Bootstrap(ctx,
+			s.ApiExtensionsClusterClient.Cluster(configshard.SystemShardCluster.Path()).Discovery(),
+			s.DynamicClusterClient.Cluster(configshard.SystemShardCluster.Path()),
+			sets.New(s.Options.Extra.BatteriesIncluded...),
+			s.KcpClusterClient.Cluster(configshard.SystemShardCluster.Path())); err != nil {
+			logger.Error(err, "failed to bootstrap the shard workspace")
+			return false, nil // keep trying
+		}
+		return true, nil
+	}); err != nil {
+		logger.Error(err, "failed to bootstrap the shard workspace")
+		return nil // don't klog.Fatal. This only happens when context is cancelled.
+	}
+	logger.Info("finished bootstrapping the shard workspace")
+
+	go s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Apis().V1alpha1().APIExportEndpointSlices().Informer().Run(hookCtx.Done())
+	go s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().Run(hookCtx.Done())
+	go s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookCtx.Done())
+	go s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookCtx.Done())
+	go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookCtx.Done())
+
+	logger.Info("starting APIExport, APIBinding and LogicalCluster informers")
+	if err := wait.PollUntilContextCancel(hookCtx, time.Millisecond*100, true, func(ctx context.Context) (bool, error) {
+		exportsSynced := s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced()
+		cacheExportsSynced := s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced()
+		logicalClusterSynced := s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().HasSynced()
+		return exportsSynced && cacheExportsSynced && logicalClusterSynced, nil
+	}); err != nil {
+		logger.Error(err, "failed to start some of APIExport, APIBinding and LogicalCluster informers")
+		return nil // don't klog.Fatal. This only happens when context is cancelled.
+	}
+	logger.Info("finished starting APIExport, APIBinding and LogicalCluster informers")
+
+	if s.Options.Extra.ShardName == corev1alpha1.RootShard {
+		if err := s.bootstrapRootWorkspacePhase0(hookCtx); err != nil {
+			logger.Error(err, "failed to bootstrap root workspace phase 0")
+			return nil // don't klog.Fatal. This only happens when context is cancelled.
+		}
+	} else if len(s.Options.Extra.RootShardKubeconfigFile) > 0 {
+		logger.Info("getting kcp APIExport identities for the root shard")
+		if err := wait.PollUntilContextCancel(hookCtx, time.Millisecond*500, true, func(ctx context.Context) (bool, error) {
+			if err := s.resolveIdentities(ctx); err != nil {
+				logger.V(3).Info("failed to resolve identities for the root shard, keeping trying", "err", err)
+				return false, nil
+			}
+			return true, nil
+		}); err != nil {
+			logger.Error(err, "failed to get or create identities for the root shard")
+			return nil // don't klog.Fatal. This only happens when context is cancelled.
+		}
+		logger.Info("finished getting kcp APIExport identities for the root shard")
+	}
+
+	s.KcpSharedInformerFactory.Start(hookCtx.Done())
+	s.CacheKcpSharedInformerFactory.Start(hookCtx.Done())
+
+	s.KcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+	s.CacheKcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+
+	// create or update shard
+	shard := &corev1alpha1.Shard{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        s.Options.Extra.ShardName,
+			Annotations: map[string]string{logicalcluster.AnnotationKey: core.RootCluster.String()},
+			Labels: map[string]string{
+				"name": s.Options.Extra.ShardName,
+			},
+		},
+		Spec: corev1alpha1.ShardSpec{
+			BaseURL:             s.CompletedConfig.ShardBaseURL(),
+			ExternalURL:         s.CompletedConfig.ShardExternalURL(),
+			VirtualWorkspaceURL: s.CompletedConfig.ShardVirtualWorkspaceURL(),
+		},
+	}
+	logger.Info("Creating or updating Shard", "shard", s.Options.Extra.ShardName)
+	if err := wait.PollUntilContextCancel(hookCtx, time.Second, true, func(ctx context.Context) (bool, error) {
+		existingShard, err := s.RootShardKcpClusterClient.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().Get(ctx, shard.Name, metav1.GetOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			logger.Error(err, "failed getting Shard from the root workspace")
+			return false, nil
+		} else if errors.IsNotFound(err) {
+			if _, err := s.RootShardKcpClusterClient.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().Create(ctx, shard, metav1.CreateOptions{}); err != nil {
+				logger.Error(err, "failed creating Shard in the root workspace")
+				return false, nil
+			}
+			logger.Info("Created Shard", "shard", s.Options.Extra.ShardName)
+			return true, nil
+		}
+		existingShard.Spec.BaseURL = shard.Spec.BaseURL
+		existingShard.Spec.ExternalURL = shard.Spec.ExternalURL
+		existingShard.Spec.VirtualWorkspaceURL = shard.Spec.VirtualWorkspaceURL
+		if _, err := s.RootShardKcpClusterClient.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().Update(hookCtx, existingShard, metav1.UpdateOptions{}); err != nil {
+			logger.Error(err, "failed updating Shard in the root workspace")
+			return false, nil
+		}
+		logger.Info("Updated Shard", "shard", s.Options.Extra.ShardName)
+		return true, nil
+	}); err != nil {
+		logger.Error(err, "failed reconciling Shard resource in the root workspace")
+		return nil // don't klog.Fatal. This only happens when context is cancelled.
+	}
+
+	select {
+	case <-hookCtx.Done():
+		return nil // context closed, avoid reporting success below
+	default:
+	}
+
+	logger.Info("finished starting (remaining) kcp informers")
+
+	logger.Info("starting dynamic metadata informer worker")
+	go s.DiscoveringDynamicSharedInformerFactory.StartWorker(hookCtx)
+
+	logger.Info("synced all informers, ready to start controllers")
+	close(s.syncedCh)
+
+	if s.Options.Extra.ShardName == corev1alpha1.RootShard {
+		return s.bootstrapRootWorkspacePhase1(hookCtx)
+	}
+
+	return nil
+}
+
+func (s *Server) bootstrapRootWorkspacePhase0(hookCtx context.Context) error {
+	logger := klog.FromContext(hookCtx)
+	logger.Info("bootstrapping root workspace phase 0")
+	s.RootShardKcpClusterClient = s.KcpClusterClient
+
+	if s.Options.Extra.RootIdentitiesFile != "" {
+		logger.Info("bootstrapping identities into root workspace", "file", s.Options.Extra.RootIdentitiesFile)
+		logger.Info("creating system namespace in root workspace")
+		if err := configrootidentitiesns.Bootstrap(hookCtx,
+			s.BootstrapApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
+			s.DynamicClusterClient.Cluster(core.RootCluster.Path()),
+			s.KubeClusterClient.Cluster(core.RootCluster.Path()),
+		); err != nil {
+			logger.Error(err, "failed to bootstrap identity secrets namespace")
+			return nil // don't klog.Fatal. This only happens when context is cancelled.
+		}
+		logger.Info("created system namespace in root workspace")
+		logger.Info("bootstrapping root workspace with identities", "file", s.Options.Extra.RootIdentitiesFile)
+		identitiesBytes, err := os.ReadFile(s.Options.Extra.RootIdentitiesFile)
+		if err != nil {
+			logger.Error(err, "failed to read root identities file")
+			return nil // don't klog.Fatal. This only happens when context is cancelled.
+		}
+		if err := configrootidentities.Bootstrap(hookCtx,
+			s.BootstrapApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
+			s.DynamicClusterClient.Cluster(core.RootCluster.Path()),
+			s.KubeClusterClient.Cluster(core.RootCluster.Path()),
+			identitiesBytes,
+		); err != nil {
+			logger.Error(err, "failed to bootstrap root workspace with identities")
+			return nil // don't klog.Fatal. This only happens when context is cancelled.
+		}
+		logger.Info("bootstrapped root workspace with identities", "file", s.Options.Extra.RootIdentitiesFile)
+	}
+
+	// bootstrap root workspace phase 0 only if we are on the root shard, no APIBinding resources yet
+	if err := configrootphase0.Bootstrap(hookCtx,
+		s.KcpClusterClient.Cluster(core.RootCluster.Path()),
+		s.ApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
+		s.DynamicClusterClient.Cluster(core.RootCluster.Path()),
+		sets.New(s.Options.Extra.BatteriesIncluded...),
+	); err != nil {
+		logger.Error(err, "failed to bootstrap root workspace phase 0")
+		return nil // don't klog.Fatal. This only happens when context is cancelled.
+	}
+	logger.Info("bootstrapped root workspace phase 0")
+
+	logger.Info("getting kcp APIExport identities")
+	var identityErr error
+	if err := wait.PollUntilContextCancel(hookCtx, time.Millisecond*500, true, func(ctx context.Context) (bool, error) {
+		if err := s.resolveIdentities(ctx); err != nil {
+			logger.V(3).Info("failed to resolve identities, keeping trying", "err", err)
+			identityErr = err
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		logger.Error(err, "failed to get or create identities: %w", identityErr)
+		return nil // don't klog.Fatal. This only happens when context is cancelled.
+	}
+	logger.Info("finished getting kcp APIExport identities")
+	return nil
+}
+
+func (s *Server) bootstrapRootWorkspacePhase1(hookCtx context.Context) error {
+	logger := klog.FromContext(hookCtx)
+	// the root ws is only present on the root shard
+	logger.Info("starting bootstrapping root workspace phase 1")
+	if err := configroot.Bootstrap(
+		hookCtx,
+		s.BootstrapApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
+		s.BootstrapDynamicClusterClient.Cluster(core.RootCluster.Path()),
+		s.Options.HomeWorkspaces.HomeCreatorGroups,
+		sets.New(s.Options.Extra.BatteriesIncluded...),
+	); err != nil {
+		logger.Error(err, "failed to bootstrap root workspace phase 1")
+		return nil // don't klog.Fatal. This only happens when context is cancelled.
+	}
+	logger.Info("finished bootstrapping root workspace phase 1")
+	close(s.rootPhase1FinishedCh)
+	return nil
 }
 
 type handlerChainMuxes []*http.ServeMux
