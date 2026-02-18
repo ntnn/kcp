@@ -44,7 +44,6 @@ import (
 	autoscalingrest "k8s.io/kubernetes/pkg/registry/autoscaling/rest"
 	flowcontrolrest "k8s.io/kubernetes/pkg/registry/flowcontrol/rest"
 
-	"github.com/go-logr/logr"
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/sdk/apis/core"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -407,14 +406,41 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 
-	hookName := "kcp-start-informers"
-	if err := s.AddPostStartHook(hookName, func(hookContext genericapiserver.PostStartHookContext) error {
-		logger = logger.WithValues("postStartHook", hookName)
-		hookCtx := klog.NewContext(hookContext, logger)
-		return s.startInformers(hookCtx, logger)
-	}); err != nil {
+	// hookName := "kcp-start-informers"
+	// if err := s.AddPostStartHook(hookName, func(hookContext genericapiserver.PostStartHookContext) error {
+	// 	logger = logger.WithValues("postStartHook", hookName)
+	// 	hookCtx := klog.NewContext(hookContext, logger)
+	// 	return s.startInformers(hookCtx, logger)
+	// }); err != nil {
+	// 	return err
+	// }
+
+	if err := s.AddPostStartHook("start-kube-informers", s.startKubeInformers); err != nil {
 		return err
 	}
+
+	if err := s.AddPostStartHook("bootstrap-system-crds", s.bootstrapSystemCRDs); err != nil {
+		return err
+	}
+
+	if err := s.AddPostStartHook("bootstrap-shard-workspace", s.bootstrapShardWorkspace); err != nil {
+		return err
+	}
+
+	if err := s.AddPostStartHook("bootstrap-root-workspace", s.bootstrapRootWorkspace); err != nil {
+		return err
+	}
+
+	if err := s.AddPostStartHook("update-shard", s.updateShard); err != nil {
+		return err
+	}
+
+	if err := s.AddPostStartHook("wait-on-informers", s.waitOnInformers); err != nil {
+		return err
+	}
+
+	logger.Info("starting dynamic metadata informer worker")
+	go s.DiscoveringDynamicSharedInformerFactory.StartWorker(ctx)
 
 	// ========================================================================================================
 	// TODO: split apart everything after this line, into their own commands, optional launched in this process
@@ -489,23 +515,18 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.MiniAggregator.GenericAPIServer.PrepareRun().RunWithContext(ctx)
 }
 
-func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) error {
+func (s *Server) startKubeInformers(hookCtx genericapiserver.PostStartHookContext) error {
+	logger := klog.FromContext(hookCtx)
 	logger.Info("starting kube informers")
 	s.KubeSharedInformerFactory.Start(hookCtx.Done())
 	s.ApiExtensionsSharedInformerFactory.Start(hookCtx.Done())
 	s.CacheKubeSharedInformerFactory.Start(hookCtx.Done())
 	logger.Info("finished starting kube informers")
+	return nil
+}
 
-	// s.KubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-	// s.ApiExtensionsSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-	// s.CacheKubeSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-
-	select {
-	case <-hookCtx.Done():
-		return nil // context closed, avoid reporting success below
-	default:
-	}
-
+func (s *Server) bootstrapSystemCRDs(hookCtx genericapiserver.PostStartHookContext) error {
+	logger := klog.FromContext(hookCtx)
 	logger.Info("bootstrapping system CRDs")
 	if err := wait.PollUntilContextCancel(hookCtx, time.Second, true, func(ctx context.Context) (bool, error) {
 		if err := systemcrds.Bootstrap(ctx,
@@ -523,7 +544,11 @@ func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) err
 		return nil // don't klog.Fatal. This only happens when context is cancelled.
 	}
 	logger.Info("finished bootstrapping system CRDs")
+	return nil
+}
 
+func (s *Server) bootstrapShardWorkspace(hookCtx genericapiserver.PostStartHookContext) error {
+	logger := klog.FromContext(hookCtx)
 	logger.Info("bootstrapping the shard workspace")
 	if err := wait.PollUntilContextCancel(hookCtx, time.Second, true, func(ctx context.Context) (bool, error) {
 		if err := configshard.Bootstrap(ctx,
@@ -550,7 +575,11 @@ func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) err
 	go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResourceEndpointSlices().Informer().Run(hookCtx.Done())
 	go s.KcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer().Run(hookCtx.Done())
 	go s.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Informer().Run(hookCtx.Done())
+	return nil
+}
 
+func (s *Server) bootstrapRootWorkspace(hookCtx genericapiserver.PostStartHookContext) error {
+	logger := klog.FromContext(hookCtx)
 	logger.Info("waiting on APIExport, APIBinding and LogicalCluster informers")
 	if err := wait.PollUntilContextCancel(hookCtx, time.Millisecond*100, true, func(ctx context.Context) (bool, error) {
 		exportsSynced := s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().HasSynced()
@@ -583,36 +612,35 @@ func (s *Server) startInformers(hookCtx context.Context, logger logr.Logger) err
 		logger.Info("finished getting kcp APIExport identities for the root shard")
 	}
 
+	logger.Info("starting kcp informers")
 	s.CacheKcpSharedInformerFactory.Start(hookCtx.Done())
 	s.KcpSharedInformerFactory.Start(hookCtx.Done())
-
-	s.CacheKcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-	s.KcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
-
-	go s.updateShard(hookCtx, logger)
-
-	select {
-	case <-hookCtx.Done():
-		return nil // context closed, avoid reporting success below
-	default:
-	}
-
-	logger.Info("finished starting (remaining) kcp informers")
-
-	logger.Info("starting dynamic metadata informer worker")
-	go s.DiscoveringDynamicSharedInformerFactory.StartWorker(hookCtx)
-
-	logger.Info("synced all informers, ready to start controllers")
-	close(s.syncedCh)
-
-	if s.Options.Extra.ShardName == corev1alpha1.RootShard {
-		return s.bootstrapRootWorkspacePhase1(hookCtx)
-	}
 
 	return nil
 }
 
-func (s *Server) updateShard(hookCtx context.Context, logger logr.Logger) {
+// func (s *Server) updateShard() error {
+//
+// 	logger.Info("finished starting (remaining) kcp informers")
+//
+// 	logger.Info("starting dynamic metadata informer worker")
+// 	go s.DiscoveringDynamicSharedInformerFactory.StartWorker(hookCtx)
+//
+// 	logger.Info("synced all informers, ready to start controllers")
+// 	// close(s.syncedCh)
+//
+// 	return nil
+// }
+
+func (s *Server) updateShard(hookCtx genericapiserver.PostStartHookContext) error {
+	logger := klog.FromContext(hookCtx)
+
+	logger.Info("waiting on kcp informers")
+	// TODO only wait on the specific informers needed to update the shard
+	s.CacheKcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+	s.KcpSharedInformerFactory.WaitForCacheSync(hookCtx.Done())
+
+	logger.Info("updating shard in the root workspace")
 	// create or update shard
 	shard := &corev1alpha1.Shard{
 		ObjectMeta: metav1.ObjectMeta{
@@ -654,6 +682,8 @@ func (s *Server) updateShard(hookCtx context.Context, logger logr.Logger) {
 	}); err != nil {
 		logger.Error(err, "failed reconciling Shard resource in the root workspace")
 	}
+
+	return nil
 }
 
 func (s *Server) bootstrapRootWorkspacePhase0(hookCtx context.Context) error {
@@ -717,6 +747,11 @@ func (s *Server) bootstrapRootWorkspacePhase0(hookCtx context.Context) error {
 		return nil // don't klog.Fatal. This only happens when context is cancelled.
 	}
 	logger.Info("finished getting kcp APIExport identities")
+
+	if s.Options.Extra.ShardName == corev1alpha1.RootShard {
+		return s.bootstrapRootWorkspacePhase1(hookCtx)
+	}
+
 	return nil
 }
 
@@ -724,6 +759,7 @@ func (s *Server) bootstrapRootWorkspacePhase1(hookCtx context.Context) error {
 	logger := klog.FromContext(hookCtx)
 	// the root ws is only present on the root shard
 	logger.Info("starting bootstrapping root workspace phase 1")
+	// TODO does this need to be retried?
 	if err := configroot.Bootstrap(
 		hookCtx,
 		s.BootstrapApiExtensionsClusterClient.Cluster(core.RootCluster.Path()).Discovery(),
@@ -736,6 +772,19 @@ func (s *Server) bootstrapRootWorkspacePhase1(hookCtx context.Context) error {
 	}
 	logger.Info("finished bootstrapping root workspace phase 1")
 	close(s.rootPhase1FinishedCh)
+	return nil
+}
+
+func (s *Server) waitOnInformers(hookCtx genericapiserver.PostStartHookContext) error {
+	done := hookCtx.Done()
+	s.KcpSharedInformerFactory.WaitForCacheSync(done)
+	s.KubeSharedInformerFactory.WaitForCacheSync(done)
+	s.ApiExtensionsSharedInformerFactory.WaitForCacheSync(done)
+	// s.DiscoveringDynamicSharedInformerFactory.WaitForCacheSync(done)
+	// s.CacheDiscoveringDynamicSharedInformerFactory.WaitForCacheSync(done)
+	s.CacheKcpSharedInformerFactory.WaitForCacheSync(done)
+	s.CacheKubeSharedInformerFactory.WaitForCacheSync(done)
+	close(s.syncedCh)
 	return nil
 }
 

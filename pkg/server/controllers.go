@@ -18,7 +18,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -135,7 +134,9 @@ func (s *Server) runController(ctx context.Context, controller *controllerWrappe
 	if controller.Wait != nil {
 		err = controller.Wait(ctx, s)
 	} else {
-		err = s.WaitForSync(ctx.Done())
+		log.Error(nil, "controller does not define a wait function")
+		return
+		// err = s.WaitForSync(ctx.Done())
 	}
 	if err != nil {
 		log.Error(err, "failed to wait for sync")
@@ -1851,17 +1852,17 @@ func (s *Server) installCachedResourceEndpointSliceURLsController(_ context.Cont
 	})
 }
 
-func (s *Server) WaitForSync(stop <-chan struct{}) error {
-	// Wait for shared informer factories to by synced.
-	// factory. Otherwise, informer list calls may go into backoff (before the CRDs are ready) and
-	// take ~10 seconds to succeed.
-	select {
-	case <-stop:
-		return errors.New("timed out waiting for informers to sync")
-	case <-s.syncedCh:
-		return nil
-	}
-}
+// func (s *Server) WaitForSync(stop <-chan struct{}) error {
+// 	// Wait for shared informer factories to by synced.
+// 	// factory. Otherwise, informer list calls may go into backoff (before the CRDs are ready) and
+// 	// take ~10 seconds to succeed.
+// 	select {
+// 	case <-stop:
+// 		return errors.New("timed out waiting for informers to sync")
+// 	case <-s.syncedCh:
+// 		return nil
+// 	}
+// }
 
 // addIndexerstoInformers is separated out from controllers as the re-election calls for controller re-initialization,
 // it would panics in indexer addition to informers as they are already started at bootup.
