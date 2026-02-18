@@ -69,6 +69,11 @@ LOGCHECK_BIN := logcheck
 LOGCHECK := $(TOOLS_GOBIN_DIR)/$(LOGCHECK_BIN)-$(LOGCHECK_VER)
 export LOGCHECK # so hack scripts can use it
 
+HYDROPHONE_VER := v0.7.0
+HYDROPHONE_BIN := hydrphone
+HYDROPHONE := $(TOOLS_GOBIN_DIR)/$(HYDROPHONE_BIN)-$(HYDROPHONE_VER)
+export HYDROPHONE # so hack scripts can use it
+
 KCP_APIGEN_BIN := apigen
 KCP_APIGEN_GEN := $(TOOLS_DIR)/$(KCP_APIGEN_BIN)
 export KCP_APIGEN_GEN # so hack scripts can use it
@@ -151,6 +156,12 @@ $(LOGCHECK):
 		sigs.k8s.io/logtools/logcheck \
 		${LOGCHECK_BIN} \
 		$(LOGCHECK_VER)
+
+$(HYDROPHONE):
+	@GO_MODULE=true hack/uget.sh \
+		sigs.k8s.io/hydrophone \
+		${HYDROPHONE_BIN} \
+		$(HYDROPHONE_VER)
 
 .PHONY: $(KCP_APIGEN_GEN)
 $(KCP_APIGEN_GEN):
@@ -456,6 +467,9 @@ download-e2e-logs: ## Download e2e logs from a given URL
 
 tilt-kind-up:
 	./contrib/tilt/kind.sh
+
+tilt-conformance-tests: $(HYDROPHONE) ## Run conformance tests with Tilt
+	@echo "stop"
 
 .PHONY: help
 help: ## Show this help
