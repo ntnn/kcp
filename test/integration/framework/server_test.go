@@ -64,3 +64,12 @@ func TestServerCreateConfigMap(t *testing.T) {
 	err = cmi.Delete(context.Background(), configmap.ObjectMeta.Name, metav1.DeleteOptions{})
 	require.Nil(t, err)
 }
+
+func BenchmarkServerStartup(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			server, _, _ := StartTestServer(b)
+			server.Stop()
+		}
+	})
+}

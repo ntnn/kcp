@@ -19,6 +19,8 @@ package framework
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/spf13/pflag"
@@ -29,6 +31,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/component-base/cli/flag"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/textlogger"
 
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
 	"github.com/kcp-dev/embeddedetcd"
@@ -154,9 +158,25 @@ func (s *InProcessServer) Start(ctx context.Context, t kcptestingserver.TestingT
 		etcdCancel()
 		t.Fatalf("failed to create kcp server: %v", err)
 	}
+
+	logFile, err := os.Create(filepath.Join(s.Config.ArtifactDir, "kcp.log"))
+	if err != nil {
+		t.Fatalf("failed to open log file: %v", err)
+	}
+	t.Cleanup(func() {
+		logFile.Close()
+	})
+
+	t.Log("writing kcp server logs to " + logFile.Name())
+
 	go func() {
 		defer close(s.StopCh)
 		defer etcdCancel()
+
+		config := textlogger.NewConfig(textlogger.Output(logFile))
+		logger := textlogger.NewLogger(config)
+		ctx := klog.NewContext(ctx, logger)
+
 		if err := s.Server.Run(ctx); err != nil && ctx.Err() == nil {
 			t.Errorf("`kcp` failed: %v", err)
 		}
