@@ -10,6 +10,7 @@ build
 vendor
 goio.yaml
 *.kubeconfig
+/artifacts
 
 # JetBrains IDE files
 .idea/
