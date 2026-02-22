@@ -468,8 +468,9 @@ download-e2e-logs: ## Download e2e logs from a given URL
 tilt-kind-up:
 	./contrib/tilt/kind.sh
 
-tilt-conformance-tests: $(HYDROPHONE) ## Run conformance tests with Tilt
-	@echo "stop"
+conformance: $(HYDROPHONE) ## Run conformance tests
+	$(HYDROPHONE) --config hydrophone.yaml \
+		--parallel $(shell nproc)
 
 .PHONY: help
 help: ## Show this help
