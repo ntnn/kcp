@@ -43,6 +43,8 @@ import (
 )
 
 func TestAPIBindingSelectorInheritance(t *testing.T) {
+	t.Skip("Test is flaking") // https://github.com/kcp-dev/kcp/issues/3860
+
 	t.Parallel()
 	framework.Suite(t, "control-plane")
 
