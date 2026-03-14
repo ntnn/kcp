@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"strings"
 	"time"
 
@@ -91,8 +92,13 @@ func CreateResourcesFromFS(ctx context.Context, client dynamic.Interface, mapper
 }
 
 // CreateResourceFromFS creates given resource file.
-func CreateResourceFromFS(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, batteriesIncluded sets.Set[string], filename string, fs embed.FS, transformers ...TransformFileFunc) error {
-	raw, err := fs.ReadFile(filename)
+func CreateResourceFromFS(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, batteriesIncluded sets.Set[string], filename string, efs embed.FS, transformers ...TransformFileFunc) error {
+	ti := newTemplateInput(batteriesIncluded)
+	raw, err := ReadFromFS(ctx, efs, ti, transformers, func(p string, d fs.DirEntry) (bool, error) {
+		return d.Name() == filename, nil // TODO: path?
+		// return p == absFilepath, nil
+	})
+	// raw, err := efs.ReadFile(filename)
 	if err != nil {
 		return fmt.Errorf("could not read %s: %w", filename, err)
 	}
@@ -114,10 +120,10 @@ func CreateResourceFromFS(ctx context.Context, client dynamic.Interface, mapper 
 			continue
 		}
 
-		doc, err = applyTransformers(doc, transformers...)
-		if err != nil {
-			return err
-		}
+		// doc, err = applyTransformers(doc, transformers...)
+		// if err != nil {
+		// 	return err
+		// }
 
 		if err := createResourceFromFS(ctx, client, mapper, doc, batteriesIncluded); err != nil {
 			errs = append(errs, fmt.Errorf("failed to create resource %s doc %d: %w", filename, i, err))
@@ -137,8 +143,9 @@ func createResourceFromFS(ctx context.Context, client dynamic.Interface, mapper 
 	if err != nil {
 		return fmt.Errorf("error templating manifest: %w", err)
 	}
+	raw = []byte(out)
 
-	obj, _, err := extensionsapiserver.Codecs.UniversalDeserializer().Decode([]byte(out), nil, &unstructured.Unstructured{})
+	obj, _, err := extensionsapiserver.Codecs.UniversalDeserializer().Decode(raw, nil, &unstructured.Unstructured{})
 	if err != nil {
 		return fmt.Errorf("could not decode raw: %w", err)
 	}
