@@ -131,9 +131,13 @@ func startCacheServer(ctx context.Context, logDirPath, workingDir, hostIP string
 						CertificateAuthorityData: cacheServerCert,
 					},
 				},
+				AuthInfos: map[string]*clientcmdapi.AuthInfo{
+					"cache": {},
+				},
 				Contexts: map[string]*clientcmdapi.Context{
 					"cache": {
-						Cluster: "cache",
+						Cluster:  "cache",
+						AuthInfo: "cache",
 					},
 				},
 				CurrentContext: "cache",
