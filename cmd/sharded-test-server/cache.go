@@ -124,6 +124,14 @@ func startCacheServer(ctx context.Context, logDirPath, workingDir, hostIP string
 			if err != nil {
 				return nil, "", err
 			}
+			clientCert, err := os.ReadFile(filepath.Join(workingDir, ".kcp", "kcp-admin.crt"))
+			if err != nil {
+				return nil, "", err
+			}
+			clientKey, err := os.ReadFile(filepath.Join(workingDir, ".kcp", "kcp-admin.key"))
+			if err != nil {
+				return nil, "", err
+			}
 			cacheServerKubeConfig := clientcmdapi.Config{
 				Clusters: map[string]*clientcmdapi.Cluster{
 					"cache": {
@@ -132,7 +140,10 @@ func startCacheServer(ctx context.Context, logDirPath, workingDir, hostIP string
 					},
 				},
 				AuthInfos: map[string]*clientcmdapi.AuthInfo{
-					"cache": {},
+					"cache": {
+						ClientCertificateData: clientCert,
+						ClientKeyData:         clientKey,
+					},
 				},
 				Contexts: map[string]*clientcmdapi.Context{
 					"cache": {
