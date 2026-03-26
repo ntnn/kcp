@@ -1,0 +1,434 @@
+KCP Codebase Analysis Report
+=============================
+
+Total: ~155 TODO/HACK comments across pkg/, cmd/, test/, and staging/
+Analysis date: 2026-03-26
+
+================================================================================
+1. TODOs — Categorized by Importance
+================================================================================
+
+CRITICAL (should fix before production / next release)
+------------------------------------------------------
+
+1. pkg/server/localproxy.go:178
+   InsecureSkipVerify: true in dev mode proxy transport
+   Why: TLS verification disabled — must not ship in production builds
+
+2. pkg/proxy/server.go:147,152
+   // TODO: implement proper readyz/livez handler — returns hardcoded "OK"
+   Why: No real health checks — Kubernetes orchestration (rolling updates,
+   load balancing) becomes unreliable
+
+3. pkg/reconciler/tenancy/initialization/apibinder_initializer_controller.go:227
+   // TODO(sttts): this cannot work in a sharded environment.
+   Why: Broken in sharded deployment — enqueueWorkspaceTypes only sees local shard
+
+4. pkg/reconciler/kubequota/kubequota_controller.go:273
+   // TODO(sttts): this discovery function is wrong... non-deterministic behaviour
+   Why: Non-deterministic quota enforcement — different logical clusters may
+   disagree on REST mappings
+
+5. pkg/server/options/options.go:400
+   Watch cache disabled for cache server because shard key calculation is missing
+   Why: Performance cliff — every read hits etcd directly
+
+6. pkg/cache/server/options/options.go:102
+   // TODO: enable authN/Z stack for cache server
+   Why: Cache server has no auth — must not be exposed without network isolation
+
+7. cmd/sharded-test-server/shard.go:96
+   --service-account-lookup=false
+   Why: SA token validation disabled — revoked tokens still accepted
+
+8. pkg/reconciler/cache/cachedresources/cachedresources_reconcile_replication.go:71
+   // TODO: Add locking here when multiple workers are supported.
+   Why: Race condition waiting to happen when concurrency is enabled
+
+
+HIGH (functional gaps, code quality risks)
+------------------------------------------
+
+9.  pkg/admission/validatingadmissionpolicy/validating_admission_policy.go:259
+    Per-workspace discovery client/REST mapper creation — "super inefficient"
+    Impact: Heavy memory + API pressure under many workspaces
+
+10. pkg/reconciler/apis/apibinding/apibinding_reconcile.go:277
+    Removed schemas never get unlocked
+    Impact: Resource leaks over time; schemas accumulate locks
+
+11. pkg/server/config.go:282
+    Uses system:admin instead of kcp-admin
+    Impact: Overly privileged context name in root shard kubeconfig
+
+12. pkg/server/options/authentication.go:56
+    ShardAdminTokenHash stored in file, should be in-cluster Secret
+    Impact: Credential stored on filesystem rather than managed secret
+
+13. pkg/server/controllers.go:335
+    CA file loading is static, not dynamic
+    Impact: CA rotation requires server restart
+
+14. pkg/admission/apiresourceschema/validation.go:161
+    Predecessor validation missing
+    Impact: Schema evolution chain not validated
+
+15. pkg/virtual/apiexport/builder/forwarding.go:65,122
+    Scale subresource not implemented
+    Impact: HPA cannot target forwarded resources
+
+16. pkg/server/server.go:648
+    Server init code needs refactoring into separate commands
+    Impact: Monolithic startup; hard to run components independently
+
+17. pkg/server/server.go:131
+    CEL admission discovery client probably must be scoped
+    Impact: CEL validation may see wrong resources across workspaces
+
+
+MEDIUM (tech debt, code duplication, cleanup)
+---------------------------------------------
+
+18. pkg/reconciler/cache/cachedresources/cachedresources_reconcile.go:238
+    Identity secret generation duplicated from apiexport controller
+
+19. pkg/reconciler/cache/cachedresources/cachedresources_reconcile_identity.go:133
+    Identity hash function duplicated
+
+20. pkg/reconciler/apis/apibinding/apibinding_reconcile_test.go:1111
+    Binding builder duplicated from admission
+
+21. pkg/admission/workspacetypeexists/admission.go:414
+    TransitiveTypeResolver should be shared
+
+22. pkg/server/controllers.go:1532
+    Kubequota resync/replenishment periods hardcoded
+
+23. pkg/server/controllers.go:1638
+    WorkersPerLogicalCluster constant hardcoded
+
+24. pkg/server/controllers.go:1600
+    Replication controller lacks user agent
+
+25. pkg/server/aggregatingcrdversiondiscovery/verbs_provider_virtualstorage.go:38,87
+    Missing caching for discovered types
+
+26. pkg/proxy/metrics/metrics.go:35
+    Metrics lack shard URL dimension
+
+27. pkg/proxy/mapping.go:85
+    Virtual workspace per-shard support missing
+
+28. Multiple logicalcluster.Name(cluster.String()) (~8 places)
+    Type conversion workarounds pending API change
+    Locations:
+    - pkg/reconciler/kubequota/kubequota_controller.go:206
+    - pkg/reconciler/apis/crdcleanup/crdcleanup_controller.go:207
+    - pkg/reconciler/apis/identitycache/api_export_identity_controller.go:98,120
+    - pkg/reconciler/apis/apibindingdeletion/apibinding_deletion_controller.go:211
+    - pkg/admission/reservedcrdannotations/admission.go:75
+
+29. pkg/admission/apiexport/admission.go:156,167,197
+    v1alpha1 cleanup after migration to v1alpha2
+
+30. pkg/virtual/apiexport/schemas/builtin/builtin.go:46,58
+    Built-in schemas could use code generation
+
+31. staging/src/github.com/kcp-dev/sdk/apis/apis/v1alpha2/types_apiexport.go:120
+    API field name needs review before beta
+
+
+LOW (nice-to-have, minor)
+-------------------------
+
+32. pkg/server/handler.go:114,165
+    "Is this the right Codecs?"
+
+33. pkg/server/options/authorization.go:193
+    Missing markdown documentation link
+
+34. pkg/server/localproxy.go:157
+    Custom error messages for cluster lookup
+
+35. pkg/server/openapiv3/servicecache.go:57
+    BoundAnnotationKey should move to kube
+
+36. pkg/reconciler/garbagecollector/garbagecollector_controller.go:265
+    Scoped shared dynamic discovery
+
+37. pkg/crdpuller/discovery.go:569,582,595
+    JSON schema regexp validation for Duration/Quantity
+
+38. pkg/virtual/framework/forwardingregistry/rest.go:94
+    Destroy() function behavior
+
+39. staging/src/github.com/kcp-dev/cli/pkg/claims/cmd/cmd.go:30
+    Missing CLI examples
+
+40. staging/src/github.com/kcp-dev/code-generator/... (~12 TODOs)
+    Code generator improvements, template parameterization
+
+41. test/e2e/reconciler/cache/replication_test.go:710,722
+    Investigation TODOs about generation/status discrepancies
+
+
+HACKs (5 found)
+----------------
+
+- pkg/server/filters/filters.go:130
+  Wildcard cluster path workaround for testing
+
+- pkg/server/apiextensions.go:224
+  Placeholder identity annotation for bound CRD deletion
+
+- pkg/server/aggregatingcrdversiondiscovery/server.go:199
+  Core resources through CRDs support
+
+- pkg/admission/apiresourceschema/validation.go:103
+  Relaxed naming for CRD-based core resources
+
+- pkg/virtual/framework/dynamic/apiserver/handler.go:183
+  Strategic merge patch for client-go scheme resources
+
+
+cmd/ TODOs (6 found)
+--------------------
+
+- cmd/compat/main.go:65
+  Take flags for desired versions instead of assuming the first
+
+- cmd/crd-puller/pull-crds.go:80
+  context.TODO() placeholder
+
+- cmd/sharded-test-server/frontproxy.go:74
+  Support multiple virtual workspace backend servers
+
+- cmd/sharded-test-server/main.go:156
+  Needs separate group for proxy instead of system:masters
+
+- cmd/sharded-test-server/main.go:257
+  Support multiple virtual workspace servers (multiple ports)
+
+- cmd/sharded-test-server/shard.go:96
+  Remove --service-account-lookup=false once SA token lookup configured
+
+
+test/ TODOs (9 found)
+---------------------
+
+- test/e2e/fixtures/wildwest/client/informers/externalversions/generic.go:94,109
+  Extend to unknown resources with a client pool
+
+- test/e2e/framework/kubectl.go:64
+  Configure workspace plugin with args instead of env
+
+- test/e2e/reconciler/cache/replication_test.go:710
+  Investigate generation inequality for RBAC resources
+
+- test/e2e/reconciler/cache/replication_test.go:722
+  Investigate empty status in cached resources
+
+- test/e2e/reconciler/cache/replication_test.go:753
+  Future: associate shard instance with cache server
+
+- test/e2e/reconciler/workspace/controller_test.go:171
+  Optimize destructive e2e test cost
+
+- test/e2e/virtual/initializingworkspaces/virtualworkspace_test.go:75
+  Investigate empty group in discovery results
+
+
+staging/ TODOs (66 found — key items)
+--------------------------------------
+
+- staging/.../apimachinery/third_party/informers/shared_informer.go:758
+  Unbounded pending notifications ring buffer — OOM risk on stalled listeners
+
+- staging/.../apimachinery/third_party/reflector/controller.go:173
+  Consider parallel work queue processing
+
+- staging/.../apimachinery/third_party/reflector/reflector.go:720
+  Large list with slow clients could timeout
+
+- staging/.../cli/pkg/bind/plugin/bind.go:277
+  Permission claim selector support (currently hardcoded MatchAll)
+
+- staging/.../cli/pkg/workspace/plugin/create_test.go:254
+  Data race in parallel test execution
+
+- staging/.../client-go/dynamic/dynamicinformer/informer.go:135,141
+  context.TODO() in list/watch operations
+
+- staging/.../client-go/scale/clientset.go:102
+  RESTMapper should be dynamic or periodically invalidated
+
+- staging/.../client-go/third_party/.../testing/fixture.go:214
+  Subresource creation as update not fully general
+
+- staging/.../client-go/third_party/.../testing/actions.go:676
+  DeepCopy for GenericActionImpl known to be wrong
+
+- staging/.../sdk/apis/tenancy/v1alpha1/types_workspacetype.go:33
+  Reserved names definition not tied to OpenAPI patches
+
+- staging/.../sdk/apis/apis/v1alpha1/types_apiexport.go:132
+  Field name needs re-evaluation before beta
+
+- Multiple staging/.../informers/generic.go files
+  "TODO extend this to unknown resources with a client pool" (8 instances)
+
+
+================================================================================
+2. Security Concerns
+================================================================================
+
+HIGH Severity
+-------------
+
+S1. pkg/server/localproxy.go:178-183
+    InsecureSkipVerify: true — TLS verification disabled for mount proxying
+    Impact: MITM attacks possible in production if this code path is reachable
+
+S2. pkg/cache/server/options/options.go:102
+    Cache server has no auth/z stack
+    Impact: Any network-reachable client can read/write cached resources
+
+S3. pkg/proxy/proxy.go:70-85
+    Header values from user extra fields injected using url.PathEscape which
+    doesn't sanitize for HTTP header context (newlines, null bytes)
+    Impact: Potential header injection to downstream shards
+
+S4. pkg/authentication/extra.go:55-64
+    Default-allow extra field filter — keys not matching any deny pattern
+    pass through unconditionally
+    Impact: Sensitive authentication metadata may leak to downstream services
+
+
+MEDIUM Severity
+---------------
+
+S5. pkg/proxy/proxy.go:87-102
+    Reverse proxy director silent failure — sets host to "notfound" on
+    missing shard URL, request continues processing
+    Impact: Request may reach unintended endpoint; no error returned to client
+
+S6. pkg/proxy/server.go:147-155
+    Fake readyz/livez always returns OK
+    Impact: Load balancer cannot detect unhealthy instances
+
+S7. cmd/sharded-test-server/main.go:156
+    Privileged group (system:masters) used to bypass entire authz stack
+    Impact: Test server security model is fragile if exposed
+
+S8. cmd/sharded-test-server/shard.go:96
+    SA token lookup disabled
+    Impact: Revoked/deleted service account tokens continue to work
+
+
+LOW Severity
+------------
+
+S9.  pkg/authorization/deep_sar.go:113-116
+     Unsafe type assertion k.(bool) on context value — panic possible
+     if context is corrupted
+
+S10. pkg/authorization/requiredgroups_authorizer.go:102-116
+     Annotation value parsed with semicolon/comma splitting without
+     validation — malformed annotations could cause empty group matching
+
+
+================================================================================
+3. Performance Concerns
+================================================================================
+
+HIGH Severity
+-------------
+
+P1. pkg/admission/validatingadmissionpolicy/validating_admission_policy.go:259-261
+    Discovery client + REST mapper created per workspace per admission call
+    Impact: O(workspaces) API calls and memory allocations; dominates
+    admission latency at scale
+
+P2. pkg/server/options/options.go:400
+    Watch cache disabled on cache server — every read hits etcd
+    Impact: Etcd becomes bottleneck; reads don't scale; increased latency
+
+P3. pkg/reconciler/core/logicalclusterdeletion/deletion/logicalcluster_resource_deletor.go:230-237
+    Serial per-item deletion without batching or concurrency
+    Impact: Cluster deletion time linear in resource count; can take hours
+    for large workspaces
+
+P4. pkg/informer/informer.go:738,756-757
+    DeepCopy on every discovery request
+    Impact: Memory churn proportional to API surface size x request rate
+
+P5. pkg/reconciler/cache/cachedresources/replication/replication_reconcile.go:87-111
+    N+1 GET pattern — individual Get() per replicated object
+    Impact: Reconciliation time linear in object count; API server pressure
+
+
+MEDIUM Severity
+---------------
+
+P6.  pkg/virtual/framework/forwardingregistry/store.go:186
+     No pagination enforcement in List operations
+     Impact: OOM risk on large collections; slow responses
+
+P7.  pkg/index/index.go:279-281
+     O(n) scan in DeleteShard using maps.DeleteFunc
+     Impact: Scales poorly with cluster count
+
+P8.  pkg/server/aggregatingcrdversiondiscovery/verbs_provider_virtualstorage.go:38
+     No caching for virtual storage verb discovery
+     Impact: Repeated discovery calls for every API request
+
+P9.  pkg/cache/client/round_tripper.go:198-208
+     JSON body re-read/decode per request to extract shard info
+     Impact: Unnecessary I/O and CPU per CRUD operation
+
+P10. pkg/reconciler/kubequota/kubequota_controller.go:273-275
+     Non-deterministic discovery aggregation across logical clusters
+     Impact: Wrong quota evaluation; resource leak or denial
+
+P11. pkg/server/controllers.go:1532
+     Hardcoded kubequota resync (5m) and replenishment periods
+     Impact: Cannot tune for cluster size; either too aggressive or too slow
+
+
+LOW Severity
+------------
+
+P12. pkg/proxy/proxy.go:49-53
+     No explicit connection pool config on transport (MaxIdleConns, etc.)
+
+P13. pkg/cache/client/round_tripper.go:41,93
+     Regex match on every request path
+
+P14. pkg/index/index.go:127-144
+     Nested map creation without size hints on upsert
+
+
+================================================================================
+4. Summary
+================================================================================
+
+Category       Critical  High  Medium  Low   Total
+-----------    --------  ----  ------  ---   -----
+TODOs               8      9      14   10+   ~155
+Security            0      4       4     2     10
+Performance         0      5       6     3     14
+
+Top 5 items to address first:
+
+1. S1/S2: InsecureSkipVerify and unauthenticated cache server
+   — production blockers
+
+2. P1: Per-workspace discovery/REST mapper in admission
+   — dominates latency at scale
+
+3. P2: Disabled watch cache
+   — forces all reads to etcd
+
+4. Critical TODO #3: APIBinder broken in sharded environments
+
+5. Critical TODO #4: Non-deterministic quota discovery function
