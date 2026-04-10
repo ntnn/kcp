@@ -54,14 +54,25 @@ func (m *SyncMap[K, V]) Delete(key K) {
 // The modifyFunc receives the current value or a valid default value
 // and a boolean indicating whether the key exists in the map. It should
 // return the new value to be stored.
-// Modify returns true if the value was successfully updated, false otherwise.
-func (m *SyncMap[K, V]) Modify(key K, modifyFunc func(value V, exists bool) V) bool {
-	value, exists := m.Load(key)
-	if !exists {
-		value = *new(V)
+// Modify retries on CAS failure to ensure the modification is applied.
+func (m *SyncMap[K, V]) Modify(key K, modifyFunc func(value V, exists bool) V) {
+	for {
+		value, exists := m.Load(key)
+		if !exists {
+			value = *new(V)
+		}
+		newValue := modifyFunc(value, exists)
+		if exists {
+			if m.m.CompareAndSwap(key, value, newValue) {
+				return
+			}
+			// CAS failed, another writer modified the value — retry.
+			continue
+		}
+		// Key didn't exist — store the new value.
+		m.m.Store(key, newValue)
+		return
 	}
-	newValue := modifyFunc(value, exists)
-	return m.m.CompareAndSwap(key, value, newValue)
 }
 
 // Range iterates over all key-value pairs in the map, calling the
