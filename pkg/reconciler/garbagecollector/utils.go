@@ -49,10 +49,6 @@ type getOwnerReferences interface {
 	GetOwnerReferences() []metav1.OwnerReference
 }
 
-func patchRemoveOwnerReference(obj getOwnerReferences, ownerReferenceUID types.UID) ([]byte, error) {
-	return patchRemoveOwnerReferencesByUIDs(obj, []types.UID{ownerReferenceUID})
-}
-
 // patchRemoveOwnerReferencesByUIDs builds a merge patch that removes all
 // ownerReferences matching any of the given UIDs.
 func patchRemoveOwnerReferencesByUIDs(obj getOwnerReferences, ownerUIDs []types.UID) ([]byte, error) {
