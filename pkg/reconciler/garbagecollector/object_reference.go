@@ -51,8 +51,10 @@ func ObjectReferenceFrom(obj *unstructured.Unstructured) ObjectReference {
 	or.Name = obj.GetName()
 	or.UID = obj.GetUID()
 
-	// TODO(ntnn): handle BlockOwnerDeletion
-	// or.BlockOwnerDeletion =
+	// BlockOwnerDeletion is set on ownerReferences that point TO this
+	// object, not on the object itself. It is carried through
+	// ObjectReferencesFromOwnerReferences which preserves the full
+	// metav1.OwnerReference including BlockOwnerDeletion.
 
 	or.Namespace = obj.GetNamespace()
 	or.ClusterName = logicalcluster.From(obj)
