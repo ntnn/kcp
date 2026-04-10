@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
@@ -594,6 +595,315 @@ func TestGarbageCollectorClusterScopedCRD(t *testing.T) {
 			Get(t.Context(), "owner", metav1.GetOptions{})
 		return apierrors.IsNotFound(err), "owned clustered not garbage collected"
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "error waiting for owned clustered to be garbage collected")
+}
+
+func TestGarbageCollectorMultipleOwners(t *testing.T) {
+	t.Parallel()
+	framework.Suite(t, "control-plane")
+
+	server := kcptesting.SharedKcpServer(t)
+	cfg := server.BaseConfig(t)
+
+	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(cfg)
+	require.NoError(t, err)
+
+	orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
+	wsPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath, kcptesting.WithName("gc-multi-owner"))
+
+	cmClient := kubeClusterClient.Cluster(wsPath).CoreV1().ConfigMaps("default")
+
+	t.Logf("Creating owner-a configmap")
+	ownerA, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("owner-a", "default"),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	t.Logf("Creating owner-b configmap")
+	ownerB, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("owner-b", "default"),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	t.Logf("Creating child configmap with two owners")
+	child, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("child", "default").
+			WithOwnerReferences(
+				metav1ac.OwnerReference().
+					WithAPIVersion("v1").
+					WithKind("ConfigMap").
+					WithName(ownerA.Name).
+					WithUID(ownerA.UID),
+				metav1ac.OwnerReference().
+					WithAPIVersion("v1").
+					WithKind("ConfigMap").
+					WithName(ownerB.Name).
+					WithUID(ownerB.UID),
+			),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	t.Logf("Deleting owner-a — child must survive because owner-b is still alive")
+	err = cmClient.Delete(t.Context(), ownerA.Name, metav1.DeleteOptions{})
+	require.NoError(t, err)
+
+	t.Logf("Waiting for dangling ownerRef cleanup while child survives")
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		obj, err := cmClient.Get(t.Context(), child.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return false, "child was deleted but should survive with owner-b"
+		}
+		if err != nil {
+			return false, fmt.Sprintf("error getting child: %v", err)
+		}
+		refs := obj.GetOwnerReferences()
+		if len(refs) == 1 && refs[0].UID == ownerB.UID {
+			return true, ""
+		}
+		return false, fmt.Sprintf("waiting for dangling ownerRef cleanup, current refs: %v", refs)
+	}, wait.ForeverTestTimeout, 100*time.Millisecond, "child should survive with one owner, dangling ref removed")
+
+	t.Logf("Deleting owner-b — child should now be garbage collected")
+	err = cmClient.Delete(t.Context(), ownerB.Name, metav1.DeleteOptions{})
+	require.NoError(t, err)
+
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		_, err := cmClient.Get(t.Context(), child.Name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err), "child not yet garbage collected"
+	}, wait.ForeverTestTimeout, 100*time.Millisecond, "child should be GC'd after all owners deleted")
+}
+
+func TestGarbageCollectorForegroundDeletion(t *testing.T) {
+	t.Parallel()
+	framework.Suite(t, "control-plane")
+
+	server := kcptesting.SharedKcpServer(t)
+	cfg := server.BaseConfig(t)
+
+	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(cfg)
+	require.NoError(t, err)
+
+	orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
+	wsPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath, kcptesting.WithName("gc-foreground"))
+
+	cmClient := kubeClusterClient.Cluster(wsPath).CoreV1().ConfigMaps("default")
+
+	t.Logf("Creating owner configmap")
+	owner, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("owner", "default"),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	t.Logf("Creating child with blockOwnerDeletion=true")
+	_, err = cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("child-blocking", "default").
+			WithOwnerReferences(metav1ac.OwnerReference().
+				WithAPIVersion("v1").
+				WithKind("ConfigMap").
+				WithName(owner.Name).
+				WithUID(owner.UID).
+				WithBlockOwnerDeletion(true)),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	t.Logf("Creating child without blockOwnerDeletion")
+	_, err = cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("child-nonblocking", "default").
+			WithOwnerReferences(metav1ac.OwnerReference().
+				WithAPIVersion("v1").
+				WithKind("ConfigMap").
+				WithName(owner.Name).
+				WithUID(owner.UID)),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	t.Logf("Deleting owner with Foreground propagation policy")
+	foreground := metav1.DeletePropagationForeground
+	err = cmClient.Delete(t.Context(), owner.Name, metav1.DeleteOptions{PropagationPolicy: &foreground})
+	require.NoError(t, err)
+
+	t.Logf("Waiting for all objects to be deleted via foreground cascade")
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		_, err1 := cmClient.Get(t.Context(), "child-blocking", metav1.GetOptions{})
+		_, err2 := cmClient.Get(t.Context(), "child-nonblocking", metav1.GetOptions{})
+		_, errO := cmClient.Get(t.Context(), owner.Name, metav1.GetOptions{})
+		allGone := apierrors.IsNotFound(err1) && apierrors.IsNotFound(err2) && apierrors.IsNotFound(errO)
+		return allGone, fmt.Sprintf("blocking=%v nonblocking=%v owner=%v",
+			apierrors.IsNotFound(err1), apierrors.IsNotFound(err2), apierrors.IsNotFound(errO))
+	}, wait.ForeverTestTimeout, 100*time.Millisecond, "all objects should be deleted via foreground cascade")
+}
+
+func TestGarbageCollectorOrphanPolicy(t *testing.T) {
+	t.Parallel()
+	framework.Suite(t, "control-plane")
+
+	server := kcptesting.SharedKcpServer(t)
+	cfg := server.BaseConfig(t)
+
+	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(cfg)
+	require.NoError(t, err)
+
+	orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
+	wsPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath, kcptesting.WithName("gc-orphan"))
+
+	cmClient := kubeClusterClient.Cluster(wsPath).CoreV1().ConfigMaps("default")
+
+	t.Logf("Creating owner configmap")
+	owner, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("owner", "default"),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	for _, childName := range []string{"child-1", "child-2"} {
+		t.Logf("Creating %s configmap", childName)
+		_, err = cmClient.Apply(t.Context(),
+			corev1ac.ConfigMap(childName, "default").
+				WithOwnerReferences(metav1ac.OwnerReference().
+					WithAPIVersion("v1").
+					WithKind("ConfigMap").
+					WithName(owner.Name).
+					WithUID(owner.UID)),
+			metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+		require.NoError(t, err)
+	}
+
+	t.Logf("Deleting owner with Orphan propagation policy")
+	orphan := metav1.DeletePropagationOrphan
+	err = cmClient.Delete(t.Context(), owner.Name, metav1.DeleteOptions{PropagationPolicy: &orphan})
+	require.NoError(t, err)
+
+	t.Logf("Waiting for owner to be deleted")
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		_, err := cmClient.Get(t.Context(), owner.Name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err), "owner not yet deleted"
+	}, wait.ForeverTestTimeout, 100*time.Millisecond, "owner should be deleted")
+
+	t.Logf("Verifying children survive and have ownerReferences removed")
+	for _, childName := range []string{"child-1", "child-2"} {
+		kcptestinghelpers.Eventually(t, func() (bool, string) {
+			obj, err := cmClient.Get(t.Context(), childName, metav1.GetOptions{})
+			if apierrors.IsNotFound(err) {
+				return false, fmt.Sprintf("%s was deleted but should have been orphaned", childName)
+			}
+			if err != nil {
+				return false, fmt.Sprintf("error getting %s: %v", childName, err)
+			}
+			if len(obj.GetOwnerReferences()) == 0 {
+				return true, ""
+			}
+			return false, fmt.Sprintf("%s still has ownerReferences: %v", childName, obj.GetOwnerReferences())
+		}, wait.ForeverTestTimeout, 100*time.Millisecond, "%s should be orphaned with ownerRef removed", childName)
+	}
+}
+
+func TestGarbageCollectorDanglingOwnerRef(t *testing.T) {
+	t.Parallel()
+	framework.Suite(t, "control-plane")
+
+	server := kcptesting.SharedKcpServer(t)
+	cfg := server.BaseConfig(t)
+
+	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(cfg)
+	require.NoError(t, err)
+
+	orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
+	wsPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath, kcptesting.WithName("gc-dangling"))
+
+	cmClient := kubeClusterClient.Cluster(wsPath).CoreV1().ConfigMaps("default")
+
+	t.Logf("Creating live owner configmap")
+	liveOwner, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("live-owner", "default"),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	fakeUID := types.UID("00000000-0000-0000-0000-000000000000")
+
+	t.Logf("Creating child with one valid and one dangling ownerRef")
+	child, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("child", "default").
+			WithOwnerReferences(
+				metav1ac.OwnerReference().
+					WithAPIVersion("v1").
+					WithKind("ConfigMap").
+					WithName(liveOwner.Name).
+					WithUID(liveOwner.UID),
+				metav1ac.OwnerReference().
+					WithAPIVersion("v1").
+					WithKind("ConfigMap").
+					WithName("nonexistent").
+					WithUID(fakeUID),
+			),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+	require.Len(t, child.OwnerReferences, 2)
+
+	t.Logf("Waiting for dangling ownerRef to be cleaned up while child survives")
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		obj, err := cmClient.Get(t.Context(), child.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return false, "child was deleted but should survive with live owner"
+		}
+		if err != nil {
+			return false, fmt.Sprintf("error getting child: %v", err)
+		}
+		refs := obj.GetOwnerReferences()
+		if len(refs) == 1 && refs[0].UID == liveOwner.UID {
+			return true, ""
+		}
+		return false, fmt.Sprintf("waiting for dangling ref cleanup, refs: %v", refs)
+	}, wait.ForeverTestTimeout, 100*time.Millisecond, "dangling ownerRef should be removed, child should survive")
+}
+
+func TestGarbageCollectorAllDanglingOwnerRefs(t *testing.T) {
+	t.Parallel()
+	framework.Suite(t, "control-plane")
+
+	server := kcptesting.SharedKcpServer(t)
+	cfg := server.BaseConfig(t)
+
+	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(cfg)
+	require.NoError(t, err)
+
+	orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
+	wsPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath, kcptesting.WithName("gc-all-dangling"))
+
+	cmClient := kubeClusterClient.Cluster(wsPath).CoreV1().ConfigMaps("default")
+
+	t.Logf("Creating owner configmap")
+	owner, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("owner", "default"),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	fakeUID := types.UID("00000000-0000-0000-0000-000000000001")
+
+	t.Logf("Creating child with two ownerRefs (one real, one fake)")
+	child, err := cmClient.Apply(t.Context(),
+		corev1ac.ConfigMap("child", "default").
+			WithOwnerReferences(
+				metav1ac.OwnerReference().
+					WithAPIVersion("v1").
+					WithKind("ConfigMap").
+					WithName(owner.Name).
+					WithUID(owner.UID),
+				metav1ac.OwnerReference().
+					WithAPIVersion("v1").
+					WithKind("ConfigMap").
+					WithName("ghost").
+					WithUID(fakeUID),
+			),
+		metav1.ApplyOptions{FieldManager: "e2e-test-runner"})
+	require.NoError(t, err)
+
+	t.Logf("Deleting the real owner — now all ownerRefs are dangling")
+	err = cmClient.Delete(t.Context(), owner.Name, metav1.DeleteOptions{})
+	require.NoError(t, err)
+
+	t.Logf("Waiting for child to be garbage collected")
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		_, err := cmClient.Get(t.Context(), child.Name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err), "child not yet garbage collected"
+	}, wait.ForeverTestTimeout, 100*time.Millisecond, "child should be GC'd when all owners are dangling")
 }
 
 func NewClusterScopedCRD(group, name string) *apiextensionsv1.CustomResourceDefinition {
