@@ -20,18 +20,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 
 	kcpapiextensionsv1 "github.com/kcp-dev/client-go/apiextensions/informers/apiextensions/v1"
@@ -50,6 +54,8 @@ import (
 // TODO replace with kcp-garbage-collector once stabilising.
 const NewControllerName = "kcp-native-garbage-collector"
 
+var errNamespacedOwnerOfClusterScopedObject = fmt.Errorf("cluster-scoped object has namespaced owner reference")
+
 type Options struct {
 	LogicalClusterInformer corev1alpha1informers.LogicalClusterClusterInformer
 	CRDInformer            kcpapiextensionsv1.CustomResourceDefinitionClusterInformer
@@ -62,6 +68,34 @@ type Options struct {
 	DeletionWorkers int
 }
 
+// monitorEntry tracks a running monitor and supports deferred removal.
+type monitorEntry struct {
+	cancel func()
+
+	// pendingRemoval is non-nil when a CRD delete event has been
+	// received but the monitor has not been stopped yet. A timer fires
+	// to confirm the removal.
+	mu             sync.Mutex
+	pendingRemoval *time.Timer
+}
+
+func (m *monitorEntry) markPendingRemoval(timer *time.Timer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pendingRemoval = timer
+}
+
+func (m *monitorEntry) cancelPendingRemoval() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pendingRemoval != nil {
+		stopped := m.pendingRemoval.Stop()
+		m.pendingRemoval = nil
+		return stopped
+	}
+	return false
+}
+
 type GarbageCollector struct {
 	options Options
 
@@ -69,11 +103,19 @@ type GarbageCollector struct {
 
 	graph *Graph
 
-	// TODO(ntnn): replace with a better structure to manage monitors
-	// will probably need cluster->group->version->resource->registration
-	monitors map[schema.GroupVersionResource]func()
+	absentOwnerCache *AbsentOwnerCache
 
+	// monitors tracks running informer registrations per GVR.
+	monitors map[schema.GroupVersionResource]*monitorEntry
+
+	// deletionQueue receives objects from informer delete events.
+	// The worker cascades to dependents via attemptToDelete.
 	deletionQueue workqueue.TypedRateLimitingInterface[ObjectReference]
+
+	// attemptToDelete receives dependents that need their ownerRefs
+	// checked. The worker classifies each ownerRef and decides whether
+	// to delete, patch, or skip the dependent.
+	attemptToDelete workqueue.TypedRateLimitingInterface[ObjectReference]
 }
 
 func NewGarbageCollector(options Options) *GarbageCollector {
@@ -87,11 +129,18 @@ func NewGarbageCollector(options Options) *GarbageCollector {
 	gc.log = logging.WithReconciler(options.Logger, NewControllerName)
 
 	gc.graph = NewGraph()
-	gc.monitors = make(map[schema.GroupVersionResource]func())
+	gc.absentOwnerCache = NewAbsentOwnerCache(500)
+	gc.monitors = make(map[schema.GroupVersionResource]*monitorEntry)
 	gc.deletionQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
 		workqueue.DefaultTypedControllerRateLimiter[ObjectReference](),
 		workqueue.TypedRateLimitingQueueConfig[ObjectReference]{
-			Name: ControllerName,
+			Name: ControllerName + "-deletion",
+		},
+	)
+	gc.attemptToDelete = workqueue.NewTypedRateLimitingQueueWithConfig(
+		workqueue.DefaultTypedControllerRateLimiter[ObjectReference](),
+		workqueue.TypedRateLimitingQueueConfig[ObjectReference]{
+			Name: ControllerName + "-attemptToDelete",
 		},
 	)
 
@@ -99,34 +148,7 @@ func NewGarbageCollector(options Options) *GarbageCollector {
 }
 
 func (gc *GarbageCollector) Start(ctx context.Context) {
-	// TODO(ntnn): Handle sharding. The GC of a shard should only care
-	// about the logical clusters assigned to it.
-
-	// // TODO(ntnn): Could probably noop add and update. Only removal is
-	// // really interesting for garbage collection to delete dependent
-	// // resources in other clusters.
-	// lcHandlers := cache.ResourceEventHandlerFuncs{
-	// 	AddFunc: func(obj interface{}) {
-	// 		gc.handleLogicalClusterAdd(tombstone.Obj[*corev1alpha1.LogicalCluster](obj))
-	// 	},
-	// 	UpdateFunc: func(oldObj, newObj interface{}) {
-	// 		// TODO implement garbage collection logic on LogicalCluster update
-	// 	},
-	// 	DeleteFunc: func(obj interface{}) {
-	// 		gc.handleLogicalClusterRemove(tombstone.Obj[*corev1alpha1.LogicalCluster](obj))
-	// 	},
-	// }
-	//
-	// lcRegistration, err := gc.options.LogicalClusterInformer.Informer().AddEventHandler(lcHandlers)
-	// if err != nil {
-	// 	return err
-	// }
-	// defer gc.options.LogicalClusterInformer.Informer().RemoveEventHandler(lcRegistration)
-
-	// Start monitors for builtin APIs
-	// TODO instead of making a wacky list of fake builtin crds update
-	// monitors off of lists of GVRs and use a helper function to
-	// produce the list of GVRs from CRDs for the handler.
+	// Start monitors for builtin APIs.
 	builtinCRDs := []*apiextensionsv1.CustomResourceDefinition{}
 	for _, builtInAPI := range builtin.BuiltInAPIs {
 		builtinCRDs = append(builtinCRDs, &apiextensionsv1.CustomResourceDefinition{
@@ -146,12 +168,6 @@ func (gc *GarbageCollector) Start(ctx context.Context) {
 		gc.updateMonitors(&apiextensionsv1.CustomResourceDefinition{}, crd)
 	}
 
-	// A single crd handler will handle all dynamic resources.
-	// The handler on the CRD informer manages the handlers that will
-	// watch the resources across all clusters and feed changes into the
-	// graph and deletion queue.
-	// TODO(ntnn): might need a separate worker queue to not block? but
-	// should be fine probably.
 	crdHandlers := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			gc.updateMonitors(
@@ -173,7 +189,6 @@ func (gc *GarbageCollector) Start(ctx context.Context) {
 		},
 	}
 
-	// TODO(ntnn): this is ugly. maybe pass in crdinformer.apiextensions().v1()....
 	crdRegistration, err := gc.options.CRDInformer.Informer().AddEventHandler(crdHandlers)
 	if err != nil {
 		gc.log.Error(err, "error adding event handler for CRDs")
@@ -187,32 +202,17 @@ func (gc *GarbageCollector) Start(ctx context.Context) {
 
 	for range gc.options.DeletionWorkers {
 		go wait.UntilWithContext(ctx, gc.runDeletionQueueWorker, time.Second)
+		go wait.UntilWithContext(ctx, gc.runAttemptToDeleteWorker, time.Second)
 	}
 
 	<-ctx.Done()
 }
 
-// func (gc *GarbageCollector) handleLogicalClusterAdd(lc *corev1alpha1.LogicalCluster) {
-// 	// TODO(ntnn) unsure if logicalcluster.From is correct here. the
-// 	// name of the lc should already be correct, but .From looks into
-// 	// the annotation.
-// 	// if err := gc.graph.AddCluster(logicalcluster.From(lc)); err != nil {
-// 	// 	gc.log.Error(err, "error adding cluster to graph", "cluster", lc.Name)
-// 	// 	return
-// 	// }
-// }
-//
-// func (gc *GarbageCollector) handleLogicalClusterRemove(lc *corev1alpha1.LogicalCluster) {
-// 	// TODO(ntnn): as for handleLogicalClusterAdd
-// 	deleted, _ := gc.graph.RemoveCluster(logicalcluster.From(lc))
-// 	if deleted {
-// 		return
-// 	}
-// 	// TODO delete deps
-// }
+// ---------------------------------------------------------------------------
+// Monitor lifecycle
+// ---------------------------------------------------------------------------
 
 func (gc *GarbageCollector) updateMonitors(oldCrd, newCrd *apiextensionsv1.CustomResourceDefinition) {
-	// Determine added and removed versions.
 	oldVersions := map[schema.GroupVersionResource]bool{}
 	for _, version := range oldCrd.Spec.Versions {
 		if !version.Served {
@@ -241,17 +241,17 @@ func (gc *GarbageCollector) updateMonitors(oldCrd, newCrd *apiextensionsv1.Custo
 		}
 	}
 
-	// Stop monitors for removed versions.
+	// Stop monitors for removed versions — defer removal to avoid
+	// premature cancellation during transient discovery failures.
 	for gvr := range oldVersions {
 		if _, exists := newVersions[gvr]; exists {
 			continue
 		}
-		cancel, ok := gc.monitors[gvr]
+		entry, ok := gc.monitors[gvr]
 		if !ok {
-			// Version was never monitored.
 			continue
 		}
-		cancel()
+		gc.deferMonitorRemoval(gvr, entry)
 	}
 
 	// Start monitors for added versions.
@@ -259,17 +259,44 @@ func (gc *GarbageCollector) updateMonitors(oldCrd, newCrd *apiextensionsv1.Custo
 		if _, exists := oldVersions[gvr]; exists {
 			continue
 		}
+		// If there's a pending removal for this GVR, cancel it.
+		if existing, ok := gc.monitors[gvr]; ok {
+			existing.cancelPendingRemoval()
+			continue
+		}
 		cancel, err := gc.startMonitorForVersion(newCrd, gvr)
 		if err != nil {
 			gc.log.Error(err, "error starting monitor for CRD version", "crd", newCrd.Name, "gvr", gvr)
 			continue
 		}
-		gc.monitors[gvr] = cancel
+		gc.monitors[gvr] = &monitorEntry{cancel: cancel}
 	}
 }
 
+const monitorRemovalGracePeriod = 30 * time.Second
+
+// deferMonitorRemoval schedules removal of a monitor after a grace period.
+// If the CRD reappears before the timer fires, the removal is cancelled.
+func (gc *GarbageCollector) deferMonitorRemoval(gvr schema.GroupVersionResource, entry *monitorEntry) {
+	timer := time.AfterFunc(monitorRemovalGracePeriod, func() {
+		entry.mu.Lock()
+		isPending := entry.pendingRemoval != nil
+		entry.pendingRemoval = nil
+		entry.mu.Unlock()
+		if isPending {
+			gc.log.V(4).Info("Removing monitor after grace period", "gvr", gvr)
+			entry.cancel()
+			delete(gc.monitors, gvr)
+		}
+	})
+	entry.markPendingRemoval(timer)
+}
+
+// ---------------------------------------------------------------------------
+// Informer event handlers
+// ---------------------------------------------------------------------------
+
 func (gc *GarbageCollector) anyToRef(gvr schema.GroupVersionResource, obj any) (*unstructured.Unstructured, ObjectReference) {
-	// TODO(ntnn): sometimes we get unstructured, sometimes partial metadata
 	u := tombstone.Obj[*unstructured.Unstructured](obj)
 	ref := ObjectReferenceFrom(u)
 
@@ -281,7 +308,6 @@ func (gc *GarbageCollector) anyToRef(gvr schema.GroupVersionResource, obj any) (
 			gc.log.Error(err, "error getting GVK for GVR", "gvr", gvr, "cluster", clusterName)
 			return nil, ObjectReference{}
 		}
-		// Override wrong info from PartialObjectMetadata
 		ref.APIVersion = gvk.GroupVersion().String()
 		ref.Kind = gvk.Kind
 	}
@@ -290,47 +316,46 @@ func (gc *GarbageCollector) anyToRef(gvr schema.GroupVersionResource, obj any) (
 }
 
 func (gc *GarbageCollector) startMonitorForVersion(crd *apiextensionsv1.CustomResourceDefinition, gvr schema.GroupVersionResource) (func(), error) {
-	// Start handler to add/update resources in the graph and to queue
-	// deletion.
-	// Add and update directly updates the graph.
-	// Only deletion needs to be queued to cascade deletions when an
-	// object is deleted that owns other objects.
 	handlers := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			gc.log.Info("Add event for object", "gvr", gvr, "obj", obj)
 			u, or := gc.anyToRef(gvr, obj)
+			if u == nil {
+				return
+			}
 			owners := ObjectReferencesFromOwnerReferences(
 				or.ClusterName,
 				u.GetNamespace(),
 				u.GetOwnerReferences(),
 			)
-			gc.log.Info("Adding object to graph", "object", or, "owners", owners)
+			gc.log.V(4).Info("Adding object to graph", "object", or, "owners", owners)
 			gc.graph.Add(or, nil, owners)
-			// partial := tombstone.Obj[*metav1.PartialObjectMetadata](obj)
-			//
-			// clusterName := logicalcluster.From(partial)
-			// gvk, err := gc.options.DynRESTMapper.ForCluster(clusterName).KindFor(gvr)
-			// if err != nil {
-			// 	gc.log.Error(err, "error getting GVK for GVR", "gvr", gvr, "cluster", clusterName)
-			// 	return
-			// }
-			//
-			// ref := ObjectReferenceFromPartial(gvk, partial)
-			//
-			// owners := ObjectReferencesFromOwnerReferences(
-			// 	clusterName,
-			// 	partial.GetNamespace(),
-			// 	partial.GetOwnerReferences(),
-			// )
-			//
-			// gc.log.V(4).Info("Adding object to graph", "object", ref, "owners", owners)
-			// gc.graph.Add(ref, nil, owners)
+
+			// If the object is already being deleted with
+			// FinalizerDeleteDependents, enqueue it for processing.
+			if u.GetDeletionTimestamp() != nil {
+				finalizers := u.GetFinalizers()
+				for _, f := range finalizers {
+					if f == metav1.FinalizerDeleteDependents {
+						gc.attemptToDelete.Add(or)
+						break
+					}
+				}
+			}
+
+			// If owners aren't yet in the graph, enqueue the
+			// dependent so isDangling can verify via the API server.
+			for _, owner := range owners {
+				if gc.graph.Owned(owner) == nil {
+					gc.attemptToDelete.Add(or)
+					break
+				}
+			}
 		},
 		UpdateFunc: func(oldRaw, newRaw interface{}) {
-			gc.log.Info("Update event for object", "gvr", gvr, "oldObj", oldRaw, "newObj", newRaw)
 			oldObj, oldRef := gc.anyToRef(gvr, oldRaw)
-			// oldObj := tombstone.Obj[*unstructured.Unstructured](oldRaw)
-			// oldOR := ObjectReferenceFrom(old)
+			if oldObj == nil {
+				return
+			}
 			oldOwners := ObjectReferencesFromOwnerReferences(
 				oldRef.ClusterName,
 				oldObj.GetNamespace(),
@@ -338,66 +363,44 @@ func (gc *GarbageCollector) startMonitorForVersion(crd *apiextensionsv1.CustomRe
 			)
 
 			newObj, newRef := gc.anyToRef(gvr, newRaw)
-			// newObj := tombstone.Obj[*unstructured.Unstructured](newRaw)
-			// newOR := ObjectReferenceFrom(newObj)
+			if newObj == nil {
+				return
+			}
 			newOwners := ObjectReferencesFromOwnerReferences(
 				newRef.ClusterName,
 				newObj.GetNamespace(),
 				newObj.GetOwnerReferences(),
 			)
 
-			gc.log.Info("Updating object in graph", "object", newRef, "oldOwners", oldOwners, "newOwners", newOwners)
+			gc.log.V(4).Info("Updating object in graph", "object", newRef, "oldOwners", oldOwners, "newOwners", newOwners)
 			gc.graph.Add(newRef, oldOwners, newOwners)
-			// gc.log.Info("Update event for object", "gvr", gvr, "oldObj", oldRaw, "newObj", newRaw)
-			// oldPartial := tombstone.Obj[*metav1.PartialObjectMetadata](oldRaw)
-			//
-			// clusterName := logicalcluster.From(oldPartial)
-			// gvk, err := gc.options.DynRESTMapper.ForCluster(clusterName).KindFor(gvr)
-			// if err != nil {
-			// 	gc.log.Error(err, "error getting GVK for GVR", "gvr", gvr, "cluster", clusterName)
-			// 	return
-			// }
-			//
-			// // oldRef := ObjectReferenceFromPartial(gvk, oldPartial)
-			//
-			// oldOwners := ObjectReferencesFromOwnerReferences(
-			// 	clusterName,
-			// 	oldPartial.GetNamespace(),
-			// 	oldPartial.GetOwnerReferences(),
-			// )
-			//
-			// newPartial := tombstone.Obj[*metav1.PartialObjectMetadata](newRaw)
-			// newRef := ObjectReferenceFromPartial(gvk, newPartial)
-			// newOwners := ObjectReferencesFromOwnerReferences(
-			// 	clusterName,
-			// 	newPartial.GetNamespace(),
-			// 	newPartial.GetOwnerReferences(),
-			// )
-			//
-			// gc.log.Info("Updating object in graph", "object", newRef, "oldOwners", oldOwners, "newOwners", newOwners)
-			// gc.graph.Add(newRef, oldOwners, newOwners)
+
+			// Detect transition to foreground deletion.
+			oldDeleting := oldObj.GetDeletionTimestamp() != nil
+			newDeleting := newObj.GetDeletionTimestamp() != nil
+			if !oldDeleting && newDeleting {
+				newFinalizers := newObj.GetFinalizers()
+				for _, f := range newFinalizers {
+					if f == metav1.FinalizerDeleteDependents || f == metav1.FinalizerOrphanDependents {
+						gc.attemptToDelete.Add(newRef)
+						// Also enqueue dependents so they can be cascade-deleted.
+						for _, dep := range gc.graph.Owned(newRef) {
+							gc.attemptToDelete.Add(dep)
+						}
+						break
+					}
+				}
+			}
 		},
 		DeleteFunc: func(obj interface{}) {
-			gc.log.Info("Delete event for object", "gvr", gvr, "obj", obj)
-			obj, ref := gc.anyToRef(gvr, obj)
-			// u := tombstone.Obj[*unstructured.Unstructured](obj)
-			// or := ObjectReferenceFrom(u)
-			gc.log.Info("Queuing object for deletion", "object", ref)
+			_, ref := gc.anyToRef(gvr, obj)
+			gc.log.V(4).Info("Queuing object for deletion", "object", ref)
 			gc.deletionQueue.Add(ref)
-			// gc.log.Info("Delete event for object", "gvr", gvr, "obj", obj)
-			// partial := tombstone.Obj[*metav1.PartialObjectMetadata](obj)
-			//
-			// clusterName := logicalcluster.From(partial)
-			// gvk, err := gc.options.DynRESTMapper.ForCluster(clusterName).KindFor(gvr)
-			// if err != nil {
-			// 	gc.log.Error(err, "error getting GVK for GVR", "gvr", gvr, "cluster", clusterName)
-			// 	return
-			// }
-			//
-			// ref := ObjectReferenceFromPartial(gvk, partial)
-			//
-			// gc.log.Info("Queuing object for deletion", "object", ref)
-			// gc.deletionQueue.Add(ref)
+
+			// Enqueue all dependents so their ownerRefs are checked.
+			for _, dep := range gc.graph.Owned(ref) {
+				gc.attemptToDelete.Add(dep)
+			}
 		},
 	}
 
@@ -414,12 +417,16 @@ func (gc *GarbageCollector) startMonitorForVersion(crd *apiextensionsv1.CustomRe
 
 	unregister := func() {
 		if err := informer.Informer().RemoveEventHandler(registration); err != nil {
-			gc.log.Error(err, "error removing event handler for CRD", "crd", crd.Name) // TODO: version etcpp
+			gc.log.Error(err, "error removing event handler for CRD", "crd", crd.Name)
 		}
 	}
 
 	return unregister, nil
 }
+
+// ---------------------------------------------------------------------------
+// REST mapping helpers
+// ---------------------------------------------------------------------------
 
 func (gc *GarbageCollector) GVR(or ObjectReference) (schema.GroupVersionResource, error) {
 	gvk := schema.FromAPIVersionAndKind(or.OwnerReference.APIVersion, or.OwnerReference.Kind)
@@ -430,6 +437,107 @@ func (gc *GarbageCollector) GVR(or ObjectReference) (schema.GroupVersionResource
 	}
 	return mapping.Resource, nil
 }
+
+// restMapping returns the full RESTMapping including scope.
+func (gc *GarbageCollector) restMapping(or ObjectReference) (*meta.RESTMapping, error) {
+	gvk := schema.FromAPIVersionAndKind(or.OwnerReference.APIVersion, or.OwnerReference.Kind)
+	forCluster := gc.options.DynRESTMapper.ForCluster(or.ClusterName)
+	return forCluster.RESTMapping(gvk.GroupKind(), gvk.Version)
+}
+
+// ---------------------------------------------------------------------------
+// isDangling + classifyReferences
+// ---------------------------------------------------------------------------
+
+// isDangling checks whether the given ownerRef points to an absent owner.
+// It checks the absent owner cache first, then the API server.
+func (gc *GarbageCollector) isDangling(ctx context.Context, ownerRef ObjectReference, dependent ObjectReference) (dangling bool, owner *metav1.PartialObjectMetadata, err error) {
+	// Fast path: check absent owner cache (cluster-scoped).
+	clusterKey := absentOwnerCacheKey{ClusterName: ownerRef.ClusterName, UID: ownerRef.UID}
+	if gc.absentOwnerCache.Has(clusterKey) {
+		return true, nil, nil
+	}
+	// Check namespaced key.
+	nsKey := absentOwnerCacheKey{ClusterName: ownerRef.ClusterName, UID: ownerRef.UID, Namespace: dependent.Namespace}
+	if gc.absentOwnerCache.Has(nsKey) {
+		return true, nil, nil
+	}
+
+	// Resolve scope.
+	mapping, err := gc.restMapping(ownerRef)
+	if err != nil {
+		return false, nil, err
+	}
+	namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
+
+	// Namespace scoping validation: cluster-scoped dependent with
+	// namespaced owner is invalid.
+	if len(dependent.Namespace) == 0 && namespaced {
+		return false, nil, errNamespacedOwnerOfClusterScopedObject
+	}
+
+	ns := ""
+	if namespaced {
+		ns = dependent.Namespace
+	}
+
+	// Slow path: GET owner from API server.
+	owner, err = gc.options.MetadataClusterClient.
+		Cluster(ownerRef.ClusterName.Path()).
+		Resource(mapping.Resource).
+		Namespace(ns).
+		Get(ctx, ownerRef.Name, metav1.GetOptions{})
+
+	if apierrors.IsNotFound(err) {
+		cacheKey := absentOwnerCacheKey{ClusterName: ownerRef.ClusterName, UID: ownerRef.UID, Namespace: ns}
+		gc.absentOwnerCache.Add(cacheKey)
+		return true, nil, nil
+	}
+	if err != nil {
+		return false, nil, err
+	}
+
+	// UID mismatch — object was reincarnated.
+	if owner.GetUID() != ownerRef.UID {
+		cacheKey := absentOwnerCacheKey{ClusterName: ownerRef.ClusterName, UID: ownerRef.UID, Namespace: ns}
+		gc.absentOwnerCache.Add(cacheKey)
+		return true, nil, nil
+	}
+
+	return false, owner, nil
+}
+
+// classifyReferences classifies each ownerReference as solid, dangling, or
+// waitingForDependentsDeletion.
+func (gc *GarbageCollector) classifyReferences(ctx context.Context, dependent ObjectReference, ownerRefs []ObjectReference) (
+	solid, dangling, waitingForDependentsDeletion []ObjectReference, err error,
+) {
+	for _, ownerRef := range ownerRefs {
+		isDangling, owner, err := gc.isDangling(ctx, ownerRef, dependent)
+		if err != nil {
+			if errors.Is(err, errNamespacedOwnerOfClusterScopedObject) {
+				// Non-retryable: skip this reference.
+				dangling = append(dangling, ownerRef)
+				continue
+			}
+			return nil, nil, nil, err
+		}
+		if isDangling {
+			dangling = append(dangling, ownerRef)
+			continue
+		}
+		if owner.GetDeletionTimestamp() != nil && hasFinalizer(owner, metav1.FinalizerDeleteDependents) {
+			waitingForDependentsDeletion = append(waitingForDependentsDeletion, ownerRef)
+		} else {
+			solid = append(solid, ownerRef)
+		}
+	}
+	return
+}
+
+// ---------------------------------------------------------------------------
+// Deletion queue (owner-side): "owner was deleted, cascade to dependents"
+// ---------------------------------------------------------------------------
 
 func (gc *GarbageCollector) runDeletionQueueWorker(ctx context.Context) {
 	for gc.processDeletionQueue(ctx) {
@@ -443,7 +551,7 @@ func (gc *GarbageCollector) processDeletionQueue(ctx context.Context) bool {
 	}
 	defer gc.deletionQueue.Done(or)
 
-	gc.log.Info("Processing deletion queue item", "object", or)
+	gc.log.V(4).Info("Processing deletion queue item", "object", or)
 	requeue, err := gc.processDeletionQueueItem(ctx, or)
 	if err != nil {
 		gc.log.Error(err, "error processing deletion queue item", "object", or)
@@ -460,8 +568,6 @@ func (gc *GarbageCollector) processDeletionQueue(ctx context.Context) bool {
 }
 
 func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or ObjectReference) (bool, error) {
-	gc.log.Info("Processing deletion for object", "object", or)
-
 	gvr, err := gc.GVR(or)
 	if err != nil {
 		return false, fmt.Errorf("error getting GVR for object %v: %w", or, err)
@@ -471,17 +577,14 @@ func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or Obj
 		Resource(gvr).
 		Namespace(or.Namespace)
 
-	gc.log.Info("Getting latest version of object from API server", "object", or)
 	latest, err := client.Get(ctx, or.Name, metav1.GetOptions{})
-	// TODO(ntnn): this is not good. better would probably to pass the
-	// unstructured through the queue and to only work off of that data
-	// until actual api interaction is necessary.
-	// If we get a not found error, the object is already gone but the
-	// graph might still have objects for it either because the gc,
-	// queue or graph is lagging behind.
-	gc.log.Info("Got latest version of object from API server", "object", or, "latest", latest)
 	if apierrors.IsNotFound(err) {
-		// Object is already gone, remove it from the graph.
+		// Owner is gone. Add to absent owner cache and enqueue
+		// dependents for ownerRef-driven deletion check.
+		gc.absentOwnerCache.Add(absentOwnerCacheKey{ClusterName: or.ClusterName, UID: or.UID, Namespace: or.Namespace})
+		for _, dep := range gc.graph.Owned(or) {
+			gc.attemptToDelete.Add(dep)
+		}
 		gc.graph.Remove(or)
 		return false, nil
 	}
@@ -489,118 +592,414 @@ func (gc *GarbageCollector) processDeletionQueueItem(ctx context.Context, or Obj
 		return false, err
 	}
 
-	// metav1.FinalizerDeleteDependents doesn't need special handling.
-	// If owned objects exist they will be added to the deletion queue
-	// and this object will be requeued until dependents are gone.
+	// UID mismatch: the object was reincarnated.
+	if latest.GetUID() != or.UID {
+		gc.absentOwnerCache.Add(absentOwnerCacheKey{ClusterName: or.ClusterName, UID: or.UID, Namespace: or.Namespace})
+		for _, dep := range gc.graph.Owned(or) {
+			gc.attemptToDelete.Add(dep)
+		}
+		gc.graph.Remove(or)
+		return false, nil
+	}
 
-	// Check if there are any owned objects.
-	// If the owned objects were orphaned above this will requeue until
-	// the informers have caught up and the graph is consistent.
+	// Object still exists. If it is being deleted with
+	// FinalizerDeleteDependents, enqueue it for foreground processing.
+	if latest.GetDeletionTimestamp() != nil && hasFinalizer(latest, metav1.FinalizerDeleteDependents) {
+		for _, dep := range gc.graph.Owned(or) {
+			gc.attemptToDelete.Add(dep)
+		}
+		gc.attemptToDelete.Add(or)
+		return false, nil
+	}
+
+	// Handle FinalizerOrphanDependents: orphan owned objects.
 	owned := gc.graph.Owned(or)
 	if len(owned) > 0 {
-		// Orphan resources
 		if hasFinalizer(latest, metav1.FinalizerOrphanDependents) {
 			if err := gc.orphanOwned(ctx, or); err != nil {
 				return false, err
 			}
-			// Requeue until the graph lists no owned objects.
 			return true, nil
 		}
 
-		// Delete owned objects by queueing them for deletion.
-		for _, ownedRef := range owned {
-			gc.log.Info("Queuing owned object for deletion", "ownedObject", ownedRef, "ownerObject", or)
-			gc.deletionQueue.Add(ownedRef)
+		// Enqueue dependents into attemptToDelete — do NOT delete them
+		// directly, they may have other live owners.
+		for _, dep := range owned {
+			gc.attemptToDelete.Add(dep)
 		}
-		// Requeue the original object to check later if owned objects are gone.
-		gc.log.Info("Owned objects exist, requeuing deletion", "object", or, "ownedCount", len(owned))
 		return true, nil
 	}
-	// No owned objects. Proceed to delete the object.
-	gc.log.Info("Deleting object from API server", "object", or)
 
+	// No owned objects — proceed to delete.
 	if hasFinalizer(latest, metav1.FinalizerOrphanDependents) {
-		gc.log.Info("Removing orphan finalizer from object", "object", or)
-		patch, err := patchRemoveFinalizer(latest, metav1.FinalizerOrphanDependents)
-		if err != nil {
-			return false, err
-		}
-
-		if _, err := client.Patch(ctx, or.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		if err := gc.removeFinalizer(ctx, or, metav1.FinalizerOrphanDependents); err != nil {
 			return false, err
 		}
 	}
 
-	preconditions := metav1.Preconditions{UID: &or.UID}
-
-	// FinalizerOrphanDependents and FinalizerDeleteDependents was
-	// handled above, so the policy doesn't matter per se.
-	policy := metav1.DeletePropagationBackground
-
-	if err := gc.options.MetadataClusterClient.
-		Cluster(or.ClusterName.Path()).
-		Resource(gvr).
-		Namespace(or.Namespace).
-		Delete(ctx, or.Name, metav1.DeleteOptions{
-			Preconditions:     &preconditions,
-			PropagationPolicy: &policy,
-		},
-		); err != nil {
-		// TODO(ntnn): Could add a handle for not found here, but
-		// strictly speaking that should not happen as these workers
-		// should be the only ones deleting objects.
+	if err := gc.deleteObject(ctx, or, latest, metav1.DeletePropagationBackground); err != nil {
 		return false, err
 	}
 
-	// Object has been successfully deleted from the API server. Remove it from the graph.
 	gc.graph.Remove(or)
-
 	return false, nil
 }
 
+// ---------------------------------------------------------------------------
+// attemptToDelete queue (dependent-side): "check if I should be deleted"
+// ---------------------------------------------------------------------------
+
+func (gc *GarbageCollector) runAttemptToDeleteWorker(ctx context.Context) {
+	for gc.processAttemptToDelete(ctx) {
+	}
+}
+
+func (gc *GarbageCollector) processAttemptToDelete(ctx context.Context) bool {
+	or, shutdown := gc.attemptToDelete.Get()
+	if shutdown {
+		return false
+	}
+	defer gc.attemptToDelete.Done(or)
+
+	gc.log.V(4).Info("Processing attemptToDelete item", "object", or)
+	err := gc.attemptToDeleteItem(ctx, or)
+	if err != nil {
+		gc.log.Error(err, "error processing attemptToDelete item", "object", or)
+		gc.attemptToDelete.AddRateLimited(or)
+		return true
+	}
+
+	gc.attemptToDelete.Forget(or)
+	return true
+}
+
+func (gc *GarbageCollector) attemptToDeleteItem(ctx context.Context, item ObjectReference) error {
+	logger := gc.log.WithValues("object", item)
+
+	gvr, err := gc.GVR(item)
+	if err != nil {
+		return err
+	}
+
+	client := gc.options.MetadataClusterClient.Cluster(item.ClusterName.Path()).
+		Resource(gvr).
+		Namespace(item.Namespace)
+
+	latest, err := client.Get(ctx, item.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		gc.graph.Remove(item)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// UID mismatch — stale reference.
+	if latest.GetUID() != item.UID {
+		gc.graph.Remove(item)
+		return nil
+	}
+
+	// If being deleted and NOT waiting for dependents, let deletion
+	// proceed naturally.
+	beingDeleted := latest.GetDeletionTimestamp() != nil
+	deletingDependents := beingDeleted && hasFinalizer(latest, metav1.FinalizerDeleteDependents)
+
+	if beingDeleted && !deletingDependents {
+		return nil
+	}
+
+	// Foreground cascade: object is waiting for its dependents to be
+	// deleted. Check if blocking dependents are gone.
+	if deletingDependents {
+		return gc.processDeletingDependentsItem(ctx, item)
+	}
+
+	// Classify owner references.
+	ownerRefs := ObjectReferencesFromOwnerReferences(item.ClusterName, item.Namespace, latest.GetOwnerReferences())
+	if len(ownerRefs) == 0 {
+		return nil
+	}
+
+	solid, dangling, waitingForDependentsDeletion, err := gc.classifyReferences(ctx, item, ownerRefs)
+	if err != nil {
+		return err
+	}
+
+	logger.V(4).Info("Classified references",
+		"solid", len(solid), "dangling", len(dangling),
+		"waitingForDependentsDeletion", len(waitingForDependentsDeletion))
+
+	switch {
+	case len(solid) > 0:
+		// Has at least one live owner — do NOT delete.
+		// Patch out dangling + waitingForDependentsDeletion refs.
+		if len(dangling) == 0 && len(waitingForDependentsDeletion) == 0 {
+			return nil
+		}
+		ownerUIDs := make([]types.UID, 0, len(dangling)+len(waitingForDependentsDeletion))
+		for _, ref := range dangling {
+			ownerUIDs = append(ownerUIDs, ref.UID)
+		}
+		for _, ref := range waitingForDependentsDeletion {
+			ownerUIDs = append(ownerUIDs, ref.UID)
+		}
+		return gc.patchRemoveOwnerReferences(ctx, item, ownerUIDs)
+
+	case len(waitingForDependentsDeletion) > 0:
+		owned := gc.graph.Owned(item)
+		if len(owned) > 0 {
+			// Check for cycles: if any dependent is itself
+			// deletingDependents, break the cycle by unblocking
+			// BlockOwnerDeletion on this item's ownerRefs.
+			if gc.detectAndBreakCycle(ctx, item, owned) {
+				logger.V(2).Info("Broke potential ownership cycle")
+			}
+			return gc.deleteObject(ctx, item, latest, metav1.DeletePropagationForeground)
+		}
+		// No dependents — fall through to delete.
+		fallthrough
+
+	default:
+		// All owners are dangling — delete.
+		var policy metav1.DeletionPropagation
+		switch {
+		case hasFinalizer(latest, metav1.FinalizerOrphanDependents):
+			policy = metav1.DeletePropagationOrphan
+		case hasFinalizer(latest, metav1.FinalizerDeleteDependents):
+			policy = metav1.DeletePropagationForeground
+		default:
+			policy = metav1.DeletePropagationBackground
+		}
+		return gc.deleteObject(ctx, item, latest, policy)
+	}
+}
+
+// processDeletingDependentsItem handles an object that has
+// FinalizerDeleteDependents and is waiting for its blocking dependents to be
+// deleted.
+func (gc *GarbageCollector) processDeletingDependentsItem(ctx context.Context, item ObjectReference) error {
+	blocking := gc.blockingDependents(item)
+	if len(blocking) == 0 {
+		// All blocking dependents are gone — remove the finalizer.
+		return gc.removeFinalizer(ctx, item, metav1.FinalizerDeleteDependents)
+	}
+	// Enqueue blocking dependents for deletion.
+	for _, dep := range blocking {
+		gc.attemptToDelete.Add(dep)
+	}
+	return nil
+}
+
+// blockingDependents returns dependents that have BlockOwnerDeletion=true for
+// the given owner.
+func (gc *GarbageCollector) blockingDependents(owner ObjectReference) []ObjectReference {
+	owned := gc.graph.Owned(owner)
+	var blocking []ObjectReference
+	for _, dep := range owned {
+		depOwners := gc.graph.Owners(dep)
+		for _, ownerRef := range depOwners {
+			if ownerRef.UID == owner.UID &&
+				ownerRef.BlockOwnerDeletion != nil &&
+				*ownerRef.BlockOwnerDeletion {
+				blocking = append(blocking, dep)
+				break
+			}
+		}
+	}
+	return blocking
+}
+
+// detectAndBreakCycle checks if any dependent of item is also
+// deletingDependents, which indicates a potential ownership cycle. If found,
+// it patches the item's ownerRefs to set BlockOwnerDeletion=false.
+func (gc *GarbageCollector) detectAndBreakCycle(ctx context.Context, item ObjectReference, owned []ObjectReference) bool {
+	for _, dep := range owned {
+		depOwners := gc.graph.Owners(dep)
+		for _, ownerRef := range depOwners {
+			if ownerRef.UID != item.UID || ownerRef.BlockOwnerDeletion == nil || !*ownerRef.BlockOwnerDeletion {
+				continue
+			}
+			// This dependent blocks item. Check if the dependent
+			// itself is deletingDependents.
+			depGVR, err := gc.GVR(dep)
+			if err != nil {
+				continue
+			}
+			depLatest, err := gc.options.MetadataClusterClient.
+				Cluster(dep.ClusterName.Path()).
+				Resource(depGVR).
+				Namespace(dep.Namespace).
+				Get(ctx, dep.Name, metav1.GetOptions{})
+			if err != nil {
+				continue
+			}
+			if depLatest.GetDeletionTimestamp() != nil && hasFinalizer(depLatest, metav1.FinalizerDeleteDependents) {
+				// Potential cycle — unblock.
+				_ = gc.patchUnblockOwnerReferences(ctx, item)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// API operations with conflict handling
+// ---------------------------------------------------------------------------
+
+// deleteObject deletes the given object with conflict handling.
+// On 409 Conflict, it re-GETs the object and retries without RV precondition
+// if ownerReferences are unchanged.
+func (gc *GarbageCollector) deleteObject(ctx context.Context, item ObjectReference, latest *metav1.PartialObjectMetadata, policy metav1.DeletionPropagation) error {
+	gvr, err := gc.GVR(item)
+	if err != nil {
+		return err
+	}
+
+	client := gc.options.MetadataClusterClient.Cluster(item.ClusterName.Path()).
+		Resource(gvr).
+		Namespace(item.Namespace)
+
+	preconditions := metav1.Preconditions{UID: &item.UID}
+	rv := ""
+	if latest != nil {
+		rv = latest.GetResourceVersion()
+	}
+	if len(rv) > 0 {
+		preconditions.ResourceVersion = &rv
+	}
+
+	err = client.Delete(ctx, item.Name, metav1.DeleteOptions{
+		Preconditions:     &preconditions,
+		PropagationPolicy: &policy,
+	})
+
+	if apierrors.IsConflict(err) && len(rv) > 0 {
+		liveObj, liveErr := client.Get(ctx, item.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(liveErr) {
+			return nil
+		}
+		if liveErr == nil && liveObj.GetUID() == item.UID &&
+			reflect.DeepEqual(liveObj.GetOwnerReferences(), latest.GetOwnerReferences()) {
+			// ownerRefs unchanged — retry without RV precondition.
+			return gc.deleteObject(ctx, item, nil, policy)
+		}
+	}
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// removeFinalizer removes the given finalizer from the object, retrying on
+// conflict.
+func (gc *GarbageCollector) removeFinalizer(ctx context.Context, item ObjectReference, finalizer string) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		gvr, err := gc.GVR(item)
+		if err != nil {
+			return err
+		}
+		client := gc.options.MetadataClusterClient.Cluster(item.ClusterName.Path()).
+			Resource(gvr).
+			Namespace(item.Namespace)
+
+		latest, err := client.Get(ctx, item.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !hasFinalizer(latest, finalizer) {
+			return nil
+		}
+
+		patch, err := patchRemoveFinalizer(latest, finalizer)
+		if err != nil {
+			return err
+		}
+		_, err = client.Patch(ctx, item.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+		return err
+	})
+}
+
+// patchRemoveOwnerReferences removes the given owner UIDs from the object's
+// ownerReferences, retrying on conflict.
+func (gc *GarbageCollector) patchRemoveOwnerReferences(ctx context.Context, item ObjectReference, ownerUIDs []types.UID) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		gvr, err := gc.GVR(item)
+		if err != nil {
+			return err
+		}
+		client := gc.options.MetadataClusterClient.Cluster(item.ClusterName.Path()).
+			Resource(gvr).
+			Namespace(item.Namespace)
+
+		latest, err := client.Get(ctx, item.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		patch, err := patchRemoveOwnerReferencesByUIDs(latest, ownerUIDs)
+		if err != nil {
+			return err
+		}
+		_, err = client.Patch(ctx, item.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+		return err
+	})
+}
+
+// patchUnblockOwnerReferences sets BlockOwnerDeletion=false on all
+// ownerReferences of the given object.
+func (gc *GarbageCollector) patchUnblockOwnerReferences(ctx context.Context, item ObjectReference) error {
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		gvr, err := gc.GVR(item)
+		if err != nil {
+			return err
+		}
+		client := gc.options.MetadataClusterClient.Cluster(item.ClusterName.Path()).
+			Resource(gvr).
+			Namespace(item.Namespace)
+
+		latest, err := client.Get(ctx, item.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		patch, err := patchUnblockOwnerRefs(latest)
+		if err != nil {
+			return err
+		}
+		if patch == nil {
+			return nil
+		}
+		_, err = client.Patch(ctx, item.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+		return err
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Orphan logic
+// ---------------------------------------------------------------------------
+
 func (gc *GarbageCollector) orphanOwned(ctx context.Context, or ObjectReference) error {
-	// TODO(ntnn): pass owned resources to avoid querying the graph again
 	owned := gc.graph.Owned(or)
 	if len(owned) == 0 {
 		return nil
 	}
 
-	// Remove owner reference from all owned objects.
 	var errs error
 	for _, ownedRef := range owned {
-		gvr, err := gc.GVR(ownedRef)
-		if err != nil {
+		if err := gc.patchRemoveOwnerReferences(ctx, ownedRef, []types.UID{or.UID}); err != nil {
 			errs = errors.Join(errs, err)
-			continue
-		}
-
-		client := gc.options.MetadataClusterClient.
-			Cluster(ownedRef.ClusterName.Path()).
-			Resource(gvr).
-			Namespace(ownedRef.Namespace)
-
-		latest, err := client.Get(ctx, ownedRef.Name, metav1.GetOptions{})
-		if err != nil {
-			errs = errors.Join(errs, err)
-			continue
-		}
-
-		patch, err := patchRemoveOwnerReference(latest, or.UID)
-		if err != nil {
-			errs = errors.Join(errs, err)
-			continue
-		}
-
-		if _, err := client.Patch(ctx, ownedRef.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
-			errs = errors.Join(errs, err)
-			continue
 		}
 	}
-
-	// TODO(ntnn): don't think this should be necessary. the handler
-	// should get an event for the update and update the graph so
-	// eventually the graph is consistent and deletion can proceed
-	// without meddling here.
-	// gc.graph.Add(or, owned, nil)
 	return errs
 }

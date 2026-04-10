@@ -22,6 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 )
 
 type getFinalizers interface {
@@ -49,13 +50,50 @@ type getOwnerReferences interface {
 }
 
 func patchRemoveOwnerReference(obj getOwnerReferences, ownerReferenceUID types.UID) ([]byte, error) {
+	return patchRemoveOwnerReferencesByUIDs(obj, []types.UID{ownerReferenceUID})
+}
+
+// patchRemoveOwnerReferencesByUIDs builds a merge patch that removes all
+// ownerReferences matching any of the given UIDs.
+func patchRemoveOwnerReferencesByUIDs(obj getOwnerReferences, ownerUIDs []types.UID) ([]byte, error) {
+	uidSet := make(map[types.UID]struct{}, len(ownerUIDs))
+	for _, uid := range ownerUIDs {
+		uidSet[uid] = struct{}{}
+	}
+
 	ownerReferences := obj.GetOwnerReferences()
 	newOwnerReferences := slices.DeleteFunc(ownerReferences, func(ref metav1.OwnerReference) bool {
-		return ref.UID == ownerReferenceUID
+		_, remove := uidSet[ref.UID]
+		return remove
 	})
 	dummy := metav1.PartialObjectMetadata{
 		ObjectMeta: metav1.ObjectMeta{
 			OwnerReferences: newOwnerReferences,
+		},
+	}
+	return json.Marshal(&dummy)
+}
+
+// patchUnblockOwnerRefs builds a merge patch that sets
+// BlockOwnerDeletion=false on all ownerReferences. Returns nil if no
+// ownerReference has BlockOwnerDeletion=true.
+func patchUnblockOwnerRefs(obj getOwnerReferences) ([]byte, error) {
+	ownerReferences := obj.GetOwnerReferences()
+	modified := false
+	newRefs := make([]metav1.OwnerReference, len(ownerReferences))
+	copy(newRefs, ownerReferences)
+	for i := range newRefs {
+		if newRefs[i].BlockOwnerDeletion != nil && *newRefs[i].BlockOwnerDeletion {
+			newRefs[i].BlockOwnerDeletion = ptr.To(false)
+			modified = true
+		}
+	}
+	if !modified {
+		return nil, nil
+	}
+	dummy := metav1.PartialObjectMetadata{
+		ObjectMeta: metav1.ObjectMeta{
+			OwnerReferences: newRefs,
 		},
 	}
 	return json.Marshal(&dummy)
