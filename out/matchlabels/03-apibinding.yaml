@@ -1,0 +1,68 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: cowboys
+spec:
+  reference:
+    export:
+      path: root:provider
+      name: today-cowboys
+  permissionClaims:
+  # configmaps: matchLabels selector -- only configmaps with app=claimed are visible
+  - group: ""
+    resource: configmaps
+    verbs: ["*"]
+    selector:
+      matchLabels:
+        app: claimed
+    state: Accepted
+  # Everything else: matchAll
+  - group: ""
+    resource: secrets
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: ""
+    resource: serviceaccounts
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: rbac.authorization.k8s.io
+    resource: clusterroles
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: rbac.authorization.k8s.io
+    resource: clusterrolebindings
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: authorization.k8s.io
+    resource: subjectaccessreviews
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: authorization.k8s.io
+    resource: localsubjectaccessreviews
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: apis.kcp.io
+    resource: apibindings
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: wild.wild.west
+    resource: sheriffs
+    identityHash: "20ac01850a9bd09c3c7bc5b61281c4b5bbab9c55ee55f2928e5716cc673cfb75"
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted

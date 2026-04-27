@@ -1,0 +1,24 @@
+# ConfigMap that MATCHES the selector (app=claimed).
+# Should be visible via the APIExport virtual workspace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-configmap-matching
+  namespace: default
+  labels:
+    app: claimed
+    env: dev
+data:
+  test: test
+---
+# ConfigMap that does NOT match the selector (missing app=claimed).
+# Should NOT be visible via the APIExport virtual workspace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-configmap-not-matching
+  namespace: default
+  labels:
+    env: prod
+data:
+  test: test

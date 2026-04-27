@@ -1,0 +1,63 @@
+apiVersion: apis.kcp.io/v1alpha2
+kind: APIBinding
+metadata:
+  name: cowboys
+spec:
+  reference:
+    export:
+      path: root:provider
+      name: today-cowboys
+  permissionClaims:
+  # secrets: matchExpressions selector -- only secrets with tier In [frontend, backend]
+  - group: ""
+    resource: secrets
+    verbs: ["*"]
+    selector:
+      matchExpressions:
+      - key: tier
+        operator: In
+        values: ["frontend", "backend"]
+    state: Accepted
+  # Everything else: matchAll
+  - group: ""
+    resource: configmaps
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: ""
+    resource: serviceaccounts
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: rbac.authorization.k8s.io
+    resource: clusterroles
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: rbac.authorization.k8s.io
+    resource: clusterrolebindings
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: authorization.k8s.io
+    resource: subjectaccessreviews
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: authorization.k8s.io
+    resource: localsubjectaccessreviews
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
+  - group: apis.kcp.io
+    resource: apibindings
+    verbs: ["*"]
+    selector:
+      matchAll: true
+    state: Accepted
