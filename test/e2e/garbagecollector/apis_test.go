@@ -122,8 +122,13 @@ func TestBoundAPICrossWorkspace(t *testing.T) {
 			},
 		}
 
-		_, err := kcpClusterClient.Cluster(userPath).ApisV1alpha2().APIBindings().Create(t.Context(), binding, metav1.CreateOptions{})
-		require.NoError(t, err, "error creating APIBinding")
+		kcptestinghelpers.Eventually(t, func() (bool, string) {
+			_, err := kcpClusterClient.Cluster(userPath).ApisV1alpha2().APIBindings().Create(t.Context(), binding, metav1.CreateOptions{})
+			if apierrors.IsAlreadyExists(err) {
+				return true, ""
+			}
+			return err == nil, fmt.Sprintf("Error creating APIBinding: %v", err)
+		}, wait.ForeverTestTimeout, 100*time.Millisecond, "error creating APIBinding")
 
 		// TODO use WaitForAPIReady
 
