@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -32,6 +33,32 @@ import (
 
 	configcrds "github.com/kcp-dev/kcp/config/crds"
 )
+
+// In tests the creation and deletion of CRDs and objects happens very
+// quickly - but gc is a bit slower.
+// Assume the following:
+//
+// 1. API is bound
+// 2. CR of API is created
+// 3. An object of a core API with the CR is created
+// 4. Test deletes CR
+//
+// The gc already knows of the core API object because it immediately
+// sets up controllers for this API - but it probably has no knowledge
+// of the CR as the monitor sync hasn't updated the monitors for that
+// API yet.
+//
+// So instead it enqueues a virtual owner node to establish the edge in
+// the graph, keeping the owned object alive until it has observed the
+// owner. Once the owner has been observed it replaces the virtual
+// object.
+//
+// Once the owner has been observed the deletion can also be propagated
+// based on the used policy - e.g. to orphan dependents.
+//
+// This timing issue is only something that can lead to false-positives
+// in CI as the gc graph will be eventually consistent.
+const gcTimeout = 2 * time.Minute
 
 //go:embed *.yaml
 var testFiles embed.FS

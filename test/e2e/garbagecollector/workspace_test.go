@@ -25,7 +25,6 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/discovery/cached/memory"
@@ -126,7 +125,7 @@ func TestGarbageCollectorTypesFromBinding(t *testing.T) {
 			kcptestinghelpers.Eventually(t, func() (bool, string) {
 				_, err = kcpClusterClient.Cluster(userPath).ApisV1alpha2().APIBindings().Create(t.Context(), binding, metav1.CreateOptions{})
 				return err == nil, fmt.Sprintf("Error creating APIBinding: %v", err)
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "error creating APIBinding")
+			}, gcTimeout, 100*time.Millisecond, "error creating APIBinding")
 
 			t.Logf("Wait for the binding to be ready")
 			kcptestinghelpers.EventuallyCondition(t, func() (conditions.Getter, error) {
@@ -144,7 +143,7 @@ func TestGarbageCollectorTypesFromBinding(t *testing.T) {
 					return false, fmt.Sprintf("Failed to list cowboys: %v", err)
 				}
 				return true, ""
-			}, wait.ForeverTestTimeout, time.Millisecond*100)
+			}, gcTimeout, time.Millisecond*100)
 
 			t.Logf("Creating owner cowboy")
 			owner, err := wildwestClusterClient.Cluster(userPath).WildwestV1alpha1().Cowboys("default").
@@ -196,14 +195,14 @@ func TestGarbageCollectorTypesFromBinding(t *testing.T) {
 				_, err = kubeClusterClient.Cluster(userPath).CoreV1().ConfigMaps("default").
 					Get(t.Context(), ownedConfigMap.Name, metav1.GetOptions{})
 				return apierrors.IsNotFound(err), fmt.Sprintf("configmap not garbage collected: %s", ownedConfigMap.Name)
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "error waiting for owned configmap to be garbage collected")
+			}, gcTimeout, 100*time.Millisecond, "error waiting for owned configmap to be garbage collected")
 
 			t.Logf("Waiting for the owned cowboy to be garbage collected")
 			kcptestinghelpers.Eventually(t, func() (bool, string) {
 				_, err = wildwestClusterClient.Cluster(userPath).WildwestV1alpha1().Cowboys("default").
 					Get(t.Context(), ownedCowboy.Name, metav1.GetOptions{})
 				return apierrors.IsNotFound(err), fmt.Sprintf("cowboy not garbage collected: %s", ownedConfigMap.Name)
-			}, wait.ForeverTestTimeout, 100*time.Millisecond, "error waiting for owned cowboy to be garbage collected")
+			}, gcTimeout, 100*time.Millisecond, "error waiting for owned cowboy to be garbage collected")
 		})
 	}
 }
