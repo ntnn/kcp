@@ -230,7 +230,8 @@ type sharedIndexInformer struct {
 	// Called whenever the ListAndWatch drops the connection with an error.
 	watchErrorHandler cache.WatchErrorHandlerWithContext
 
-	transform cache.TransformFunc
+	transform  cache.TransformFunc
+	ignoreFunc func(obj interface{}) bool
 
 	// identifier is used to identify this informer for metrics and logging purposes.
 	identifier cache.InformerNameAndResource
@@ -322,6 +323,18 @@ func (s *sharedIndexInformer) SetTransform(handler cache.TransformFunc) error {
 	}
 
 	s.transform = handler
+	return nil
+}
+
+func (s *sharedIndexInformer) SetIgnoreFunc(fn func(obj interface{}) bool) error {
+	s.startedLock.Lock()
+	defer s.startedLock.Unlock()
+
+	if s.started {
+		return fmt.Errorf("informer has already started")
+	}
+
+	s.ignoreFunc = fn
 	return nil
 }
 
@@ -583,7 +596,7 @@ func (s *sharedIndexInformer) handleDeltas(logger klog.Logger, obj interface{}, 
 	defer s.blockDeltas.Unlock()
 
 	if deltas, ok := obj.(cache.Deltas); ok {
-		return processDeltas(logger, s, s.indexer, deltas, isInInitialList, s.keyFunc)
+		return processDeltas(logger, s, s.indexer, deltas, isInInitialList, s.keyFunc, s.ignoreFunc)
 	}
 	return errors.New("object given as Process argument is not Deltas")
 }
@@ -591,7 +604,7 @@ func (s *sharedIndexInformer) handleDeltas(logger klog.Logger, obj interface{}, 
 func (s *sharedIndexInformer) handleBatchDeltas(logger klog.Logger, deltas []cache.Delta, isInInitialList bool) error {
 	s.blockDeltas.Lock()
 	defer s.blockDeltas.Unlock()
-	return processDeltasInBatch(logger, s, s.indexer, deltas, isInInitialList, s.keyFunc)
+	return processDeltasInBatch(logger, s, s.indexer, deltas, isInInitialList, s.keyFunc, s.ignoreFunc)
 }
 
 // Conforms to cache.ResourceEventHandler
@@ -1057,10 +1070,16 @@ func processDeltas(
 	deltas cache.Deltas,
 	isInInitialList bool,
 	keyFunc cache.KeyFunc,
+	ignoreFunc func(obj interface{}) bool,
 ) error {
 	// from oldest to newest
 	for _, d := range deltas {
 		obj := d.Object
+
+		if ignoreFunc != nil && ignoreFunc(obj) {
+			// Drop everything related to ignored objects
+			continue
+		}
 
 		switch d.Type {
 		case cache.ReplacedAll:
@@ -1125,6 +1144,7 @@ func processDeltasInBatch(
 	deltas []cache.Delta,
 	isInInitialList bool,
 	keyFunc cache.KeyFunc,
+	ignoreFunc func(obj interface{}) bool,
 ) error {
 	// from oldest to newest
 	txns := make([]cache.Transaction, 0)
@@ -1133,7 +1153,7 @@ func processDeltasInBatch(
 	if !txnSupported {
 		var errs []error
 		for _, delta := range deltas {
-			if err := processDeltas(logger, handler, clientState, cache.Deltas{delta}, isInInitialList, keyFunc); err != nil {
+			if err := processDeltas(logger, handler, clientState, cache.Deltas{delta}, isInInitialList, keyFunc, ignoreFunc); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -1145,6 +1165,11 @@ func processDeltasInBatch(
 	// deltasList is a list of unique objects
 	for _, d := range deltas {
 		obj := d.Object
+
+		if ignoreFunc != nil && ignoreFunc(obj) {
+			continue
+		}
+
 		switch d.Type {
 		case cache.Sync, cache.Replaced, cache.Added, cache.Updated:
 			// it will only return one old object for each because items are unique
