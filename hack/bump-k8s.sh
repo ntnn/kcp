@@ -17,7 +17,6 @@
 set -o errexit
 set -o nounset
 set -o pipefail
-set -o xtrace
 
 # The normal flow for updating a replaced dependency would look like:
 # $ go mod edit -replace old=new@branch
@@ -31,14 +30,34 @@ GITHUB_USER=${GITHUB_USER:-kcp-dev}
 GITHUB_REPO=${GITHUB_REPO:-kubernetes}
 BRANCH=${BRANCH:-kcp-1.31.0}
 
-current_version="$( GOPROXY=direct go mod edit -json | jq '.Replace[] | select(.Old.Path=="k8s.io/kubernetes") | .New.Version' --raw-output )"
+main() {
+    local user="$1"
+    local repo="$2"
+    local ref="$3"
 
-# equivalent to go mod edit -replace
-is_gnu_sed() { sed --version >/dev/null 2>&1; }
-sed_args=( -i )
-if ! is_gnu_sed; then
-    sed_args+=( "" )
-fi
-sed "${sed_args[@]}" -e "s|${current_version}|${BRANCH}|g" -E -e "s,=> github.com/kcp-dev/kubernetes,=> github.com/${GITHUB_USER}/${GITHUB_REPO},g" go.mod
+    local reporef="github.com/$user/$repo"
 
-GOPROXY=direct go mod tidy
+    # Resolve BRANCH to a go pseudo version once with GOPROXY=direct to get the latest
+    # This version is always in the form <base>.<date>-<hash>; since
+    # this is the base module the base version will be based off of the
+    # nearest vcs tag.
+    local version="$(GOPROXY=direct go list -m "$reporef@$ref" | cut -d' ' -f2)"
+
+    # cut off the <base> to just get the <date> and <hash>
+    local date_hash="${version##*.}"
+
+    # Replace all current k8s.io replacementes with the new version
+    go mod edit -json | jq -r '.Replace[] | .Old.Path' | grep k8s.io | while read module; do
+        case "$module" in
+            # k8s.io/kubernetes needs the pseudo version with the nearest tag
+            (k8s.io/kubernetes) go mod edit -replace "$module=$reporef@$version";;
+            # all other modules need a v0.0.0-* pseudo version
+            (*) go mod edit -replace "$module=$reporef/staging/src/$module@v0.0.0-$date_hash";;
+        esac
+    done
+
+    # Update go.sum
+    go mod tidy
+}
+
+main "$GITHUB_USER" "$GITHUB_REPO" "$BRANCH"
