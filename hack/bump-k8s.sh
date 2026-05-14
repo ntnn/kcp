@@ -43,6 +43,8 @@ main() {
     # nearest vcs tag.
     local version="$(GOPROXY=direct go list -m "$reporef@$ref" | cut -d' ' -f2)"
 
+    echo "resolved $reporef to $version"
+
     # cut off the <base> to just get the <date> and <hash>
     local date_hash="${version##*.}"
 
