@@ -22,6 +22,14 @@ set -o pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+mapfile -t kube_replacements < <(go mod edit -json | jq -r '.Replace[] | "\(.Old.Path)=\(.New.Path)"' | grep k8s.io)
+
+for mod in "${kube_replacements[@]}"; do
+    echo "$mod"
+done
+
+exit 0
+
 mapfile -t DIRS < <(find "${REPO_ROOT}" -name go.mod -print0 | xargs -0 dirname)
 
 for dir in "${DIRS[@]}"; do
