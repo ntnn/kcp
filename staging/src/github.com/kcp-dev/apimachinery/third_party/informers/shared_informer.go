@@ -342,6 +342,24 @@ func (s *sharedIndexInformer) SetIgnoreFunc(fn func(interface{}) bool) error {
 	return nil
 }
 
+// ForceRelist causes the underlying reflector to perform a full relist
+// on the next list/watch cycle.
+func (s *sharedIndexInformer) ForceRelist() {
+	s.startedLock.Lock()
+	defer s.startedLock.Unlock()
+
+	if !s.started {
+		return
+	}
+
+	type forceRelister interface {
+		ForceRelist()
+	}
+	if r, ok := s.controller.(forceRelister); ok {
+		r.ForceRelist()
+	}
+}
+
 func (s *sharedIndexInformer) Run(stopCh <-chan struct{}) {
 	s.RunWithContext(wait.ContextForChannel(stopCh))
 }
