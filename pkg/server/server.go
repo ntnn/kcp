@@ -178,7 +178,8 @@ func NewServer(c CompletedConfig) (*Server, error) {
 
 	s.PartialMetadataDDSIF, err = informer.NewDiscoveringDynamicSharedInformerFactory(
 		metadataClusterClient,
-		func(obj interface{}) bool { return true },
+		func(obj any) bool { return true },
+		func(obj any) bool { return false },
 		nil,
 		crdGVRSource,
 		cache.Indexers{},
@@ -202,6 +203,7 @@ func NewServer(c CompletedConfig) (*Server, error) {
 	s.CachePartialMetadataDDSIF, err = informer.NewDiscoveringDynamicSharedInformerFactory(
 		cacheMetadataClusterClient,
 		func(obj interface{}) bool { return true },
+		func(obj any) bool { return false },
 		nil,
 		cacheCrdGVRSource,
 		cache.Indexers{},
