@@ -242,6 +242,12 @@ type PermissionClaim struct {
 	// +kubebuilder:validation:MinItems=1
 	Verbs []string `json:"verbs"`
 
+	// subresources is the list of claimed subresource and verbs for this claimed resource.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Subresources []SubresourceClaim `json:"subresources,omitempty"`
+
 	// This is the identity for a given APIExport that the APIResourceSchema belongs to.
 	// The hash can be found on APIExport and APIResourceSchema's status.
 	// It will be empty for core types.
@@ -262,6 +268,23 @@ type PermissionClaim struct {
 	//
 	// +optional
 	DefaultSelector *PermissionClaimSelector `json:"defaultSelector,omitempty"`
+}
+
+// SubResourceClaim is a subresource/verb combination claimed as part of a [PermissionClaim].
+type SubresourceClaim struct {
+	// name is the name of the subresource.
+	//
+	// +kubebuilder:validation:Pattern=`^[a-z][-a-z0-9]*[a-z0-9]$`
+	// +required
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// verbs is a list of supported API operation types
+	//
+	// +required
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	Verbs []string `json:"verbs"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.__namespace__) || has(self.name)",message="at least one field must be set"
