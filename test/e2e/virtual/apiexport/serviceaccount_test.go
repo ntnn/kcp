@@ -257,3 +257,135 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err))
 	assert.Empty(t, utrResponse.Status.Token)
 }
+
+func TestMintServiceAccountTokenThroughVWFailsWithoutSubresoureClaim(t *testing.T) {
+	t.Parallel()
+	framework.Suite(t, "control-plane")
+
+	server := kcptesting.SharedKcpServer(t)
+
+	cfg := server.BaseConfig(t)
+
+	kcpClients, err := kcpclientset.NewForConfig(cfg)
+	require.NoError(t, err, "failed to construct kcp cluster client for server")
+
+	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(cfg)
+	require.NoError(t, err, "failed to construct kube cluster client for server")
+
+	orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
+	providerPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath)
+	consumerPath, consumerWorkspace := kcptesting.NewWorkspaceFixture(t, server, orgPath)
+	consumerClusterName := logicalcluster.Name(consumerWorkspace.Spec.Cluster)
+
+	const providerSAClaimLabel = "custom.provider/label"
+
+	t.Log("Setup a claimed ServiceAccount in consumer")
+	claimedSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claimed-sa",
+			Namespace: "default",
+			Labels: map[string]string{
+				providerSAClaimLabel: "true",
+			},
+		},
+	}
+	_, err = kubeClusterClient.Cluster(consumerPath).CoreV1().ServiceAccounts("default").Create(t.Context(), claimedSA, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	t.Log("Create APIExport in provider with claims for ServiceAccount but no subresources")
+	apiExport := &apisv1alpha2.APIExport{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sa-token",
+		},
+		Spec: apisv1alpha2.APIExportSpec{
+			PermissionClaims: []apisv1alpha2.PermissionClaim{
+				{
+					GroupResource: apisv1alpha2.GroupResource{
+						Resource: "serviceaccounts",
+					},
+					Verbs: []string{"get", "list"},
+					DefaultSelector: &apisv1alpha2.PermissionClaimSelector{
+						LabelSelector: metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								providerSAClaimLabel: "true",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err = kcpClients.Cluster(providerPath).ApisV1alpha2().APIExports().Create(t.Context(), apiExport, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	t.Log("Bind APIExport in consumer")
+	apiBinding := &apisv1alpha2.APIBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: apiExport.Name,
+		},
+		Spec: apisv1alpha2.APIBindingSpec{
+			Reference: apisv1alpha2.BindingReference{
+				Export: &apisv1alpha2.ExportBindingReference{
+					Path: providerPath.String(),
+					Name: apiExport.Name,
+				},
+			},
+			PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+				{
+					State: apisv1alpha2.ClaimAccepted,
+					ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+						PermissionClaim: apisv1alpha2.PermissionClaim{
+							GroupResource: apisv1alpha2.GroupResource{
+								Resource: "serviceaccounts",
+							},
+							Verbs: []string{"get", "list"},
+						},
+						Selector: apisv1alpha2.PermissionClaimSelector{
+							LabelSelector: metav1.LabelSelector{
+								MatchLabels: map[string]string{providerSAClaimLabel: "true"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err = kcpClients.Cluster(consumerPath).ApisV1alpha2().APIBindings().Create(t.Context(), apiBinding, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	t.Log("Wait for VW URL in APIExportES")
+	apiExportVWCfg := rest.CopyConfig(cfg)
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		apiExportEndpointSlice, err := kcpClients.Cluster(providerPath).ApisV1alpha1().APIExportEndpointSlices().Get(t.Context(), apiExport.Name, metav1.GetOptions{})
+		if kcptestinghelpers.TolerateOrFail(t, err, apierrors.IsNotFound) {
+			return false, fmt.Sprintf("waiting on APIExportEndpointSlice to be available %v", err.Error())
+		}
+		var found bool
+		apiExportVWCfg.Host, found, err = framework.VirtualWorkspaceURL(t.Context(), kcpClients, consumerWorkspace, framework.ExportVirtualWorkspaceURLs(apiExportEndpointSlice))
+		if err != nil {
+			return false, fmt.Sprintf("error getting VW URL: %v", err)
+		}
+		return found, fmt.Sprintf("waiting for virtual workspace URLs to be available: %v", apiExportEndpointSlice.Status.APIExportEndpoints)
+	}, wait.ForeverTestTimeout, time.Millisecond*100)
+	vwClient, err := kcpkubernetesclientset.NewForConfig(apiExportVWCfg)
+	require.NoError(t, err)
+
+	t.Log("Verify the ServiceAccount is visible through the VW")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		vwServiceAccounts, err := vwClient.CoreV1().ServiceAccounts().List(t.Context(), metav1.ListOptions{})
+		require.NoError(c, err)
+		require.Len(c, vwServiceAccounts.Items, 1, "expect listing exactly one ServiceAccount through the VW")
+		require.Equal(c, vwServiceAccounts.Items[0].Name, claimedSA.Name, "expect the ServieAccount to have the name %q", claimedSA.Name)
+	}, wait.ForeverTestTimeout, time.Millisecond*100)
+
+	t.Log("Verify mint a token for the ServiceAccount fails")
+	tokenRequest := &authenticationv1.TokenRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      claimedSA.Name,
+			Namespace: claimedSA.Namespace,
+		},
+	}
+	trResponse, err := vwClient.CoreV1().ServiceAccounts().Cluster(consumerClusterName.Path()).Namespace(claimedSA.Namespace).CreateToken(t.Context(), claimedSA.Name, tokenRequest, metav1.CreateOptions{})
+	assert.Error(t, err)
+	assert.Empty(t, trResponse.Status.Token)
+}
