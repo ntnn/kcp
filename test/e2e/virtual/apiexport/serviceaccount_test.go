@@ -83,28 +83,38 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 	_, err = kubeClusterClient.Cluster(consumerPath).CoreV1().ConfigMaps(cm.Namespace).Create(t.Context(), cm, metav1.CreateOptions{})
 	require.NoError(t, err)
 
-	t.Log("Setup ServiceAccount in consumer with cluster-admin")
-	sa := &corev1.ServiceAccount{
+	t.Log("Setup an unclaimed ServiceAccount in consumer with cluster-admin")
+	unclaimedSA := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "serviceaccount",
+			Name:      "unclaimed-sa",
+			Namespace: "default",
+		},
+	}
+	_, err = kubeClusterClient.Cluster(consumerPath).CoreV1().ServiceAccounts("default").Create(t.Context(), unclaimedSA, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	t.Log("Setup an claimed ServiceAccount in consumer with cluster-admin")
+	claimedSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "claimed-sa",
 			Namespace: "default",
 			Labels: map[string]string{
 				providerSAClaimLabel: "true",
 			},
 		},
 	}
-	_, err = kubeClusterClient.Cluster(consumerPath).CoreV1().ServiceAccounts("default").Create(t.Context(), sa, metav1.CreateOptions{})
+	_, err = kubeClusterClient.Cluster(consumerPath).CoreV1().ServiceAccounts("default").Create(t.Context(), claimedSA, metav1.CreateOptions{})
 	require.NoError(t, err)
 
 	crb := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: sa.Name,
+			Name: claimedSA.Name,
 		},
 		Subjects: []rbacv1.Subject{
 			{
 				Kind:      "ServiceAccount",
-				Name:      sa.Name,
-				Namespace: sa.Namespace,
+				Name:      claimedSA.Name,
+				Namespace: claimedSA.Namespace,
 			},
 		},
 		RoleRef: rbacv1.RoleRef{
@@ -210,17 +220,17 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 		vwServiceAccounts, err := vwClient.CoreV1().ServiceAccounts().List(t.Context(), metav1.ListOptions{})
 		require.NoError(c, err)
 		require.Len(c, vwServiceAccounts.Items, 1, "expect listing exactly one ServiceAccount through the VW")
-		require.Equal(c, vwServiceAccounts.Items[0].Name, sa.Name, "expect the ServieAccount to have the name %q", sa.Name)
+		require.Equal(c, vwServiceAccounts.Items[0].Name, claimedSA.Name, "expect the ServieAccount to have the name %q", claimedSA.Name)
 	}, wait.ForeverTestTimeout, time.Millisecond*100)
 
 	t.Log("Mint a token for the ServiceAccount")
 	tokenRequest := &authenticationv1.TokenRequest{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sa.Name,
-			Namespace: sa.Namespace,
+			Name:      claimedSA.Name,
+			Namespace: claimedSA.Namespace,
 		},
 	}
-	trResponse, err := vwClient.CoreV1().ServiceAccounts().Cluster(consumerClusterName.Path()).Namespace(sa.Namespace).CreateToken(t.Context(), sa.Name, tokenRequest, metav1.CreateOptions{})
+	trResponse, err := vwClient.CoreV1().ServiceAccounts().Cluster(consumerClusterName.Path()).Namespace(claimedSA.Namespace).CreateToken(t.Context(), claimedSA.Name, tokenRequest, metav1.CreateOptions{})
 	require.NoError(t, err)
 	require.NotEmpty(t, trResponse.Status.Token)
 
@@ -234,5 +244,16 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 	require.NoError(t, err)
 
 	val := saConfigMap.Data[randomStringKey]
-	require.Equal(t, randomString, val, "expect data to match random test string")
+	assert.Equal(t, randomString, val, "expect data to match random test string")
+
+	t.Log("Verify that minting a token for the unclaimed ServiceAccount fails")
+	unclaimedTokenRequest := &authenticationv1.TokenRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      unclaimedSA.Name,
+			Namespace: unclaimedSA.Namespace,
+		},
+	}
+	utrResponse, err := vwClient.CoreV1().ServiceAccounts().Cluster(consumerClusterName.Path()).Namespace(unclaimedSA.Namespace).CreateToken(t.Context(), unclaimedSA.Name, unclaimedTokenRequest, metav1.CreateOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
+	assert.Empty(t, utrResponse.Status.Token)
 }
