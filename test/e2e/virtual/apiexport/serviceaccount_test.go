@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -28,6 +29,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 
@@ -65,6 +67,21 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 	consumerClusterName := logicalcluster.Name(consumerWorkspace.Spec.Cluster)
 
 	const providerSAClaimLabel = "custom.provider/label"
+
+	randomStringKey := "test"
+	randomString := utilrand.String(8)
+	t.Logf("Create a ConfigMap in the consumer with content %q=%q", randomStringKey, randomString)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cm",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			randomStringKey: randomString,
+		},
+	}
+	_, err = kubeClusterClient.Cluster(consumerPath).CoreV1().ConfigMaps(cm.Namespace).Create(t.Context(), cm, metav1.CreateOptions{})
+	require.NoError(t, err)
 
 	t.Log("Setup ServiceAccount in consumer with cluster-admin")
 	sa := &corev1.ServiceAccount{
@@ -189,10 +206,12 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Verify the ServiceAccount is visible through the VW")
-	vwServiceAccounts, err := vwClient.CoreV1().ServiceAccounts().List(t.Context(), metav1.ListOptions{})
-	require.NoError(t, err)
-	require.Len(t, vwServiceAccounts.Items, 1, "expect listing exactly one ServiceAccount through the VW")
-	require.Equal(t, vwServiceAccounts.Items[0].Name, sa.Name, "expect the ServieAccount to have the name %q", sa.Name)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		vwServiceAccounts, err := vwClient.CoreV1().ServiceAccounts().List(t.Context(), metav1.ListOptions{})
+		require.NoError(c, err)
+		require.Len(c, vwServiceAccounts.Items, 1, "expect listing exactly one ServiceAccount through the VW")
+		require.Equal(c, vwServiceAccounts.Items[0].Name, sa.Name, "expect the ServieAccount to have the name %q", sa.Name)
+	}, wait.ForeverTestTimeout, time.Millisecond*100)
 
 	t.Log("Mint a token for the ServiceAccount")
 	tokenRequest := &authenticationv1.TokenRequest{
@@ -200,8 +219,20 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 			Name:      sa.Name,
 			Namespace: sa.Namespace,
 		},
-		Spec: authenticationv1.TokenRequestSpec{},
 	}
-	_, err = vwClient.CoreV1().ServiceAccounts().Cluster(consumerClusterName.Path()).Namespace(sa.Namespace).CreateToken(t.Context(), sa.Name, tokenRequest, metav1.CreateOptions{})
+	trResponse, err := vwClient.CoreV1().ServiceAccounts().Cluster(consumerClusterName.Path()).Namespace(sa.Namespace).CreateToken(t.Context(), sa.Name, tokenRequest, metav1.CreateOptions{})
 	require.NoError(t, err)
+	require.NotEmpty(t, trResponse.Status.Token)
+
+	t.Log("Create a new client with the ServiceAccount identity")
+	saCfg := framework.ConfigWithToken(trResponse.Status.Token, server.BaseConfig(t))
+	saClusterClient, err := kcpkubernetesclientset.NewForConfig(saCfg)
+	require.NoError(t, err)
+
+	t.Log("Get test ConfigMap using the ServiceAccount identity")
+	saConfigMap, err := saClusterClient.Cluster(consumerPath).CoreV1().ConfigMaps(cm.Namespace).Get(t.Context(), cm.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	val := saConfigMap.Data[randomStringKey]
+	require.Equal(t, randomString, val, "expect data to match random test string")
 }
