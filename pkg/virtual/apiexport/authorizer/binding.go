@@ -138,13 +138,33 @@ func (a *boundAPIAuthorizer) Authorize(ctx context.Context, attr authorizer.Attr
 		}
 
 		if permissionClaim.Group == normalizedGR.Group && permissionClaim.Resource == normalizedGR.Resource {
-			apiBindingVerbs := sets.New(permissionClaim.Verbs...)
-			apiExportVerbs := sets.New[string]()
+			subresource := attr.GetSubresource()
 
+			apiBindingVerbs := sets.New[string]()
+			switch subresource {
+			case "": // no subresource
+				apiBindingVerbs = sets.New(permissionClaim.Verbs...)
+			default:
+				for _, claim := range permissionClaim.Subresources {
+					if claim.Name == subresource {
+						apiBindingVerbs.Insert(claim.Verbs...)
+					}
+				}
+			}
+
+			apiExportVerbs := sets.New[string]()
 			for _, exportPermpermissionClaim := range apiExport.Spec.PermissionClaims {
 				if exportPermpermissionClaim.EqualGRI(permissionClaim.PermissionClaim) {
-					apiExportVerbs.Insert(exportPermpermissionClaim.Verbs...)
-
+					switch subresource {
+					case "":
+						apiExportVerbs.Insert(exportPermpermissionClaim.Verbs...)
+					default:
+						for _, claim := range exportPermpermissionClaim.Subresources {
+							if claim.Name == subresource {
+								apiExportVerbs.Insert(claim.Verbs...)
+							}
+						}
+					}
 					break
 				}
 			}

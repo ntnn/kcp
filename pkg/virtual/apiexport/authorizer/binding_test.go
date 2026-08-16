@@ -695,6 +695,200 @@ func TestBoundAPIAuthorizer(t *testing.T) {
 			},
 			expectedDecision: authorizer.DecisionAllow,
 		},
+		{
+			name: "create token subresource claimed by both APIExport and APIBinding",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "",
+				Resource:    "serviceaccounts",
+				Subresource: "token",
+				Verb:        "create",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "",
+											Resource: "serviceaccounts",
+										},
+										Verbs: []string{"get"},
+										Subresources: []apisv1alpha2.SubresourceClaim{
+											{
+												Name:  "token",
+												Verbs: []string{"create"},
+											},
+										},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "serviceaccounts",
+								},
+								Verbs: []string{"get"},
+								Subresources: []apisv1alpha2.SubresourceClaim{
+									{
+										Name:  "token",
+										Verbs: []string{"create"},
+									},
+								},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionAllow,
+		},
+		{
+			name: "create token subresource denied when APIExport does not claim the subresource",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "",
+				Resource:    "serviceaccounts",
+				Subresource: "token",
+				Verb:        "create",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "",
+											Resource: "serviceaccounts",
+										},
+										Verbs: []string{"get"},
+										Subresources: []apisv1alpha2.SubresourceClaim{
+											{
+												Name:  "token",
+												Verbs: []string{"create"},
+											},
+										},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "serviceaccounts",
+								},
+								Verbs: []string{"get"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionDeny,
+			expectedReason:   "failed to find suitable reason to allow access in APIBinding",
+		},
+		{
+			name: "create token subresource denied when APIBinding does not accept the subresource claim",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "",
+				Resource:    "serviceaccounts",
+				Subresource: "token",
+				Verb:        "create",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "",
+											Resource: "serviceaccounts",
+										},
+										Verbs: []string{"get"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "serviceaccounts",
+								},
+								Verbs: []string{"get"},
+								Subresources: []apisv1alpha2.SubresourceClaim{
+									{
+										Name:  "token",
+										Verbs: []string{"create"},
+									},
+								},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionDeny,
+			expectedReason:   "failed to find suitable reason to allow access in APIBinding",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
