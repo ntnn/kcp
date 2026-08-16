@@ -110,6 +110,12 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 						Resource: "serviceaccounts",
 					},
 					Verbs: []string{"get", "list"},
+					Subresources: []apisv1alpha2.SubresourceClaim{
+						{
+							Name:  "token",
+							Verbs: []string{"create"},
+						},
+					},
 					DefaultSelector: &apisv1alpha2.PermissionClaimSelector{
 						LabelSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
@@ -145,6 +151,12 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 								Resource: "serviceaccounts",
 							},
 							Verbs: []string{"get", "list"},
+							Subresources: []apisv1alpha2.SubresourceClaim{
+								{
+									Name:  "token",
+									Verbs: []string{"create"},
+								},
+							},
 						},
 						Selector: apisv1alpha2.PermissionClaimSelector{
 							LabelSelector: metav1.LabelSelector{
