@@ -137,12 +137,19 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 						Resource: "serviceaccounts",
 					},
 					Verbs: []string{"get", "list"},
-					Subresources: []apisv1alpha2.SubresourceClaim{
-						{
-							Name:  "token",
-							Verbs: []string{"create"},
+					DefaultSelector: &apisv1alpha2.PermissionClaimSelector{
+						LabelSelector: metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								providerSAClaimLabel: "true",
+							},
 						},
 					},
+				},
+				{
+					GroupResource: apisv1alpha2.GroupResource{
+						Resource: "serviceaccounts/token",
+					},
+					Verbs: []string{"create"},
 					DefaultSelector: &apisv1alpha2.PermissionClaimSelector{
 						LabelSelector: metav1.LabelSelector{
 							MatchLabels: map[string]string{
@@ -178,12 +185,22 @@ func TestMintServiceAccountTokenThroughVW(t *testing.T) {
 								Resource: "serviceaccounts",
 							},
 							Verbs: []string{"get", "list"},
-							Subresources: []apisv1alpha2.SubresourceClaim{
-								{
-									Name:  "token",
-									Verbs: []string{"create"},
-								},
+						},
+						Selector: apisv1alpha2.PermissionClaimSelector{
+							LabelSelector: metav1.LabelSelector{
+								MatchLabels: map[string]string{providerSAClaimLabel: "true"},
 							},
+						},
+					},
+				},
+				{
+					State: apisv1alpha2.ClaimAccepted,
+					ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+						PermissionClaim: apisv1alpha2.PermissionClaim{
+							GroupResource: apisv1alpha2.GroupResource{
+								Resource: "serviceaccounts/token",
+							},
+							Verbs: []string{"create"},
 						},
 						Selector: apisv1alpha2.PermissionClaimSelector{
 							LabelSelector: metav1.LabelSelector{
