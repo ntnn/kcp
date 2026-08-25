@@ -20,15 +20,19 @@ import (
 	"context"
 	"fmt"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	"k8s.io/apiextensions-apiserver/pkg/registry/customresource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
@@ -36,6 +40,12 @@ import (
 	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apiserver"
 	registry "github.com/kcp-dev/virtual-workspace-framework/pkg/forwardingregistry"
 )
+
+var builtInSubresources = map[schema.GroupResource]map[string]schema.GroupVersionKind{
+	{Group: "", Resource: "serviceaccounts"}: {
+		"token": authenticationv1.SchemeGroupVersion.WithKind("TokenRequest"),
+	},
+}
 
 func provideAPIExportFilteredRestStorage(ctx context.Context, dynamicClusterClientFunc registry.DynamicClusterClientFunc, clusterName logicalcluster.Name, exportName string) (apiserver.RestProviderFunc, error) {
 	labelSelector := map[string]string{
@@ -118,6 +128,50 @@ func provideDelegatingRestStorage(ctx context.Context, dynamicClusterClientFunc 
 		}
 
 		// TODO(sttts): add scale subresource
+
+		for name, subresourceGVK := range builtInSubresources[resource.GroupResource()] {
+			factory := func() runtime.Object {
+				ret := &unstructured.Unstructured{}
+				ret.SetGroupVersionKind(subresourceGVK)
+				return ret
+			}
+			subresourceStore := registry.DefaultDynamicDelegatedStoreFuncs(
+				factory,
+				nil,
+				func() {},
+				strategy,
+				tableConvertor,
+				resource,
+				apiExportIdentityHash,
+				nil,
+				dynamicClusterClientFunc,
+				[]string{name},
+				retry.DefaultRetry,
+				ctx.Done(),
+			)
+
+			// get the parent resource for the subresource so the parents' permissions are validated.
+			// prevents e.g. accessing the subresource of an unclaimed parent resource.
+			delegateCreate := subresourceStore.NamedCreaterFunc
+			subresourceStore.NamedCreaterFunc = func(ctx context.Context, name string, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
+				if _, err := storage.GetterFunc.Get(ctx, name, &metav1.GetOptions{}); err != nil {
+					return nil, err
+				}
+				return delegateCreate(ctx, name, obj, createValidation, options)
+			}
+
+			subresourceStorages[name] = &struct {
+				registry.FactoryFunc
+				registry.DestroyerFunc
+
+				registry.NamedCreaterFunc
+			}{
+				FactoryFunc:   subresourceStore.FactoryFunc,
+				DestroyerFunc: subresourceStore.DestroyerFunc,
+
+				NamedCreaterFunc: subresourceStore.NamedCreaterFunc,
+			}
+		}
 
 		return &struct {
 			registry.FactoryFunc
