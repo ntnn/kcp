@@ -717,15 +717,9 @@ func TestBoundAPIAuthorizer(t *testing.T) {
 									PermissionClaim: apisv1alpha2.PermissionClaim{
 										GroupResource: apisv1alpha2.GroupResource{
 											Group:    "",
-											Resource: "serviceaccounts",
+											Resource: "serviceaccounts/token",
 										},
-										Verbs: []string{"get"},
-										Subresources: []apisv1alpha2.SubresourceClaim{
-											{
-												Name:  "token",
-												Verbs: []string{"create"},
-											},
-										},
+										Verbs: []string{"create"},
 									},
 									Selector: apisv1alpha2.PermissionClaimSelector{
 										MatchAll: true,
@@ -747,15 +741,9 @@ func TestBoundAPIAuthorizer(t *testing.T) {
 							{
 								GroupResource: apisv1alpha2.GroupResource{
 									Group:    "",
-									Resource: "serviceaccounts",
+									Resource: "serviceaccounts/token",
 								},
-								Verbs: []string{"get"},
-								Subresources: []apisv1alpha2.SubresourceClaim{
-									{
-										Name:  "token",
-										Verbs: []string{"create"},
-									},
-								},
+								Verbs: []string{"create"},
 							},
 						},
 					},
@@ -787,13 +775,7 @@ func TestBoundAPIAuthorizer(t *testing.T) {
 											Group:    "",
 											Resource: "serviceaccounts",
 										},
-										Verbs: []string{"get"},
-										Subresources: []apisv1alpha2.SubresourceClaim{
-											{
-												Name:  "token",
-												Verbs: []string{"create"},
-											},
-										},
+										Verbs: []string{"get", "create"},
 									},
 									Selector: apisv1alpha2.PermissionClaimSelector{
 										MatchAll: true,
@@ -817,7 +799,7 @@ func TestBoundAPIAuthorizer(t *testing.T) {
 									Group:    "",
 									Resource: "serviceaccounts",
 								},
-								Verbs: []string{"get"},
+								Verbs: []string{"get", "create"},
 							},
 						},
 					},
@@ -888,6 +870,63 @@ func TestBoundAPIAuthorizer(t *testing.T) {
 			},
 			expectedDecision: authorizer.DecisionDeny,
 			expectedReason:   "failed to find suitable reason to allow access in APIBinding",
+		},
+		{
+			// regression check for the status subresource that was/is implicit.
+			name: "update status subresource allowed by parent resource claim",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "foo",
+				Resource:    "bar",
+				Subresource: "status",
+				Verb:        "update",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "foo",
+											Resource: "bar",
+										},
+										Verbs: []string{"update"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "foo",
+									Resource: "bar",
+								},
+								Verbs: []string{"update"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionAllow,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
