@@ -30,8 +30,6 @@ type PermissionClaimApplyConfiguration struct {
 	// but is not limited to get, list, watch, create, update, patch,
 	// delete, deletecollection, and proxy).
 	Verbs []string `json:"verbs,omitempty"`
-	// subresources is the list of claimed subresource and verbs for this claimed resource.
-	Subresources []SubresourceClaimApplyConfiguration `json:"subresources,omitempty"`
 	// This is the identity for a given APIExport that the APIResourceSchema belongs to.
 	// The hash can be found on APIExport and APIResourceSchema's status.
 	// It will be empty for core types.
@@ -76,19 +74,6 @@ func (b *PermissionClaimApplyConfiguration) WithResource(value string) *Permissi
 func (b *PermissionClaimApplyConfiguration) WithVerbs(values ...string) *PermissionClaimApplyConfiguration {
 	for i := range values {
 		b.Verbs = append(b.Verbs, values[i])
-	}
-	return b
-}
-
-// WithSubresources adds the given value to the Subresources field in the declarative configuration
-// and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, values provided by each call will be appended to the Subresources field.
-func (b *PermissionClaimApplyConfiguration) WithSubresources(values ...*SubresourceClaimApplyConfiguration) *PermissionClaimApplyConfiguration {
-	for i := range values {
-		if values[i] == nil {
-			panic("nil value passed to WithSubresources")
-		}
-		b.Subresources = append(b.Subresources, *values[i])
 	}
 	return b
 }

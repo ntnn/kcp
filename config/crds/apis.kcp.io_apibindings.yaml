@@ -84,9 +84,11 @@ spec:
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     resourceSelector:
                       description: resourceSelector is a list of claimed resource
@@ -198,9 +200,11 @@ spec:
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     resourceSelector:
                       description: resourceSelector is a list of claimed resource
@@ -378,9 +382,11 @@ spec:
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     resourceSelector:
                       description: resourceSelector is a list of claimed resource
@@ -556,9 +562,11 @@ spec:
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     selector:
                       description: |-
@@ -620,33 +628,6 @@ spec:
                       - Accepted
                       - Rejected
                       type: string
-                    subresources:
-                      description: subresources is the list of claimed subresource
-                        and verbs for this claimed resource.
-                      items:
-                        description: SubResourceClaim is a subresource/verb combination
-                          claimed as part of a [PermissionClaim].
-                        properties:
-                          name:
-                            description: name is the name of the subresource.
-                            pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
-                            type: string
-                          verbs:
-                            description: verbs is a list of supported API operation
-                              types
-                            items:
-                              type: string
-                            minItems: 1
-                            type: array
-                            x-kubernetes-list-type: set
-                        required:
-                        - name
-                        - verbs
-                        type: object
-                      type: array
-                      x-kubernetes-list-map-keys:
-                      - name
-                      x-kubernetes-list-type: map
                     verbs:
                       description: |-
                         verbs is a list of supported API operation types (this includes
@@ -791,9 +772,11 @@ spec:
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     selector:
                       description: |-
@@ -850,33 +833,6 @@ spec:
                       x-kubernetes-validations:
                       - message: Permission claim selector is immutable
                         rule: self == oldSelf
-                    subresources:
-                      description: subresources is the list of claimed subresource
-                        and verbs for this claimed resource.
-                      items:
-                        description: SubResourceClaim is a subresource/verb combination
-                          claimed as part of a [PermissionClaim].
-                        properties:
-                          name:
-                            description: name is the name of the subresource.
-                            pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
-                            type: string
-                          verbs:
-                            description: verbs is a list of supported API operation
-                              types
-                            items:
-                              type: string
-                            minItems: 1
-                            type: array
-                            x-kubernetes-list-type: set
-                        required:
-                        - name
-                        - verbs
-                        type: object
-                      type: array
-                      x-kubernetes-list-map-keys:
-                      - name
-                      x-kubernetes-list-type: map
                     verbs:
                       description: |-
                         verbs is a list of supported API operation types (this includes
@@ -1096,37 +1052,12 @@ spec:
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
-                    subresources:
-                      description: subresources is the list of claimed subresource
-                        and verbs for this claimed resource.
-                      items:
-                        description: SubResourceClaim is a subresource/verb combination
-                          claimed as part of a [PermissionClaim].
-                        properties:
-                          name:
-                            description: name is the name of the subresource.
-                            pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
-                            type: string
-                          verbs:
-                            description: verbs is a list of supported API operation
-                              types
-                            items:
-                              type: string
-                            minItems: 1
-                            type: array
-                            x-kubernetes-list-type: set
-                        required:
-                        - name
-                        - verbs
-                        type: object
-                      type: array
-                      x-kubernetes-list-map-keys:
-                      - name
-                      x-kubernetes-list-type: map
                     verbs:
                       description: |-
                         verbs is a list of supported API operation types (this includes

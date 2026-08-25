@@ -60,19 +60,6 @@ func (b *ScopedPermissionClaimApplyConfiguration) WithVerbs(values ...string) *S
 	return b
 }
 
-// WithSubresources adds the given value to the Subresources field in the declarative configuration
-// and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, values provided by each call will be appended to the Subresources field.
-func (b *ScopedPermissionClaimApplyConfiguration) WithSubresources(values ...*SubresourceClaimApplyConfiguration) *ScopedPermissionClaimApplyConfiguration {
-	for i := range values {
-		if values[i] == nil {
-			panic("nil value passed to WithSubresources")
-		}
-		b.PermissionClaimApplyConfiguration.Subresources = append(b.PermissionClaimApplyConfiguration.Subresources, *values[i])
-	}
-	return b
-}
-
 // WithIdentityHash sets the IdentityHash field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the IdentityHash field is set to the value of the last call.

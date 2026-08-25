@@ -147,11 +147,6 @@ func (in ScopedPermissionClaim) OpenAPIModelName() string {
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
-func (in SubresourceClaim) OpenAPIModelName() string {
-	return "com.github.kcp-dev.sdk.apis.apis.v1alpha2.SubresourceClaim"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in VirtualWorkspace) OpenAPIModelName() string {
 	return "com.github.kcp-dev.sdk.apis.apis.v1alpha2.VirtualWorkspace"
 }

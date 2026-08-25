@@ -101,7 +101,6 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		v1alpha2.ResourceSchemaStorageVirtual{}.OpenAPIModelName():                    schema_sdk_apis_apis_v1alpha2_ResourceSchemaStorageVirtual(ref),
 		v1alpha2.ResourceSelector{}.OpenAPIModelName():                                schema_sdk_apis_apis_v1alpha2_ResourceSelector(ref),
 		v1alpha2.ScopedPermissionClaim{}.OpenAPIModelName():                           schema_sdk_apis_apis_v1alpha2_ScopedPermissionClaim(ref),
-		v1alpha2.SubresourceClaim{}.OpenAPIModelName():                                schema_sdk_apis_apis_v1alpha2_SubresourceClaim(ref),
 		v1alpha2.VirtualWorkspace{}.OpenAPIModelName():                                schema_sdk_apis_apis_v1alpha2_VirtualWorkspace(ref),
 		cachev1alpha1.ClusterCachedResource{}.OpenAPIModelName():                      schema_sdk_apis_cache_v1alpha1_ClusterCachedResource(ref),
 		cachev1alpha1.ClusterCachedResourceEndpointSlice{}.OpenAPIModelName():         schema_sdk_apis_cache_v1alpha1_ClusterCachedResourceEndpointSlice(ref),
@@ -2365,7 +2364,7 @@ func schema_sdk_apis_apis_v1alpha2_AcceptablePermissionClaim(ref common.Referenc
 					},
 					"resource": {
 						SchemaProps: spec.SchemaProps{
-							Description: "resource is the name of the resource. Note: it is worth noting that you can not ask for permissions for resource provided by a CRD not provided by an api export.",
+							Description: "resource is the name of the resource. A subresource may be claimed as \"resource/subresource\", e.g. \"serviceaccounts/token\", in the style of RBAC rules. Note: it is worth noting that you can not ask for permissions for resource provided by a CRD not provided by an api export.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
@@ -2386,28 +2385,6 @@ func schema_sdk_apis_apis_v1alpha2_AcceptablePermissionClaim(ref common.Referenc
 										Default: "",
 										Type:    []string{"string"},
 										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"subresources": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-map-keys": []interface{}{
-									"name",
-								},
-								"x-kubernetes-list-type": "map",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "subresources is the list of claimed subresource and verbs for this claimed resource.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref(v1alpha2.SubresourceClaim{}.OpenAPIModelName()),
 									},
 								},
 							},
@@ -2444,7 +2421,7 @@ func schema_sdk_apis_apis_v1alpha2_AcceptablePermissionClaim(ref common.Referenc
 			},
 		},
 		Dependencies: []string{
-			v1alpha2.PermissionClaimSelector{}.OpenAPIModelName(), v1alpha2.SubresourceClaim{}.OpenAPIModelName()},
+			v1alpha2.PermissionClaimSelector{}.OpenAPIModelName()},
 	}
 }
 
@@ -2611,7 +2588,7 @@ func schema_sdk_apis_apis_v1alpha2_GroupResource(ref common.ReferenceCallback) c
 					},
 					"resource": {
 						SchemaProps: spec.SchemaProps{
-							Description: "resource is the name of the resource. Note: it is worth noting that you can not ask for permissions for resource provided by a CRD not provided by an api export.",
+							Description: "resource is the name of the resource. A subresource may be claimed as \"resource/subresource\", e.g. \"serviceaccounts/token\", in the style of RBAC rules. Note: it is worth noting that you can not ask for permissions for resource provided by a CRD not provided by an api export.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
@@ -2693,7 +2670,7 @@ func schema_sdk_apis_apis_v1alpha2_PermissionClaim(ref common.ReferenceCallback)
 					},
 					"resource": {
 						SchemaProps: spec.SchemaProps{
-							Description: "resource is the name of the resource. Note: it is worth noting that you can not ask for permissions for resource provided by a CRD not provided by an api export.",
+							Description: "resource is the name of the resource. A subresource may be claimed as \"resource/subresource\", e.g. \"serviceaccounts/token\", in the style of RBAC rules. Note: it is worth noting that you can not ask for permissions for resource provided by a CRD not provided by an api export.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
@@ -2719,28 +2696,6 @@ func schema_sdk_apis_apis_v1alpha2_PermissionClaim(ref common.ReferenceCallback)
 							},
 						},
 					},
-					"subresources": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-map-keys": []interface{}{
-									"name",
-								},
-								"x-kubernetes-list-type": "map",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "subresources is the list of claimed subresource and verbs for this claimed resource.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref(v1alpha2.SubresourceClaim{}.OpenAPIModelName()),
-									},
-								},
-							},
-						},
-					},
 					"identityHash": {
 						SchemaProps: spec.SchemaProps{
 							Description: "This is the identity for a given APIExport that the APIResourceSchema belongs to. The hash can be found on APIExport and APIResourceSchema's status. It will be empty for core types. Note that one must look this up for a particular kcp instance.",
@@ -2759,7 +2714,7 @@ func schema_sdk_apis_apis_v1alpha2_PermissionClaim(ref common.ReferenceCallback)
 			},
 		},
 		Dependencies: []string{
-			v1alpha2.PermissionClaimSelector{}.OpenAPIModelName(), v1alpha2.SubresourceClaim{}.OpenAPIModelName()},
+			v1alpha2.PermissionClaimSelector{}.OpenAPIModelName()},
 	}
 }
 
@@ -2969,7 +2924,7 @@ func schema_sdk_apis_apis_v1alpha2_ScopedPermissionClaim(ref common.ReferenceCal
 					},
 					"resource": {
 						SchemaProps: spec.SchemaProps{
-							Description: "resource is the name of the resource. Note: it is worth noting that you can not ask for permissions for resource provided by a CRD not provided by an api export.",
+							Description: "resource is the name of the resource. A subresource may be claimed as \"resource/subresource\", e.g. \"serviceaccounts/token\", in the style of RBAC rules. Note: it is worth noting that you can not ask for permissions for resource provided by a CRD not provided by an api export.",
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
@@ -2990,28 +2945,6 @@ func schema_sdk_apis_apis_v1alpha2_ScopedPermissionClaim(ref common.ReferenceCal
 										Default: "",
 										Type:    []string{"string"},
 										Format:  "",
-									},
-								},
-							},
-						},
-					},
-					"subresources": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-map-keys": []interface{}{
-									"name",
-								},
-								"x-kubernetes-list-type": "map",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "subresources is the list of claimed subresource and verbs for this claimed resource.",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: map[string]interface{}{},
-										Ref:     ref(v1alpha2.SubresourceClaim{}.OpenAPIModelName()),
 									},
 								},
 							},
@@ -3041,49 +2974,7 @@ func schema_sdk_apis_apis_v1alpha2_ScopedPermissionClaim(ref common.ReferenceCal
 			},
 		},
 		Dependencies: []string{
-			v1alpha2.PermissionClaimSelector{}.OpenAPIModelName(), v1alpha2.SubresourceClaim{}.OpenAPIModelName()},
-	}
-}
-
-func schema_sdk_apis_apis_v1alpha2_SubresourceClaim(ref common.ReferenceCallback) common.OpenAPIDefinition {
-	return common.OpenAPIDefinition{
-		Schema: spec.Schema{
-			SchemaProps: spec.SchemaProps{
-				Description: "SubResourceClaim is a subresource/verb combination claimed as part of a [PermissionClaim].",
-				Type:        []string{"object"},
-				Properties: map[string]spec.Schema{
-					"name": {
-						SchemaProps: spec.SchemaProps{
-							Description: "name is the name of the subresource.",
-							Default:     "",
-							Type:        []string{"string"},
-							Format:      "",
-						},
-					},
-					"verbs": {
-						VendorExtensible: spec.VendorExtensible{
-							Extensions: spec.Extensions{
-								"x-kubernetes-list-type": "set",
-							},
-						},
-						SchemaProps: spec.SchemaProps{
-							Description: "verbs is a list of supported API operation types",
-							Type:        []string{"array"},
-							Items: &spec.SchemaOrArray{
-								Schema: &spec.Schema{
-									SchemaProps: spec.SchemaProps{
-										Default: "",
-										Type:    []string{"string"},
-										Format:  "",
-									},
-								},
-							},
-						},
-					},
-				},
-				Required: []string{"name", "verbs"},
-			},
-		},
+			v1alpha2.PermissionClaimSelector{}.OpenAPIModelName()},
 	}
 }
 
