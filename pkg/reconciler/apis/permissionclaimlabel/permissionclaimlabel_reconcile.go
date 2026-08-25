@@ -117,6 +117,10 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 
 	for _, s := range sets.List[string](allChanges) {
 		claim := claimFromSetKey(s)
+		// the claim references a subresource in rbac-style, the parent label applies
+		if strings.Contains(claim.Resource, "/") {
+			continue
+		}
 		if _, nonPersisted := permissionclaim.NonPersistedResourcesClaimable[schema.GroupResource{Group: claim.Group, Resource: claim.Resource}]; nonPersisted {
 			continue
 		}
