@@ -18,6 +18,7 @@ package builtin
 
 import (
 	"fmt"
+	"strings"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -70,9 +71,10 @@ func init() {
 // IsBuiltInAPI indicates whether the API identified by group and resource is
 // built-in.
 func IsBuiltInAPI(gr apis.GroupResource) bool {
+	resource, _, _ := strings.Cut(gr.GetResource(), "/")
 	_, exists := builtInAPIResourceSchemas[apisv1alpha1.GroupResource{
 		Group:    gr.GetGroup(),
-		Resource: gr.GetResource(),
+		Resource: resource,
 	}]
 	return exists
 }
