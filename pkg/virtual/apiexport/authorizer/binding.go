@@ -131,40 +131,25 @@ func (a *boundAPIAuthorizer) Authorize(ctx context.Context, attr authorizer.Attr
 	// check if a resource claim for this resource has been accepted and has correct verbs.
 	// normalize the requested group/resource to handle the events.k8s.io ↔ core/v1 equivalence.
 	normalizedGR := permissionclaim.NormalizeEventGroupResource(schema.GroupResource{Group: attr.GetAPIGroup(), Resource: attr.GetResource()})
+	// subresource status is implicitly granted with its parent resource.
+	// others must be claimed explicitly
+	claimedResource := normalizedGR.Resource
+	if sub := attr.GetSubresource(); sub != "" && sub != "status" {
+		claimedResource = normalizedGR.Resource + "/" + sub
+	}
 	for _, permissionClaim := range apiBinding.Spec.PermissionClaims {
 		if permissionClaim.State != apisv1alpha2.ClaimAccepted {
 			// if the claim is not accepted it cannot be used.
 			continue
 		}
 
-		if permissionClaim.Group == normalizedGR.Group && permissionClaim.Resource == normalizedGR.Resource {
-			subresource := attr.GetSubresource()
-
-			apiBindingVerbs := sets.New[string]()
-			switch subresource {
-			case "": // no subresource
-				apiBindingVerbs = sets.New(permissionClaim.Verbs...)
-			default:
-				for _, claim := range permissionClaim.Subresources {
-					if claim.Name == subresource {
-						apiBindingVerbs.Insert(claim.Verbs...)
-					}
-				}
-			}
+		if permissionClaim.Group == normalizedGR.Group && permissionClaim.Resource == claimedResource {
+			apiBindingVerbs := sets.New(permissionClaim.Verbs...)
 
 			apiExportVerbs := sets.New[string]()
 			for _, exportPermpermissionClaim := range apiExport.Spec.PermissionClaims {
 				if exportPermpermissionClaim.EqualGRI(permissionClaim.PermissionClaim) {
-					switch subresource {
-					case "":
-						apiExportVerbs.Insert(exportPermpermissionClaim.Verbs...)
-					default:
-						for _, claim := range exportPermpermissionClaim.Subresources {
-							if claim.Name == subresource {
-								apiExportVerbs.Insert(claim.Verbs...)
-							}
-						}
-					}
+					apiExportVerbs.Insert(exportPermpermissionClaim.Verbs...)
 					break
 				}
 			}
