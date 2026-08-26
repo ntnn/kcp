@@ -150,14 +150,13 @@ func provideDelegatingRestStorage(ctx context.Context, dynamicClusterClientFunc 
 				ctx.Done(),
 			)
 
-			// get the parent resource for the subresource so the parents' permissions are validated.
-			// prevents e.g. accessing the subresource of an unclaimed parent resource.
-			delegateCreate := subresourceStore.NamedCreaterFunc
 			subresourceStore.NamedCreaterFunc = func(ctx context.Context, name string, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
+				// get the parent resource for the subresource so the parents' permissions are validated.
+				// prevents e.g. accessing the subresource of an unclaimed parent resource.
 				if _, err := storage.GetterFunc.Get(ctx, name, &metav1.GetOptions{}); err != nil {
 					return nil, err
 				}
-				return delegateCreate(ctx, name, obj, createValidation, options)
+				return subresourceStore.NamedCreaterFunc(ctx, name, obj, createValidation, options)
 			}
 
 			subresourceStorages[name] = &struct {
