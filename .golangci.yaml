@@ -128,6 +128,9 @@ linters:
           - gosec
         path: test/e2e/*
       - linters:
+          - gosec
+        path: test/upgrade/*
+      - linters:
           - staticcheck
         text: QF1008 # "could remove embedded field" often impedes readability and clarity
     paths:

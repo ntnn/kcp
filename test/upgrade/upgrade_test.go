@@ -78,6 +78,8 @@ const (
 )
 
 func TestUpgrade(t *testing.T) {
+	t.Parallel()
+
 	fromBinary := os.Getenv(upgradeFromBinaryEnv)
 	if fromBinary == "" {
 		t.Skipf("%s is not set, skipping upgrade test. Run `make test-upgrade` to run the full flow.", upgradeFromBinaryEnv)
@@ -217,7 +219,7 @@ func TestUpgrade(t *testing.T) {
 
 	if pkgs := os.Getenv(upgradeE2EPackagesEnv); pkgs != "" {
 		t.Logf("Phase 4: running e2e packages against the upgraded server: %s", pkgs)
-		runE2E(t, strings.Fields(pkgs), newServer.kubeconfigPath)
+		runE2E(ctx, t, strings.Fields(pkgs), newServer.kubeconfigPath)
 	}
 }
 
@@ -265,7 +267,7 @@ func startKcp(ctx context.Context, t *testing.T, binary, phase, dataDir, artifac
 	}
 
 	t.Logf("running: %s %s", binary, strings.Join(args, " "))
-	cmd := exec.Command(binary, args...)
+	cmd := exec.CommandContext(ctx, binary, args...)
 	// Run the server in its own process group so stopping it terminates any
 	// children as well.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -406,7 +408,7 @@ func waitWorkspaceReady(ctx context.Context, t *testing.T, client kcpclientset.C
 
 // runE2E runs the given e2e test packages against the upgraded server via the
 // shared external server mode of the e2e framework.
-func runE2E(t *testing.T, packages []string, kubeconfigPath string) {
+func runE2E(ctx context.Context, t *testing.T, packages []string, kubeconfigPath string) {
 	t.Helper()
 
 	repoDir, err := kcptestinghelpers.RepositoryDir()
@@ -414,7 +416,7 @@ func runE2E(t *testing.T, packages []string, kubeconfigPath string) {
 
 	args := append([]string{"test"}, packages...)
 	args = append(args, "-args", "--kcp-kubeconfig", kubeconfigPath)
-	cmd := exec.Command("go", args...)
+	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir = repoDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
