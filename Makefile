@@ -459,6 +459,26 @@ test-run-sharded-server:
 	echo 'Server started' && \
 	wait $$PID
 
+# Verifies the upgrade path: starts the previous kcp release, seeds it with
+# data, restarts the same root directory with the current tree's binary and
+# asserts the data survived and the server is functional. Set
+# UPGRADE_FROM_VERSION to test a specific release (default: latest), and
+# KCP_UPGRADE_E2E_PACKAGES to additionally run e2e packages against the
+# upgraded server, e.g. KCP_UPGRADE_E2E_PACKAGES="./test/e2e/apibinding/...".
+.PHONY: test-upgrade
+ifdef USE_GOTESTSUM
+test-upgrade: $(GOTESTSUM)
+endif
+test-upgrade: TEST_ARGS ?=
+test-upgrade: UPGRADE_FROM_VERSION ?= latest
+test-upgrade: WHAT ?= ./test/upgrade/...
+test-upgrade: build ## Run upgrade tests (previous release -> current tree)
+	hack/download-kcp-release.sh $(UPGRADE_FROM_VERSION) bin/upgrade-from
+	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true \
+	KCP_UPGRADE_FROM_BINARY=$(ROOT_DIR)/bin/upgrade-from/current/kcp \
+	KCP_UPGRADE_TO_BINARY=$(ROOT_DIR)/bin/kcp \
+		$(GO_TEST) -race $(COUNT_ARG) $(WHAT) -timeout 30m $(TEST_ARGS)
+
 .PHONY: test
 ifdef USE_GOTESTSUM
 test: $(GOTESTSUM)
