@@ -98,7 +98,7 @@ func newClusterResolveHandler(delegate http.Handler, index proxyindex.Index) htt
 		// Lists with a lower RV will get appropriate objects from the shard.
 		// Lists with a higher RV will get a 504 from the shard.
 		if index.RecentlyMigrated(result.Cluster) && isInProgressWatch(req) {
-			err := apierrors.NewResourceExpired(fmt.Sprintf("logical cluster %q migrated to another shard; relist required", result.Cluster))
+			err := apierrors.NewResourceExpired(fmt.Sprintf("logical cluster %q was recently migrated to another shard; watches with an explicit resourceVersion are temporarily denied to force a relist against the new shard", result.Cluster))
 			responsewriters.ErrorNegotiated(err, kubernetesscheme.Codecs, schema.GroupVersion{}, w, req)
 			return
 		}
