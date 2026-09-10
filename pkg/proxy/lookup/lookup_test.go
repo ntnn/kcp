@@ -156,7 +156,7 @@ func TestClusterResolveHandlerMigration(t *testing.T) {
 			if tt.watch {
 				query += "&watch=true"
 			}
-			req := httptest.NewRequest(http.MethodGet, "/clusters/"+cluster+"/api/v1/configmaps"+query, http.NoBody)
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/clusters/"+cluster+"/api/v1/configmaps"+query, http.NoBody)
 			req.SetPathValue("cluster", cluster)
 			ctx := request.WithRequestInfo(req.Context(), &request.RequestInfo{
 				IsResourceRequest: true,
