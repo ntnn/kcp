@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260604-70219e163.logicalclustermigrations.migration.kcp.io
+  name: v260910-e6c7c98fe.logicalclustermigrations.migration.kcp.io
 spec:
   group: migration.kcp.io
   names:
