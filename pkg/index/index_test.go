@@ -786,9 +786,15 @@ func TestMigrationForceClosesInflightWatches(t *testing.T) {
 		t.Fatal("expected in-flight watch context to be cancelled on shard change")
 	}
 
-	// A watch opened *after* the migration must be live, not stuck in a sticky
-	// cancelled state. This guards against using a sticky Cancel instead of a
-	// one-shot Delete, which would permanently kill all watches for the cluster.
+	// A watch opened *after* the migration must be live, not stuck in
+	// a sticky cancelled state.
+	//
+	// When a cluster is migrated context manager cancels its context
+	// and later deletes it.
+	//
+	// By getting a context here we validate the context for the
+	// migrated cluster is a valid active, context and not the cancelled
+	// one that would prevent new connections.
 	reconnectCtx, reconnectCancel := target.ClusterContext(context.Background(), cluster)
 	defer reconnectCancel()
 	select {
