@@ -776,7 +776,7 @@ func TestMigrationForceClosesInflightWatches(t *testing.T) {
 
 	// Open an in-flight watch context and make sure it is cancelled on migration.
 	ctx, cancel := target.ClusterContext(context.Background(), cluster)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	target.UpsertLogicalCluster("amber", newLogicalCluster("34"))
 
@@ -796,7 +796,7 @@ func TestMigrationForceClosesInflightWatches(t *testing.T) {
 	// migrated cluster is a valid active, context and not the cancelled
 	// one that would prevent new connections.
 	reconnectCtx, reconnectCancel := target.ClusterContext(context.Background(), cluster)
-	defer reconnectCancel()
+	t.Cleanup(reconnectCancel)
 	select {
 	case <-reconnectCtx.Done():
 		t.Fatal("expected post-migration watch context to stay open (sticky cancellation regression)")
@@ -808,7 +808,7 @@ func TestMigrationForceClosesInflightWatches(t *testing.T) {
 	other := logicalcluster.Name("99")
 	target.UpsertLogicalCluster("root", newLogicalCluster("99"))
 	otherCtx, otherCancel := target.ClusterContext(context.Background(), other)
-	defer otherCancel()
+	t.Cleanup(otherCancel)
 
 	target.UpsertLogicalCluster("amber", newLogicalCluster("34")) // re-migrate 34, not 99
 	select {
