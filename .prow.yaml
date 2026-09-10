@@ -297,3 +297,31 @@ presubmits:
             requests:
               memory: 6Gi
               cpu: 4
+
+  # Verifies the upgrade path: See test/upgrade/README.md. Marked optional 
+  # while the job is new; it also depends on downloading the latest release 
+  # binary from GitHub.
+  - name: pull-kcp-test-upgrade
+    decorate: true
+    optional: true
+    # only run upgrade tests if code changed.
+    run_if_changed: "(cmd|config|pkg|staging|test|go.mod|go.sum|Makefile|.prow.yaml|hack/download-kcp-release.sh)"
+    clone_uri: "https://github.com/kcp-dev/kcp"
+    labels:
+      preset-goproxy: "true"
+    spec:
+      containers:
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
+          command:
+            - ./hack/run-with-prow.sh
+            - make
+            - test-upgrade
+          env:
+            - name: USE_GOTESTSUM
+              value: "1"
+            - name: KUBE_CACHE_MUTATION_DETECTOR
+              value: "1"
+          resources:
+            requests:
+              memory: 6Gi
+              cpu: 4
