@@ -35,7 +35,9 @@ import (
 func (c *Controller) ensureBoundCRDs(ctx context.Context, lcName logicalcluster.Name) error {
 	logger := klog.FromContext(ctx)
 
-	bindings, err := c.kcpClusterClient.Cluster(lcName.Path()).ApisV1alpha2().APIBindings().List(ctx, metav1.ListOptions{})
+	// This runs on the destination after the origin was cleaned up; read
+	// the bindings from this shard directly (see localKcpClusterClient).
+	bindings, err := c.localKcpClusterClient.Cluster(lcName.Path()).ApisV1alpha2().APIBindings().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list APIBindings in %s: %w", lcName, err)
 	}
