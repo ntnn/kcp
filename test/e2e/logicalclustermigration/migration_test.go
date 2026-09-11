@@ -436,8 +436,18 @@ func TestConcurrentMigrationsFromSameOriginShard(t *testing.T) {
 			// marker ConfigMap - not missing (dropped by a racing copy)
 			// and not some other workspace's data (cross-contamination
 			// from an incorrectly-shared client/request).
-			cm, err := kubeClusterClient.Cluster(tgt.wsPath).CoreV1().ConfigMaps("default").Get(t.Context(), tgt.cmName, metav1.GetOptions{})
-			require.NoError(t, err, "marker ConfigMap %q missing after migration", tgt.cmName)
+			// The front-proxy maintains the lc->shard map from
+			// informers, which may result in the LC for the workspace
+			// not being known by the front-proxy for a time until the
+			// destination LC informat caught up.
+			// This is by design (the LC is "gone" during the migration)
+			// and an expected behaviour.
+			var cm *corev1.ConfigMap
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				var err error
+				cm, err = kubeClusterClient.Cluster(tgt.wsPath).CoreV1().ConfigMaps("default").Get(t.Context(), tgt.cmName, metav1.GetOptions{})
+				require.NoError(c, err, "marker ConfigMap %q missing after migration", tgt.cmName)
+			}, wait.ForeverTestTimeout, 500*time.Millisecond, "waiting for marker ConfigMap %q after migration", tgt.cmName)
 			assert.Equal(t, fmt.Sprintf("%d", i), cm.Data["workspace-index"], "marker ConfigMap %q has wrong data - possible cross-contamination between concurrent migrations", tgt.cmName)
 		})
 	}
