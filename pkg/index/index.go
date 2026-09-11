@@ -257,6 +257,12 @@ func (c *State) UpsertLogicalCluster(shard string, logicalCluster *corev1alpha1.
 		c.lock.Lock()
 		defer c.lock.Unlock()
 
+		// Re-read under write lock, a concurrent upsert may have won the race.
+		got = c.clusterShards[clusterName]
+		if got == shard {
+			return
+		}
+
 		// If got is not empty then the logical cluster was migrated from shard `got` to shard `shard`.
 		// Record the timestamp and delete the context from the manager.
 		// The timestamp is recorded so clients with a watch are getting a 410 sent back to trigger a full relist.
@@ -292,10 +298,18 @@ func (c *State) DeleteLogicalCluster(shard string, logicalCluster *corev1alpha1.
 
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	if got := c.clusterShards[clusterName]; got == shard {
-		delete(c.clusterShards, clusterName)
-		c.clusterContexts.Delete(clusterName, fmt.Errorf("logical cluster %s deleted from shard %s", clusterName, shard))
+	// Re-read under write lock, a concurrent upsert may have won the race.
+	got := c.clusterShards[clusterName]
+	if got != shard {
+		// The shard in the mapping changed between the read- and
+		// write-locked read, all related changes in the other maps are
+		// already updated.
+		return
 	}
+
+	// delete LC from shard->LC map
+	delete(c.clusterShards, clusterName)
+	c.clusterContexts.Delete(clusterName, fmt.Errorf("logical cluster %s deleted from shard %s", clusterName, shard))
 
 	// This LC keyed as the cluster being addressed.
 	delete(c.shardClusterWorkspaceType[shard], clusterName)
@@ -383,6 +397,12 @@ func (c *State) UpsertShard(shardName, baseURL string) {
 	if got != baseURL {
 		c.lock.Lock()
 		defer c.lock.Unlock()
+
+		// Re-read under write lock, a concurrent upsert may have won the race.
+		if c.shardBaseURLs[shardName] == baseURL {
+			return
+		}
+
 		c.shardBaseURLs[shardName] = baseURL
 	}
 }
