@@ -253,35 +253,76 @@ func (c *State) UpsertLogicalCluster(shard string, logicalCluster *corev1alpha1.
 	got := c.clusterShards[clusterName]
 	c.lock.RUnlock()
 
-	if got != shard {
-		c.lock.Lock()
-		defer c.lock.Unlock()
+	if got == shard {
+		return
+	}
 
-		// Re-read under write lock, a concurrent upsert may have won the race.
-		got = c.clusterShards[clusterName]
-		if got == shard {
-			return
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// Re-read under write lock, a concurrent upsert may have won the race.
+	got = c.clusterShards[clusterName]
+	if got == shard {
+		return
+	}
+
+	// If got is not empty then the logical cluster was migrated from shard `got` to shard `shard`.
+	// Record the timestamp and delete the context from the manager.
+	// The timestamp is recorded so clients with a watch are getting a 410 sent back to trigger a full relist.
+	// The context is cancelled to force close watches, which will then cause them to get the aforementioned 410s to relist.
+	// The relist is important because the RV on the destination shard will be different, leading to erroneous watch results if no relist is done.
+	if got != "" {
+		c.migratedAt.Store(clusterName, c.now())
+		c.clusterContexts.Delete(clusterName, fmt.Errorf("logical cluster %s migrated from shard %s to shard %s", clusterName, got, shard))
+	}
+
+	c.clusterShards[clusterName] = shard
+
+	// LogicalClusters are annotated with "path:name" of their workspace's type.
+	typeIdent := logicalcluster.NewPath(logicalCluster.Annotations[tenancyv1alpha1.LogicalClusterTypeAnnotationKey])
+
+	if c.shardClusterWorkspaceType[shard] == nil {
+		c.shardClusterWorkspaceType[shard] = map[logicalcluster.Name]logicalcluster.Path{}
+	}
+	c.shardClusterWorkspaceType[shard][clusterName] = typeIdent
+
+	// Use the LC owner to fill the rest of the maps
+	owner := logicalCluster.Spec.Owner
+	if owner == nil || owner.Resource != "workspaces" || owner.Name == "" || owner.Cluster == "" {
+		return
+	}
+
+	parentCluster := logicalcluster.Name(owner.Cluster)
+
+	// The edges are keyed by the shard the parent's Workspace lives on.
+	// If the parent is not known yet the Workspace event will fill the edges.
+	parentShard, found := c.clusterShards[parentCluster]
+	if !found {
+		return
+	}
+
+	if _, found := c.shardClusterWorkspaceNameCluster[parentShard][parentCluster][owner.Name]; !found {
+		if c.shardClusterWorkspaceNameCluster[parentShard] == nil {
+			c.shardClusterWorkspaceNameCluster[parentShard] = map[logicalcluster.Name]map[string]logicalcluster.Name{}
 		}
-
-		// If got is not empty then the logical cluster was migrated from shard `got` to shard `shard`.
-		// Record the timestamp and delete the context from the manager.
-		// The timestamp is recorded so clients with a watch are getting a 410 sent back to trigger a full relist.
-		// The context is cancelled to force close watches, which will then cause them to get the aforementioned 410s to relist.
-		// The relist is important because the RV on the destination shard will be different, leading to erroneous watch results if no relist is done.
-		if got != "" {
-			c.migratedAt.Store(clusterName, c.now())
-			c.clusterContexts.Delete(clusterName, fmt.Errorf("logical cluster %s migrated from shard %s to shard %s", clusterName, got, shard))
+		if c.shardClusterWorkspaceNameCluster[parentShard][parentCluster] == nil {
+			c.shardClusterWorkspaceNameCluster[parentShard][parentCluster] = map[string]logicalcluster.Name{}
 		}
+		c.shardClusterWorkspaceNameCluster[parentShard][parentCluster][owner.Name] = clusterName
+	}
 
-		c.clusterShards[clusterName] = shard
-
-		// LogicalClusters are annotated with "path:name" of their workspace's type.
-		typeIdent := logicalcluster.NewPath(logicalCluster.Annotations[tenancyv1alpha1.LogicalClusterTypeAnnotationKey])
-
-		if c.shardClusterWorkspaceType[shard] == nil {
-			c.shardClusterWorkspaceType[shard] = map[logicalcluster.Name]logicalcluster.Path{}
+	if _, found := c.shardClusterWorkspaceName[parentShard][clusterName]; !found {
+		if c.shardClusterWorkspaceName[parentShard] == nil {
+			c.shardClusterWorkspaceName[parentShard] = map[logicalcluster.Name]string{}
 		}
-		c.shardClusterWorkspaceType[shard][clusterName] = typeIdent
+		c.shardClusterWorkspaceName[parentShard][clusterName] = owner.Name
+	}
+
+	if _, found := c.shardClusterParentCluster[parentShard][clusterName]; !found {
+		if c.shardClusterParentCluster[parentShard] == nil {
+			c.shardClusterParentCluster[parentShard] = map[logicalcluster.Name]logicalcluster.Name{}
+		}
+		c.shardClusterParentCluster[parentShard][clusterName] = parentCluster
 	}
 }
 
@@ -299,7 +340,7 @@ func (c *State) DeleteLogicalCluster(shard string, logicalCluster *corev1alpha1.
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	// Re-read under write lock, a concurrent upsert may have won the race.
-	got := c.clusterShards[clusterName]
+	got = c.clusterShards[clusterName]
 	if got != shard {
 		// The shard in the mapping changed between the read- and
 		// write-locked read, all related changes in the other maps are
