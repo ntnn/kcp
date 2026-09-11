@@ -266,6 +266,17 @@ func (c *State) UpsertLogicalCluster(shard string, logicalCluster *corev1alpha1.
 		return
 	}
 
+	// If the migrating annotation is set do not handle the update at all.
+	// The delete event from the origin shard is processed in DeleteLogicalCluster.
+	// The update event from the destination shard must only be
+	// processed (as in, cause the entries in the front-proxies maps to
+	// be updated) after the migration has finished and the annotation
+	// has been removed from the LC.
+	// TODO(ntnn): Make the migrating annotation part of the API.
+	if logicalCluster.Annotations["internal.kcp.io/migrating"] != "" {
+		return
+	}
+
 	// If got is not empty then the logical cluster was migrated from shard `got` to shard `shard`.
 	// Record the timestamp and delete the context from the manager.
 	// The timestamp is recorded so clients with a watch are getting a 410 sent back to trigger a full relist.
