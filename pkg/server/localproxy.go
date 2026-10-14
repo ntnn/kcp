@@ -215,7 +215,7 @@ func WithLocalProxy(
 			}
 
 			logger.WithValues("from", path, "to", target.Scheme+"://"+target.Host).V(4).Info("resolved mounted workspace")
-			ctx := filters.WithMountTarget(ctx, &filters.MountTarget{
+			ctx := proxy.WithMount(ctx, &proxy.Mount{
 				URL:           target,
 				Workspace:     path,
 				ParentCluster: parent.Cluster,

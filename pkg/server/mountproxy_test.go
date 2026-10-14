@@ -39,7 +39,7 @@ import (
 
 	"github.com/kcp-dev/kcp/pkg/index"
 	"github.com/kcp-dev/kcp/pkg/mounts"
-	"github.com/kcp-dev/kcp/pkg/server/filters"
+	"github.com/kcp-dev/kcp/pkg/server/proxy"
 )
 
 const (
@@ -90,14 +90,14 @@ func TestWithLocalProxy_MountIsResolvedNotForwarded(t *testing.T) {
 	t.Parallel()
 
 	var (
-		gotTarget  *filters.MountTarget
+		gotTarget  *proxy.Mount
 		gotCluster *request.Cluster
 		gotPath    string
 		called     bool
 	)
 	downstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		gotTarget = filters.MountTargetFrom(r.Context())
+		gotTarget = proxy.MountFrom(r.Context())
 		gotCluster = request.ClusterFrom(r.Context())
 		gotPath = r.URL.Path
 		w.WriteHeader(http.StatusOK)
