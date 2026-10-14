@@ -92,6 +92,7 @@ import (
 	"github.com/kcp-dev/kcp/pkg/server/openapiv3"
 	kcpserveroptions "github.com/kcp-dev/kcp/pkg/server/options"
 	"github.com/kcp-dev/kcp/pkg/server/options/batteries"
+	"github.com/kcp-dev/kcp/pkg/server/proxy"
 	"github.com/kcp-dev/kcp/pkg/server/virtualresources"
 
 	_ "net/http/pprof"
@@ -673,10 +674,11 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		// whether shard-wide URLs like /metrics may be served. Workspace-scoped
 		// requests are 501'd; top-level requests are evaluated against root RBAC.
 		apiHandler = kcpfilters.WithShardLevelPaths(apiHandler)
-		apiHandler, err = WithLocalProxy(apiHandler, opts.Extra.ShardName, opts.Extra.AdditionalMappingsFile, clusterIndex)
+		apiHandler, err = WithLocalProxy(apiHandler, opts.Extra.ShardName, opts.Extra.AdditionalMappingsFile)
 		if err != nil {
 			panic(err) // shouldn't happen due to flag validation
 		}
+		apiHandler = proxy.WithClusterResolutionAndStrip(apiHandler, clusterIndex)
 		apiHandler = kcpfilters.WithInClusterServiceAccountRequestRewrite(apiHandler)
 		apiHandler = kcpfilters.WithAcceptHeader(apiHandler)
 		apiHandler = kcpfilters.WithUserAgent(apiHandler)
