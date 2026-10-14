@@ -37,12 +37,6 @@ import (
 	kcpauthorization "github.com/kcp-dev/kcp/pkg/authorization"
 	"github.com/kcp-dev/kcp/pkg/index"
 	"github.com/kcp-dev/kcp/pkg/server/proxy/types"
-	"github.com/kcp-dev/kcp/pkg/virtual/admin"
-	"github.com/kcp-dev/kcp/pkg/virtual/apiresourceschema"
-	"github.com/kcp-dev/kcp/pkg/virtual/initializingworkspaces"
-	"github.com/kcp-dev/kcp/pkg/virtual/migratingworkspaces"
-	"github.com/kcp-dev/kcp/pkg/virtual/replication"
-	"github.com/kcp-dev/kcp/pkg/virtual/terminatingworkspaces"
 )
 
 func WithClusterResolver(delegate http.Handler, mappings []types.PathMapping, idx index.Index) http.Handler {
@@ -51,15 +45,11 @@ func WithClusterResolver(delegate http.Handler, mappings []types.PathMapping, id
 	// fallback for all unrecognized URLs
 	mux.Handle("/", delegate)
 
-	// Use the extra path mappings as an additional source of cluster names in URLs;
-	// it's okay for a virtual workspace URL to not match here or to not have a
-	// cluster placeholder in its URL pattern, since the default handler will simply
-	// forward the request unchanged (and most likely, unauthenticated).
-
-	// We can use the same handler for all mappings, since the actual muxing to
-	// the destinations happens later in proxy.HttpHandler; here we only care about
-	// detecting the cluster name.
-	mappingHandler := newMappingHandler(delegate, idx)
+	// Mappings are an additional source of cluster names in URLs: a {cluster}
+	// placeholder in the mapping path, or failing that a /clusters/<x> segment
+	// in the request path, resolves the cluster into the context. The actual
+	// muxing to the destinations happens later in proxy.HttpHandler.
+	mappingHandler := WithClusterResolution(delegate, idx, "cluster")
 
 	for _, mapping := range mappings {
 		p := strings.TrimRight(mapping.Path, "/")
@@ -80,8 +70,8 @@ func WithClusterResolver(delegate http.Handler, mappings []types.PathMapping, id
 			// mappings are configured with *prefixes*; in order to match both exact matches
 			// and prefix matches (i.e. if "/foo" is configured, both "/foo" and "/foo/bar"
 			// must match), each mapping is added twice to the mux.
-			mux.HandleFunc(p, mappingHandler)
-			mux.HandleFunc(p+"/{trail...}", mappingHandler)
+			mux.Handle(p, mappingHandler)
+			mux.Handle(p+"/{trail...}", mappingHandler)
 		}
 	}
 
@@ -159,111 +149,6 @@ func isInProgressWatch(req *http.Request) bool {
 	}
 
 	return isWatchRequest(req)
-}
-
-func newMappingHandler(delegate http.Handler, idx index.Index) http.HandlerFunc {
-	return func(w http.ResponseWriter, req *http.Request) {
-		// Not every virtual workspace and/or every mapping has a {cluster} in its URL;
-		// also wildcard requests have to be passed without lookup.
-		//
-		// For /clusters paths, the mux pattern is /clusters/{cluster}/{trail...}, so
-		// req.PathValue("cluster") returns the cluster name directly.
-		//
-		// For /services/... paths, the mux pattern is /services/<name>/{trail...} - there's
-		// no {cluster} placeholder. The entire "clusters/root:orgs:bob/apis/..." is captured
-		// as {trail...}, so req.PathValue("cluster") returns empty. In this case, we need to
-		// parse the cluster from the URL path using extractClusterFromPath.
-		clusterName := req.PathValue("cluster")
-
-		// If no cluster from path pattern, try to extract from URL path.
-		// Virtual workspace URLs often have the pattern: /services/<name>/clusters/<cluster>/...
-		if clusterName == "" {
-			clusterName = extractClusterFromPath(req.URL.Path)
-		}
-
-		if clusterName == "" || clusterName == "*" {
-			delegate.ServeHTTP(w, req)
-			return
-		}
-
-		req, _ = resolveClusterName(w, req, idx, clusterName)
-		if req == nil {
-			return
-		}
-
-		delegate.ServeHTTP(w, req)
-	}
-}
-
-// apiExportVirtualWorkspaceName is the apiexport virtual workspace's name,
-// builder.VirtualWorkspaceName in pkg/virtual/apiexport/builder, a package too
-// heavy to import here. A test keeps the two equal.
-const apiExportVirtualWorkspaceName = "apiexport"
-
-// virtualWorkspaceClusterOffsets is, for each built-in virtual workspace, the
-// number of path segments its URLs carry between /services/<name>/ and the
-// clusters/<cluster> segment, as its shard-side path resolver parses them:
-//
-//	/services/apiexport/<export cluster>/<export name>/clusters/<cluster>/...
-//	/services/replication/<slice cluster>/<slice name>/clusters/<cluster>/...
-//	/services/apiresourceschema/<consumer cluster>/clusters/<cluster>/...
-//	/services/initializingworkspaces/<initializer>/clusters/<cluster>/...
-//	/services/terminatingworkspaces/<terminator>/clusters/<cluster>/...
-//	/services/admin/clusters/<cluster>/...
-//	/services/migratingworkspaces/clusters/<cluster>/...
-var virtualWorkspaceClusterOffsets = map[string]int{
-	apiExportVirtualWorkspaceName:               2,
-	replication.VirtualWorkspaceName:            2,
-	apiresourceschema.VirtualWorkspaceName:      1,
-	initializingworkspaces.VirtualWorkspaceName: 1,
-	terminatingworkspaces.VirtualWorkspaceName:  1,
-	admin.VirtualWorkspaceName:                  0,
-	migratingworkspaces.VirtualWorkspaceName:    0,
-}
-
-// extractClusterFromPath extracts the cluster name from URLs containing /clusters/<cluster>/
-// For example: /services/foo/clusters/root:orgs:bob/apis/... -> root:orgs:bob.
-//
-// For a built-in virtual workspace the cluster is read where that workspace's
-// URL layout puts it, so a segment before it named "clusters" — an APIExport
-// or a CachedResource of that name — is not taken for the cluster. Other
-// virtual workspaces' layouts are unknown here, and their cluster is the
-// segment after the first /clusters/.
-func extractClusterFromPath(path string) string {
-	if rest, ok := strings.CutPrefix(path, "/services/"); ok {
-		name, rest, _ := strings.Cut(rest, "/")
-		if offset, known := virtualWorkspaceClusterOffsets[name]; known {
-			return clusterAtOffset(rest, offset)
-		}
-	}
-
-	const clustersPrefix = "/clusters/"
-	idx := strings.Index(path, clustersPrefix)
-	if idx == -1 {
-		return ""
-	}
-
-	// Get everything after /clusters/
-	rest := path[idx+len(clustersPrefix):]
-
-	// Find the end of the cluster name (next / or end of string)
-	endIdx := strings.Index(rest, "/")
-	if endIdx == -1 {
-		return rest
-	}
-	return rest[:endIdx]
-}
-
-// clusterAtOffset returns the cluster of a virtual workspace path, given the
-// path after /services/<name>/ and the number of segments before its
-// clusters/<cluster> segment. A path without clusters/<cluster> at that
-// position names no cluster.
-func clusterAtOffset(path string, offset int) string {
-	segments := strings.SplitN(path, "/", offset+3)
-	if len(segments) < offset+2 || segments[offset] != "clusters" {
-		return ""
-	}
-	return segments[offset+1]
 }
 
 func resolveClusterName(w http.ResponseWriter, req *http.Request, idx index.Index, clusterName string) (*http.Request, *index.Result) {

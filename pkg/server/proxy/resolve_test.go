@@ -31,6 +31,7 @@ import (
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 
 	"github.com/kcp-dev/kcp/pkg/index"
+	apiexportbuilder "github.com/kcp-dev/kcp/pkg/virtual/apiexport/builder"
 )
 
 const (
@@ -356,6 +357,24 @@ func TestClusterSegmentFromPath(t *testing.T) {
 		"no clusters segment":          {path: "/services/foo/apis/v1", want: ""},
 		"empty":                        {path: "", want: ""},
 		"empty segment":                {path: "/services/foo/clusters//apis", want: ""},
+
+		"replication VW, cached resource named clusters":                      {path: "/services/replication/1oget0q1249b2vcy/clusters/clusters/385doly4poks8a45/apis/wildwest.dev/v1alpha1/clusters", want: "385doly4poks8a45"},
+		"replication VW, cached resource named clusters, at the cluster root": {path: "/services/replication/1oget0q1249b2vcy/clusters/clusters/385doly4poks8a45", want: "385doly4poks8a45"},
+		"replication VW, cached resource named clusters, non-API endpoint":    {path: "/services/replication/1oget0q1249b2vcy/clusters/clusters/385doly4poks8a45/healthz", want: "385doly4poks8a45"},
+		"apiexport VW, export named clusters":                                 {path: "/services/apiexport/root:providers/clusters/clusters/root:orgs:bob/api/v1/namespaces", want: "root:orgs:bob"},
+		"apiexport VW, export named clusters, wildcard cluster":               {path: "/services/apiexport/root:providers/clusters/clusters/*/apis/wildwest.dev/v1alpha1/clusters", want: "*"},
+		"apiexport VW, export named clusters, trailing slash after cluster":   {path: "/services/apiexport/root:providers/clusters/clusters/root:orgs:bob/", want: "root:orgs:bob"},
+		"apiexport VW, export and its workspace both named clusters":          {path: "/services/apiexport/clusters/clusters/clusters/root:orgs:bob/apis/wildwest.dev/v1alpha1/clusters", want: "root:orgs:bob"},
+		"apiexport VW, a later clusters segment does not move the cluster":    {path: "/services/apiexport/root:providers/export/clusters/root:orgs:a/x/clusters/root:orgs:b/apis/v1", want: "root:orgs:a"},
+		"apiexport VW without a clusters segment where its layout puts one":   {path: "/services/apiexport/root:providers/export/notclusters/root:orgs:bob/apis/v1", want: ""},
+		"apiexport VW cut short before its cluster":                           {path: "/services/apiexport/root:providers/export/clusters", want: ""},
+		"initializingworkspaces VW":                                           {path: "/services/initializingworkspaces/root:org:custom/clusters/2x7k9fqp1abcd/apis/core.kcp.io/v1alpha1/logicalclusters", want: "2x7k9fqp1abcd"},
+		"terminatingworkspaces VW":                                            {path: "/services/terminatingworkspaces/root:org:custom/clusters/2x7k9fqp1abcd/apis/core.kcp.io/v1alpha1/logicalclusters", want: "2x7k9fqp1abcd"},
+		"apiresourceschema VW":                                                {path: "/services/apiresourceschema/root:consumer/clusters/*/apis/apis.kcp.io/v1alpha1/apiresourceschemas", want: "*"},
+		"admin VW":                                                            {path: "/services/admin/clusters/root:orgs:bob/apis/core.kcp.io/v1alpha1/logicalclusters", want: "root:orgs:bob"},
+		"migratingworkspaces VW":                                              {path: "/services/migratingworkspaces/clusters/2x7k9fqp1abcd/apis/v1", want: "2x7k9fqp1abcd"},
+		"unknown VW, resource named clusters after the cluster":               {path: "/services/foo/clusters/root:orgs:bob/apis/wildwest.dev/v1alpha1/clusters/cluster-a", want: "root:orgs:bob"},
+		"unknown VW keeps first segment after /clusters/, even an empty one":  {path: "/services/foo/clusters//clusters/root:orgs:bob/apis/v1", want: ""},
 	}
 
 	for name, tc := range tests {
@@ -364,4 +383,9 @@ func TestClusterSegmentFromPath(t *testing.T) {
 			require.Equal(t, tc.want, clusterSegmentFromPath(tc.path))
 		})
 	}
+}
+
+func TestAPIExportVirtualWorkspaceName(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, apiexportbuilder.VirtualWorkspaceName, apiExportVirtualWorkspaceName)
 }
