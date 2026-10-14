@@ -113,18 +113,11 @@ func clusterSegmentFromPath(path string) string {
 // resolveCluster resolves a cluster segment against idx.
 // Returns the request context extended with the result,
 // and false if a response was written.
-//
-// A malformed segment is rejected with 400.
-// A workspace path unknown to idx is rejected with 403.
-// A logical cluster name unknown to idx is passed through without
-// workspace type and shard.
 func resolveCluster(w http.ResponseWriter, req *http.Request, idx index.Index, segment string) (context.Context, bool) {
 	ctx := req.Context()
-	logger := klog.FromContext(ctx)
 
 	if segment == logicalcluster.Wildcard.String() {
-		ctx = request.WithCluster(ctx, request.Cluster{Wildcard: true})
-		return ctx, true
+		return request.WithCluster(ctx, request.Cluster{Wildcard: true}), true
 	}
 
 	path := logicalcluster.NewPath(segment)
@@ -136,6 +129,38 @@ func resolveCluster(w http.ResponseWriter, req *http.Request, idx index.Index, s
 		return nil, false
 	}
 
+	ctx, err := Resolve(ctx, idx, path)
+	if err != nil {
+		var unavailable *UnavailableError
+		if errors.As(err, &unavailable) {
+			http.Error(w, "Not available.", unavailable.Code)
+			return nil, false
+		}
+		responsewriters.ErrorNegotiated(err, kubernetesscheme.Codecs, schema.GroupVersion{}, w, req)
+		return nil, false
+	}
+	return ctx, true
+}
+
+// UnavailableError is returned by Resolve for a workspace the index marks
+// unavailable with an HTTP status code.
+type UnavailableError struct {
+	Code int
+}
+
+func (e *UnavailableError) Error() string {
+	return fmt.Sprintf("workspace not available: %d", e.Code)
+}
+
+// Resolve resolves a valid cluster path against idx and returns ctx
+// extended with request.Cluster, WorkspaceType and ShardName,
+// or Mount and ShardName for a mounted workspace.
+//
+// A workspace path unknown to idx yields a forbidden *apierrors.StatusError.
+// A logical cluster name unknown to idx yields request.Cluster only.
+func Resolve(ctx context.Context, idx index.Index, path logicalcluster.Path) (context.Context, error) {
+	logger := klog.FromContext(ctx)
+
 	result, found := idx.Lookup(path)
 	if !found {
 		name, isName := path.Name()
@@ -145,16 +170,14 @@ func resolveCluster(w http.ResponseWriter, req *http.Request, idx index.Index, s
 			// create the LogicalCluster singleton.
 			// A later middleware after authn/authz validates that this
 			// only passes for kcp components.
-			return request.WithCluster(ctx, request.Cluster{Name: name}), true
+			return request.WithCluster(ctx, request.Cluster{Name: name}), nil
 		}
 
 		logger.WithValues("path", path).V(4).Info("unknown workspace path")
-		forbidden(w, req, path)
-		return nil, false
+		return nil, forbidden(path)
 	}
 	if result.ErrorCode != 0 {
-		http.Error(w, "Not available.", result.ErrorCode)
-		return nil, false
+		return nil, &UnavailableError{Code: result.ErrorCode}
 	}
 
 	switch {
@@ -162,19 +185,14 @@ func resolveCluster(w http.ResponseWriter, req *http.Request, idx index.Index, s
 		target, err := mounts.ValidateURL(result.URL)
 		if err != nil {
 			logger.WithValues("path", path, "url", result.URL).Error(err, "mount target URL is invalid")
-			responsewriters.ErrorNegotiated(
-				apierrors.NewServiceUnavailable(fmt.Sprintf("the mount target of workspace %q is invalid", path)),
-				kubernetesscheme.Codecs, schema.GroupVersion{}, w, req,
-			)
-			return nil, false
+			return nil, apierrors.NewServiceUnavailable(fmt.Sprintf("the mount target of workspace %q is invalid", path))
 		}
 
 		parentPath, _ := path.Split()
 		parent, found := idx.Lookup(parentPath)
 		if !found || parent.Cluster.Empty() {
 			logger.WithValues("path", path, "parent", parentPath).V(4).Info("parent of mounted workspace not found")
-			forbidden(w, req, path)
-			return nil, false
+			return nil, forbidden(path)
 		}
 
 		ctx = WithMount(ctx, &Mount{
@@ -193,19 +211,16 @@ func resolveCluster(w http.ResponseWriter, req *http.Request, idx index.Index, s
 		ctx = WithShardName(ctx, result.Shard)
 	}
 
-	return ctx, true
+	return ctx, nil
 }
 
-func forbidden(w http.ResponseWriter, req *http.Request, path logicalcluster.Path) {
-	responsewriters.ErrorNegotiated(
-		apierrors.NewForbidden(
-			schema.GroupResource{
-				Group:    tenancyv1alpha1.SchemeGroupVersion.Group,
-				Resource: "workspaces",
-			},
-			path.String(),
-			errors.New(kcpauthorization.WorkspaceAccessNotPermittedReason),
-		),
-		kubernetesscheme.Codecs, schema.GroupVersion{}, w, req,
+func forbidden(path logicalcluster.Path) *apierrors.StatusError {
+	return apierrors.NewForbidden(
+		schema.GroupResource{
+			Group:    tenancyv1alpha1.SchemeGroupVersion.Group,
+			Resource: "workspaces",
+		},
+		path.String(),
+		errors.New(kcpauthorization.WorkspaceAccessNotPermittedReason),
 	)
 }
