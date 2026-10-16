@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,13 +19,16 @@ package indexers
 import (
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/cache"
 
 	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	sdkclient "github.com/kcp-dev/sdk/client"
+
+	vrhelpers "github.com/kcp-dev/kcp/pkg/server/virtualresources/helpers"
 )
 
 const (
@@ -39,14 +42,66 @@ const (
 	// APIExportEndpointSliceByAPIExport is the indexer name for retrieving APIExportEndpointSlices by their APIExport's Reference Path and Name.
 	APIExportEndpointSliceByAPIExport = "APIExportEndpointSliceByAPIExport"
 
-	APIExportByVirtualResourceIdentities       = "APIExportByVirtualResourceIdentities"
-	APIExportByVirtualResourceIdentitiesAndGRs = "APIExportByVirtualResourceIdentitiesAndGRs"
+	APIExportByVirtualResourceFingerprint = "APIExportByVirtualResourceFingerprint"
+
+	// APIExportByAPIResourceSchema is the indexer name for retrieving APIExports by the
+	// cluster-aware key of one of their APIResourceSchemas (Spec.Resources[].Schema).
+	APIExportByAPIResourceSchema = "apiExportsByAPIResourceSchema"
 )
+
+// IndexAPIExportByAPIResourceSchema is an index function that maps an APIExport to the
+// cluster-aware keys of every APIResourceSchema it references in Spec.Resources. The key
+// format is "<schemaCluster>|<schemaName>", matching client.ToClusterAwareKey output.
+func IndexAPIExportByAPIResourceSchema(obj interface{}) ([]string, error) {
+	apiExport, ok := obj.(*apisv1alpha2.APIExport)
+	if !ok {
+		return []string{}, fmt.Errorf("obj %T is not an APIExport", obj)
+	}
+	cluster := logicalcluster.From(apiExport).Path()
+	ret := make([]string, 0, len(apiExport.Spec.Resources))
+	for _, resourceSchema := range apiExport.Spec.Resources {
+		ret = append(ret, sdkclient.ToClusterAwareKey(cluster, resourceSchema.Schema))
+	}
+	return ret, nil
+}
 
 // IndexAPIExportByIdentity is an index function that indexes an APIExport by its identity hash.
 func IndexAPIExportByIdentity(obj interface{}) ([]string, error) {
 	apiExport := obj.(*apisv1alpha2.APIExport)
-	return []string{apiExport.Status.IdentityHash}, nil
+	// alias hashes of an in-progress identity rotation resolve to the same
+	// export, so permission claims and wildcard consumers referencing a
+	// pre-rotation identity keep working until the alias is retired.
+	return append([]string{apiExport.Status.IdentityHash}, apiExport.Status.IdentityAliasHashes...), nil
+}
+
+// CanonicalIdentityHash normalizes an identity hash to its canonical value:
+// if the hash is an alias of exactly one rotated APIExport, that export's
+// current identity hash is returned; otherwise the hash itself. Everything
+// that hashes permission claims must normalize through this first, so a
+// claim still referencing a pre-rotation identity and one already updated
+// produce identical label keys and values - otherwise claimed objects
+// silently disappear from the claiming export's view.
+//
+// An ambiguous hash (several exports resolve to it, i.e. a shared identity)
+// is returned unchanged: normalization is only safe when the alias maps to
+// one export.
+//
+// The indexer must hold the global (cache server) view of APIExports: a
+// shard-local view could see only one of several exports sharing the hash
+// and normalize where other shards and the virtual workspace do not.
+// This is why we use only the global indexer for canonicalization, not any shard-local caches.
+func CanonicalIdentityHash(globalIndexer cache.Indexer, hash string) string {
+	if hash == "" {
+		return hash
+	}
+	exports, err := ByIndex[*apisv1alpha2.APIExport](globalIndexer, APIExportByIdentity, hash)
+	if err != nil || len(exports) != 1 {
+		return hash
+	}
+	if canonical := exports[0].Status.IdentityHash; canonical != "" {
+		return canonical
+	}
+	return hash
 }
 
 // IndexAPIExportBySecret is an index function that indexes an APIExport by its identity secret references. Index values
@@ -101,47 +156,20 @@ func IndexAPIExportEndpointSliceByAPIExport(obj interface{}) ([]string, error) {
 	return result, nil
 }
 
-// IndexAPIExportByVirtualResourceIdentities is an index function that indexes an APIExport by its
-// exported resources' virtual storage identity.
-func IndexAPIExportByVirtualResourceIdentities(obj interface{}) ([]string, error) {
-	apiExport, ok := obj.(*apisv1alpha2.APIExport)
-	if !ok {
-		return []string{}, fmt.Errorf("obj %T is not an APIExport", obj)
-	}
-
-	virtualResourceIdentities := sets.New[string]()
-
-	for _, res := range apiExport.Spec.Resources {
-		if res.Storage.Virtual != nil {
-			virtualResourceIdentities.Insert(res.Storage.Virtual.IdentityHash)
-		}
-	}
-
-	return sets.List[string](virtualResourceIdentities), nil
-}
-
-// IndexAPIExportByVirtualResourceIdentities is an index function that indexes an APIExport by its
-// exported resources' virtual storage identity and group resource.
-func IndexAPIExportByVirtualResourceIdentitiesAndGRs(obj interface{}) ([]string, error) {
+// IndexAPIExportByVirtualResourceFingerprint indexes an APIExport by the fingerprint of each
+// virtual storage resource (owning APIExport + endpoint slice reference).
+func IndexAPIExportByVirtualResourceFingerprint(obj interface{}) ([]string, error) {
 	apiExport, ok := obj.(*apisv1alpha2.APIExport)
 	if !ok {
 		return []string{}, fmt.Errorf("obj %T is not an APIExport", obj)
 	}
 
 	keys := sets.New[string]()
-
 	for _, res := range apiExport.Spec.Resources {
 		if res.Storage.Virtual != nil {
-			keys.Insert(VirtualResourceIdentityAndGRKey(res.Storage.Virtual.IdentityHash, schema.GroupResource{
-				Group:    res.Group,
-				Resource: res.Name,
-			}))
+			keys.Insert(vrhelpers.Fingerprint(apiExport, res.Storage.Virtual))
 		}
 	}
 
-	return sets.List[string](keys), nil
-}
-
-func VirtualResourceIdentityAndGRKey(identityHash string, gr schema.GroupResource) string {
-	return fmt.Sprintf("%s:%s", gr.String(), identityHash)
+	return sets.List(keys), nil
 }

@@ -26,9 +26,19 @@ import (
 )
 
 const (
-	APIExportByIdentityKeyHash      = "IdentityByKeyHash"
-	CachedResourceByIdentityKeyHash = "IdentityByKeyHash"
+	APIExportByIdentityKeyHash             = "IdentityByKeyHash"
+	ClusterCachedResourceByIdentityKeyHash = "IdentityByKeyHash"
+	IdentityByStableID                     = "IdentityByStableID"
 )
+
+// IdentityReservedError prevents an unaccepted initial key from reclaiming an ID.
+type IdentityReservedError struct {
+	Identity string
+}
+
+func (e *IdentityReservedError) Error() string {
+	return fmt.Sprintf("stable identity %q is reserved and does not accept this key", e.Identity)
+}
 
 // IndexByIdentityKeyHash indexes accepted keys, with a fallback for legacy IDs.
 func IndexByIdentityKeyHash(obj interface{}) ([]string, error) {
@@ -49,7 +59,7 @@ func identityStatus(obj interface{}) (string, []string, error) {
 	switch obj := obj.(type) {
 	case *apisv1alpha2.APIExport:
 		return obj.Status.IdentityHash, obj.Status.IdentityKeyHashes, nil
-	case *cachev1alpha1.CachedResource:
+	case *cachev1alpha1.ClusterCachedResource:
 		return obj.Status.IdentityHash, obj.Status.IdentityKeyHashes, nil
 	default:
 		return "", nil, fmt.Errorf("unsupported identity object %T", obj)
@@ -57,11 +67,25 @@ func identityStatus(obj interface{}) (string, []string, error) {
 }
 
 // NewIdentityLookup searches local and global identity informers. It refuses
-// ambiguous identities and unsynchronized caches rather than choosing an ID.
+// ambiguous identities, reserved fallback IDs, and unsynchronized caches.
 func NewIdentityLookup(informers ...cache.SharedIndexInformer) (func(string) (string, error), error) {
 	for _, informer := range informers {
-		if _, found := informer.GetIndexer().GetIndexers()[APIExportByIdentityKeyHash]; !found {
-			if err := informer.AddIndexers(cache.Indexers{APIExportByIdentityKeyHash: IndexByIdentityKeyHash}); err != nil {
+		needed := cache.Indexers{}
+		existing := informer.GetIndexer().GetIndexers()
+		if _, found := existing[APIExportByIdentityKeyHash]; !found {
+			needed[APIExportByIdentityKeyHash] = IndexByIdentityKeyHash
+		}
+		if _, found := existing[IdentityByStableID]; !found {
+			needed[IdentityByStableID] = func(obj interface{}) ([]string, error) {
+				id, _, err := identityStatus(obj)
+				if err != nil || id == "" {
+					return nil, err
+				}
+				return []string{id}, nil
+			}
+		}
+		if len(needed) > 0 {
+			if err := informer.AddIndexers(needed); err != nil {
 				return nil, err
 			}
 		}
@@ -85,6 +109,22 @@ func NewIdentityLookup(informers ...cache.SharedIndexInformer) (func(string) (st
 					return "", fmt.Errorf("conflicting identities %q and %q for key hash %q", result, id, hash)
 				}
 				result = id
+			}
+		}
+		if result == "" {
+			// A deterministic fallback must not re-create an identity whose
+			// initial key was retired. Key membership and ID reservation are
+			// separate indexes, since retiring a key never retires the ID.
+			// TODO: enforce authoritative cross-shard ID reservations so
+			// informer lag and simultaneous creation cannot bypass this check.
+			for _, informer := range informers {
+				reserved, err := informer.GetIndexer().ByIndex(IdentityByStableID, hash)
+				if err != nil {
+					return "", err
+				}
+				if len(reserved) > 0 {
+					return "", &IdentityReservedError{Identity: hash}
+				}
 			}
 		}
 		return result, nil

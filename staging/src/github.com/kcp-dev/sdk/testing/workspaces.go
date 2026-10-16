@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,23 +18,28 @@ package testing
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
+	"net/url"
 	"os"
-	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/martinlindhe/base36"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 
 	"github.com/kcp-dev/logicalcluster/v3"
-	"github.com/kcp-dev/sdk/apis/core"
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
+	kcpclient "github.com/kcp-dev/sdk/client/clientset/versioned"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	kcptestinghelpers "github.com/kcp-dev/sdk/testing/helpers"
 	kcptestingserver "github.com/kcp-dev/sdk/testing/server"
@@ -104,6 +109,45 @@ func WithNamePrefix(prefix string) UnprivilegedWorkspaceOption {
 	}
 }
 
+// testWorkspaceCount maps test names to a running atomic counter of how
+// many workspaces the test created.
+// This is used to spread workspaces over the available shards by
+// WithSpreadAcrossShards.
+var testWorkspaceCount sync.Map
+
+// WithSpreadAcrossShards ensures that workspaces are spread across the
+// available shards unless the workspace has an explicit location set.
+func WithSpreadAcrossShards(t TestingT, shardNames []string) UnprivilegedWorkspaceOption {
+	require.NotEmpty(t, shardNames, "WithSpreadAcrossShards requires at least one shard to schedule workspaces on")
+
+	storedValue, loaded := testWorkspaceCount.LoadOrStore(t.Name(), &atomic.Uint64{})
+	// Cleanup the counter when the test finalizes
+	if !loaded {
+		t.Cleanup(func() {
+			testWorkspaceCount.Delete(t.Name())
+		})
+	}
+
+	counter := storedValue.(*atomic.Uint64)
+
+	return func(ws *tenancyv1alpha1.Workspace) {
+		if ws.Spec.Location != nil {
+			return
+		}
+
+		// Just `counter.Add(1)` would be enough but it feels better to
+		// place the first workspace on the first shard listed in
+		// shardNames. Not that it matters, but it feels like something
+		// someone might hit while debugging a test failure and lead
+		// people down the wrong path.
+		// Hence increase the atomic counter, subtract 1 from the
+		// result so the first workspace lands on the first shard.
+		idx := int(counter.Add(1) - 1) //nolint:gosec // Ignore integer overflow, it's unlikely that we'll hit math.MAX_INT for the amount of workspaces in one test
+		targetShard := shardNames[idx%len(shardNames)]
+		WithShard(targetShard)(ws)
+	}
+}
+
 // NewLowLevelWorkspaceFixture creates a new workspace under the given parent
 // using the given client. Don't use this if NewWorkspaceFixture can be used.
 func NewLowLevelWorkspaceFixture[O WorkspaceOption](t TestingT, createClusterClient, clusterClient kcpclientset.ClusterInterface, parent logicalcluster.Path, options ...O) *tenancyv1alpha1.Workspace {
@@ -136,7 +180,7 @@ func NewLowLevelWorkspaceFixture[O WorkspaceOption](t TestingT, createClusterCli
 		var err error
 		ws, err = createClusterClient.Cluster(parent).TenancyV1alpha1().Workspaces().Create(ctx, tmpl, metav1.CreateOptions{})
 		return err == nil, fmt.Sprintf("error creating workspace under %s: %v", parent, err)
-	}, wait.ForeverTestTimeout, time.Millisecond*100, "failed to create %s workspace under %s", tmpl.Spec.Type.Name, parent)
+	}, workspaceInitTimeout, time.Millisecond*100, "failed to create %s workspace under %s", tmpl.Spec.Type.Name, parent)
 
 	wsName := ws.Name
 	t.Cleanup(func() {
@@ -154,7 +198,7 @@ func NewLowLevelWorkspaceFixture[O WorkspaceOption](t TestingT, createClusterCli
 				return true, ""
 			}
 			return false, err.Error()
-		}, wait.ForeverTestTimeout, time.Millisecond*100, "failed to delete workspace %s", wsName)
+		}, workspaceInitTimeout, time.Millisecond*100, "failed to delete workspace %s", wsName)
 	})
 
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
@@ -176,9 +220,36 @@ func NewLowLevelWorkspaceFixture[O WorkspaceOption](t TestingT, createClusterCli
 			return false, fmt.Sprintf("failed to get LogicalCluster %s via path: %v", parent.Join(ws.Name), err)
 		}
 		return true, ""
-	}, wait.ForeverTestTimeout, time.Millisecond*100, "failed to wait for %s workspace %s to become accessible", ws.Spec.Type, parent.Join(ws.Name))
+	}, workspaceInitTimeout, time.Millisecond*100, "failed to wait for %s workspace %s to become accessible", ws.Spec.Type, parent.Join(ws.Name))
 
-	t.Logf("Created %s workspace %s as /clusters/%s on shard %q", ws.Spec.Type, parent.Join(ws.Name), ws.Spec.Cluster, WorkspaceShardOrDie(t, clusterClient, ws).Name)
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		apibindings, err := clusterClient.Cluster(logicalcluster.NewPath(ws.Spec.Cluster)).ApisV1alpha2().APIBindings().List(t.Context(), metav1.ListOptions{})
+		if err != nil {
+			return false, fmt.Sprintf("error getting APIBindings from workspace %s", parent.Join(ws.Name))
+		}
+
+		for _, apibinding := range apibindings.Items {
+			if apibinding.Status.Phase != apisv1alpha2.APIBindingPhaseBound {
+				return false, fmt.Sprintf("APIBinding %s is in phase %s", apibinding.Name, apibinding.Status.Phase)
+			}
+		}
+		return true, ""
+	}, workspaceInitTimeout, time.Millisecond*100, "failed to wait for %s workspace %s APIBindings to become ready", ws.Spec.Type, parent.Join(ws.Name))
+
+	wsClusterPath := logicalcluster.NewPath(ws.Spec.Cluster)
+	discoveryClient := clusterClient.Cluster(wsClusterPath).Discovery()
+	apibindings, err := clusterClient.Cluster(wsClusterPath).ApisV1alpha2().APIBindings().List(t.Context(), metav1.ListOptions{})
+	require.NoError(t, err, "failed to list APIBindings from workspace %s", parent.Join(ws.Name))
+
+	for _, apibinding := range apibindings.Items {
+		for _, br := range apibinding.Status.BoundResources {
+			for _, v := range br.StorageVersions {
+				WaitForAPIReady(t, discoveryClient, schema.GroupVersion{Group: br.Group, Version: v})
+			}
+		}
+	}
+
+	t.Logf("Created %s workspace %s as /clusters/%s on shard %q", ws.Spec.Type, parent.Join(ws.Name), ws.Spec.Cluster, ws.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey])
 	return ws
 }
 
@@ -190,48 +261,73 @@ func NewWorkspaceFixture(t TestingT, server kcptestingserver.RunningServer, pare
 	clusterClient, err := kcpclientset.NewForConfig(cfg)
 	require.NoError(t, err, "failed to construct client for server")
 
+	options = append(options, WithSpreadAcrossShards(t, server.ShardNames()))
 	ws := NewLowLevelWorkspaceFixture(t, clusterClient, clusterClient, parent, options...)
 	return parent.Join(ws.Name), ws
 }
 
-// WorkspaceShard returns the shard that a workspace is scheduled on.
-func WorkspaceShard(ctx context.Context, kcpClient kcpclientset.ClusterInterface, ws *tenancyv1alpha1.Workspace) (*corev1alpha1.Shard, error) {
-	shards, err := kcpClient.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().List(ctx, metav1.ListOptions{})
+// AdminWorkspaceClient returns a client for the Admin workspace
+// (/services/admin) of the server behind cfg.
+func AdminWorkspaceClient(cfg *rest.Config) (kcpclient.Interface, error) {
+	adminCfg := rest.CopyConfig(cfg)
+	u, err := url.Parse(cfg.Host)
 	if err != nil {
 		return nil, err
 	}
+	u.Path = "/services/admin"
+	adminCfg.Host = u.String()
+	return kcpclient.NewForConfig(adminCfg)
+}
 
-	// best effort to get a shard name from the hash in the annotation
-	hash := ws.Annotations["internal.tenancy.kcp.io/shard"]
-	if hash == "" {
-		return nil, fmt.Errorf("workspace %s does not have a shard hash annotation", logicalcluster.From(ws).Path().Join(ws.Name))
+// ListShards lists all shards through the Admin workspace (/services/admin)
+// of the server behind cfg.
+func ListShards(ctx context.Context, cfg *rest.Config) (*corev1alpha1.ShardList, error) {
+	client, err := AdminWorkspaceClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return client.CoreV1alpha1().Shards().List(ctx, metav1.ListOptions{})
+}
+
+// WorkspaceShard returns the shard that a workspace is scheduled on.
+func WorkspaceShard(ctx context.Context, cfg *rest.Config, ws *tenancyv1alpha1.Workspace) (*corev1alpha1.Shard, error) {
+	shardName := ws.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey]
+	if shardName == "" {
+		return nil, fmt.Errorf("workspace %s does not have a shard name annotation", logicalcluster.From(ws).Path().Join(ws.Name))
 	}
 
-	for i := range shards.Items {
-		if name := shards.Items[i].Name; base36Sha224NameValue(name) == hash {
-			return &shards.Items[i], nil
-		}
+	client, err := AdminWorkspaceClient(cfg)
+	if err != nil {
+		return nil, err
 	}
-
-	return nil, fmt.Errorf("failed to determine shard for workspace %s", ws.Name)
+	return client.CoreV1alpha1().Shards().Get(ctx, shardName, metav1.GetOptions{})
 }
 
 // WorkspaceShardOrDie returns the shard that a workspace is scheduled on, or
 // fails the test on error.
-func WorkspaceShardOrDie(t TestingT, kcpClient kcpclientset.ClusterInterface, ws *tenancyv1alpha1.Workspace) *corev1alpha1.Shard {
+func WorkspaceShardOrDie(t TestingT, cfg *rest.Config, ws *tenancyv1alpha1.Workspace) *corev1alpha1.Shard {
 	t.Helper()
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	t.Cleanup(cancelFunc)
 
-	shard, err := WorkspaceShard(ctx, kcpClient, ws)
-	require.NoError(t, err, "failed to determine shard for workspace %s", ws.Name)
+	var shard *corev1alpha1.Shard
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		var err error
+		shard, err = WorkspaceShard(ctx, cfg, ws)
+		require.NoError(c, err, "failed to determine shard for workspace %s", ws.Name)
+	}, wait.ForeverTestTimeout, 100*time.Millisecond)
 	return shard
 }
 
-func base36Sha224NameValue(name string) string {
-	hash := sha256.Sum224([]byte(name))
-	base36hash := strings.ToLower(base36.EncodeBytes(hash[:]))
-
-	return base36hash[:8]
+// WaitForAPIReady waits until the given GroupVersion is served.
+func WaitForAPIReady(t TestingT, discoveryClient discovery.DiscoveryInterface, gv schema.GroupVersion) {
+	t.Helper()
+	t.Logf("Waiting for %s to be served", gv)
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		if _, err := discoveryClient.ServerResourcesForGroupVersion(gv.String()); err != nil {
+			return false, fmt.Sprintf("waiting for %s to be served: %v", gv, err)
+		}
+		return true, ""
+	}, workspaceInitTimeout, 100*time.Millisecond, "%s is not served", gv)
 }

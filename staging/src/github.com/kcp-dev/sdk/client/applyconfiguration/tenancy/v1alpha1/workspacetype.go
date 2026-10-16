@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,8 @@ import (
 
 // WorkspaceTypeApplyConfiguration represents a declarative configuration of the WorkspaceType type for use
 // with apply.
+//
+// WorkspaceType specifies behaviour of workspaces of this type.
 type WorkspaceTypeApplyConfiguration struct {
 	v1.TypeMetaApplyConfiguration    `json:",inline"`
 	*v1.ObjectMetaApplyConfiguration `json:"metadata,omitempty"`
@@ -43,6 +45,7 @@ func WorkspaceType(name string) *WorkspaceTypeApplyConfiguration {
 	b.WithAPIVersion("tenancy.kcp.io/v1alpha1")
 	return b
 }
+
 func (b WorkspaceTypeApplyConfiguration) IsApplyConfiguration() {}
 
 // WithKind sets the Kind field in the declarative configuration to the given value

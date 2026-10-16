@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2023 The KCP Authors.
+# Copyright 2023 The kcp Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,4 +28,7 @@ for dir in "${DIRS[@]}"; do
   cd "$dir"
   echo "Tidying ${dir}"
   go mod tidy
+  # This is what the publishing bot runs. If this fails the publishing
+  # bot will fail to publish to the staging repository.
+  go list -m -json all >/dev/null
 done

@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,9 +17,12 @@ limitations under the License.
 package index
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -33,6 +36,7 @@ type shardStub struct {
 }
 
 func TestLookup(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		name                           string
 		targetPath                     logicalcluster.Path
@@ -265,7 +269,7 @@ func TestLookup(t *testing.T) {
 			targetPath:      logicalcluster.NewPath("one:mount"),
 			expectFound:     true,
 			expectedCluster: "",
-			expectedShard:   "",
+			expectedShard:   "beta",
 			expectedURL:     "https://kcp.dev.local/services/custom-url/proxy",
 		},
 		{
@@ -301,13 +305,14 @@ func TestLookup(t *testing.T) {
 			expectFound:     true,
 			expectedError:   503,
 			expectedCluster: "",
-			expectedShard:   "",
+			expectedShard:   "beta",
 			expectedURL:     "https://kcp.dev.local/services/custom-url/proxy",
 		},
 	}
 
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
 			target := New(nil)
 			for _, shard := range scenario.initialShardsToUpsert {
 				target.UpsertShard(shard.name, shard.url)
@@ -350,6 +355,7 @@ func TestLookup(t *testing.T) {
 }
 
 func TestDeleteShard(t *testing.T) {
+	t.Parallel()
 	target := New(nil)
 
 	// ensure deleting not existing shard won't blow up
@@ -376,6 +382,7 @@ func TestDeleteShard(t *testing.T) {
 }
 
 func TestDeleteLogicalCluster(t *testing.T) {
+	t.Parallel()
 	target := New(nil)
 
 	// ensure deleting not existent logical cluster won't blow up
@@ -399,7 +406,134 @@ func TestDeleteLogicalCluster(t *testing.T) {
 	validateLookupOutput(t, logicalcluster.NewPath("root:org"), r.Shard, r.Cluster, r.URL, found, "root", "root", "", true)
 }
 
+// TestDeleteLogicalClusterScrubsAllMaps guards against the bug where
+// DeleteLogicalCluster cleaned only 2 of 7 per-cluster maps, leaving stale
+// entries whenever the LogicalCluster delete event arrived before (or
+// without) the matching Workspace delete event.
+func TestDeleteLogicalClusterScrubsAllMaps(t *testing.T) {
+	t.Parallel()
+	target := New(nil)
+
+	target.UpsertShard("root", "https://root.io")
+
+	// "34" exists both as a child (org workspace under root points at it)
+	// and as a parent (it has its own sub-workspace "sub" pointing at "99").
+	target.UpsertWorkspace("root", newWorkspace("org", "root", "34"))
+	target.UpsertWorkspace("root", newWorkspaceWithMount("mounted", "34", "55",
+		tenancyv1alpha1.ObjectReference{APIVersion: "v1", Kind: "Cluster", Name: "m"}))
+	target.UpsertWorkspace("root", withPhase(newWorkspace("broken", "34", "66"),
+		corev1alpha1.LogicalClusterPhaseUnavailable))
+	target.UpsertLogicalCluster("root", newLogicalCluster("root"))
+	target.UpsertLogicalCluster("root", newLogicalCluster("34"))
+
+	// Sanity: all 7 maps must hold an entry that references "34".
+	assertHasCluster := func(name string, presence bool) {
+		t.Helper()
+		c := logicalcluster.Name("34")
+		_, child := target.shardClusterWorkspaceName["root"][c]
+		_, parent := target.shardClusterParentCluster["root"][c]
+		_, asParentInName := target.shardClusterWorkspaceNameCluster["root"][c]
+		_, asParentInMount := target.shardClusterWorkspaceMount["root"][c]
+		_, asParentInError := target.shardClusterWorkspaceNameErrorCode["root"][c]
+		_, asType := target.shardClusterWorkspaceType["root"][c]
+		_, asShard := target.clusterShards[c]
+		got := map[string]bool{
+			"shardClusterWorkspaceName":          child,
+			"shardClusterParentCluster":          parent,
+			"shardClusterWorkspaceNameCluster":   asParentInName,
+			"shardClusterWorkspaceMount":         asParentInMount,
+			"shardClusterWorkspaceNameErrorCode": asParentInError,
+			"shardClusterWorkspaceType":          asType,
+			"clusterShards":                      asShard,
+		}
+		for k, v := range got {
+			if v != presence {
+				t.Errorf("[%s] map %q for cluster %q: got presence=%v, want %v", name, k, c, v, presence)
+			}
+		}
+	}
+	assertHasCluster("pre-delete", true)
+
+	// Simulate the race: LogicalCluster delete arrives before any of the
+	// Workspace delete events.
+	target.DeleteLogicalCluster("root", newLogicalCluster("34"))
+
+	// All 7 maps must now be free of any reference to "34".
+	assertHasCluster("post-delete", false)
+}
+
+// TestDeleteLogicalCluster_ScrubsAllMaps verifies DeleteLogicalCluster removes
+// every per-cluster entry, including ones populated by UpsertWorkspace before
+// the matching Workspace delete event is observed. The leak this guards against
+// is that the LogicalCluster delete may race ahead of the Workspace delete (or
+// the Workspace event may be missed entirely on the front proxy informer), in
+// which case the per-cluster maps would otherwise retain entries indefinitely.
+func TestDeleteLogicalCluster_ScrubsAllMaps(t *testing.T) {
+	t.Parallel()
+	target := New(nil)
+	target.UpsertShard("root", "https://root.io")
+	target.UpsertLogicalCluster("root", newLogicalCluster("root"))
+
+	// Parent "root" contains workspace "org" with scheduled cluster "orgcluster",
+	// plus an unavailable workspace and a mounted one — exercises every map.
+	target.UpsertWorkspace("root", newWorkspace("org", "root", "orgcluster"))
+	target.UpsertWorkspace("root", withPhase(newWorkspace("bad", "root", "badcluster"), corev1alpha1.LogicalClusterPhaseUnavailable))
+	target.UpsertWorkspace("root", newWorkspaceWithMount("mnt", "root", "mntcluster", tenancyv1alpha1.ObjectReference{Name: "ref"}))
+	target.UpsertLogicalCluster("root", newLogicalCluster("orgcluster"))
+	target.UpsertLogicalCluster("root", newLogicalCluster("badcluster"))
+	target.UpsertLogicalCluster("root", newLogicalCluster("mntcluster"))
+
+	// Sanity: every map has the parent's bucket populated.
+	if _, ok := target.shardClusterWorkspaceNameCluster["root"][logicalcluster.Name("root")]; !ok {
+		t.Fatal("setup: shardClusterWorkspaceNameCluster[root][root] should be populated")
+	}
+	if _, ok := target.shardClusterWorkspaceMount["root"][logicalcluster.Name("root")]; !ok {
+		t.Fatal("setup: shardClusterWorkspaceMount[root][root] should be populated")
+	}
+	if _, ok := target.shardClusterWorkspaceNameErrorCode["root"][logicalcluster.Name("root")]; !ok {
+		t.Fatal("setup: shardClusterWorkspaceNameErrorCode[root][root] should be populated")
+	}
+	if _, ok := target.shardClusterWorkspaceName["root"][logicalcluster.Name("orgcluster")]; !ok {
+		t.Fatal("setup: shardClusterWorkspaceName[root][orgcluster] should be populated")
+	}
+	if _, ok := target.shardClusterParentCluster["root"][logicalcluster.Name("orgcluster")]; !ok {
+		t.Fatal("setup: shardClusterParentCluster[root][orgcluster] should be populated")
+	}
+
+	// Delete the CHILD logical cluster directly, without first deleting the
+	// Workspace CR. This is the out-of-order case the cleanup must handle.
+	target.DeleteLogicalCluster("root", newLogicalCluster("orgcluster"))
+
+	if _, ok := target.shardClusterWorkspaceName["root"][logicalcluster.Name("orgcluster")]; ok {
+		t.Error("shardClusterWorkspaceName[root][orgcluster] leaked after child LogicalCluster delete")
+	}
+	if _, ok := target.shardClusterParentCluster["root"][logicalcluster.Name("orgcluster")]; ok {
+		t.Error("shardClusterParentCluster[root][orgcluster] leaked after child LogicalCluster delete")
+	}
+	if _, ok := target.clusterShards[logicalcluster.Name("orgcluster")]; ok {
+		t.Error("clusterShards[orgcluster] leaked after LogicalCluster delete")
+	}
+
+	// Delete the PARENT logical cluster while child workspace entries still exist
+	// in the parent-keyed buckets. The whole bucket should be dropped.
+	target.DeleteLogicalCluster("root", newLogicalCluster("root"))
+
+	if _, ok := target.shardClusterWorkspaceNameCluster["root"][logicalcluster.Name("root")]; ok {
+		t.Error("shardClusterWorkspaceNameCluster[root][root] leaked after parent LogicalCluster delete")
+	}
+	if _, ok := target.shardClusterWorkspaceMount["root"][logicalcluster.Name("root")]; ok {
+		t.Error("shardClusterWorkspaceMount[root][root] leaked after parent LogicalCluster delete")
+	}
+	if _, ok := target.shardClusterWorkspaceNameErrorCode["root"][logicalcluster.Name("root")]; ok {
+		t.Error("shardClusterWorkspaceNameErrorCode[root][root] leaked after parent LogicalCluster delete")
+	}
+	if _, ok := target.shardClusterWorkspaceType["root"][logicalcluster.Name("root")]; ok {
+		t.Error("shardClusterWorkspaceType[root][root] leaked after parent LogicalCluster delete")
+	}
+}
+
 func TestDeleteWorkspace(t *testing.T) {
+	t.Parallel()
 	target := New(nil)
 
 	// ensure deleting not existent workspace won't blow up
@@ -425,6 +559,7 @@ func TestDeleteWorkspace(t *testing.T) {
 }
 
 func TestUpsertLogicalCluster(t *testing.T) {
+	t.Parallel()
 	target := New(nil)
 
 	target.UpsertShard("root", "https://root.io")
@@ -443,6 +578,7 @@ func TestUpsertLogicalCluster(t *testing.T) {
 
 // Since LookupURL uses Lookup method the following test is just a smoke tests.
 func TestLookupURL(t *testing.T) {
+	t.Parallel()
 	target := New(nil)
 
 	target.UpsertShard("root", "https://root.io")
@@ -468,6 +604,7 @@ func TestLookupURL(t *testing.T) {
 }
 
 func TestUpsertShard(t *testing.T) {
+	t.Parallel()
 	target := New(nil)
 
 	target.UpsertShard("root", "https://root.io")
@@ -494,6 +631,7 @@ func TestUpsertShard(t *testing.T) {
 }
 
 func TestUpsertWorkspace(t *testing.T) {
+	t.Parallel()
 	target := New(nil)
 
 	target.UpsertShard("root", "https://root.io")
@@ -559,5 +697,193 @@ func withURL(ws *tenancyv1alpha1.Workspace, url string) *tenancyv1alpha1.Workspa
 func newLogicalCluster(cluster string) *corev1alpha1.LogicalCluster {
 	return &corev1alpha1.LogicalCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "cluster", Annotations: map[string]string{"kcp.io/cluster": cluster}},
+	}
+}
+
+// TestMigrationDetection verifies that RecentlyMigrated only reports true when a
+// logical cluster actually changes shards (a migration), not on first insert or
+// repeated upserts to the same shard.
+func TestMigrationDetection(t *testing.T) {
+	t.Parallel()
+	target := New(nil)
+
+	cluster := logicalcluster.Name("34")
+
+	// First observation of the logical cluster is not a migration.
+	target.UpsertLogicalCluster("root", newLogicalCluster("34"))
+	if target.RecentlyMigrated(cluster) {
+		t.Fatal("first upsert must not be considered a migration")
+	}
+
+	// Repeated upsert to the same shard is not a migration.
+	target.UpsertLogicalCluster("root", newLogicalCluster("34"))
+	if target.RecentlyMigrated(cluster) {
+		t.Fatal("re-upsert to the same shard must not be considered a migration")
+	}
+
+	// Changing shards is a migration.
+	target.UpsertLogicalCluster("amber", newLogicalCluster("34"))
+	if !target.RecentlyMigrated(cluster) {
+		t.Fatal("changing shards must be considered a migration")
+	}
+
+	// A different, never-migrated cluster is not affected.
+	if target.RecentlyMigrated(logicalcluster.Name("99")) {
+		t.Fatal("unrelated cluster must not be considered migrated")
+	}
+}
+
+// TestMigrationGraceExpiry verifies RecentlyMigrated returns false once the
+// grace period elapses, and that the entry is pruned.
+func TestMigrationGraceExpiry(t *testing.T) {
+	t.Parallel()
+	target := New(nil)
+
+	now := time.Now()
+	target.now = func() time.Time { return now }
+	target.migrationGracePeriod = 30 * time.Second
+
+	cluster := logicalcluster.Name("34")
+	target.UpsertLogicalCluster("root", newLogicalCluster("34"))
+	target.UpsertLogicalCluster("amber", newLogicalCluster("34"))
+
+	if !target.RecentlyMigrated(cluster) {
+		t.Fatal("expected cluster to be recently migrated within the grace period")
+	}
+
+	// Advance time past the grace period.
+	now = now.Add(31 * time.Second)
+	if target.RecentlyMigrated(cluster) {
+		t.Fatal("expected cluster to no longer be recently migrated after grace period")
+	}
+
+	// The entry should have been pruned lazily.
+	_, found := target.migratedAt.Load(cluster)
+	if found {
+		t.Fatal("expected migratedAt entry to be pruned after grace period")
+	}
+}
+
+// TestMigrationForceClosesInflightWatches verifies that an in-flight watch
+// context is cancelled when its logical cluster changes shards, and that a
+// watch for a different cluster is left untouched.
+func TestMigrationForceClosesInflightWatches(t *testing.T) {
+	t.Parallel()
+	target := New(nil)
+
+	cluster := logicalcluster.Name("34")
+	target.UpsertLogicalCluster("root", newLogicalCluster("34"))
+
+	// Open an in-flight watch context and make sure it is cancelled on migration.
+	ctx, cancel := target.ClusterContext(context.Background(), cluster)
+	t.Cleanup(cancel)
+
+	target.UpsertLogicalCluster("amber", newLogicalCluster("34"))
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(wait.ForeverTestTimeout):
+		t.Fatal("expected in-flight watch context to be cancelled on shard change")
+	}
+
+	// A watch opened *after* the migration must be live, not stuck in
+	// a sticky cancelled state.
+	//
+	// When a cluster is migrated context manager cancels its context
+	// and later deletes it.
+	//
+	// By getting a context here we validate the context for the
+	// migrated cluster is a valid active, context and not the cancelled
+	// one that would prevent new connections.
+	reconnectCtx, reconnectCancel := target.ClusterContext(context.Background(), cluster)
+	t.Cleanup(reconnectCancel)
+	select {
+	case <-reconnectCtx.Done():
+		t.Fatal("expected post-migration watch context to stay open (sticky cancellation regression)")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// A watch context for a different logical cluster must not be cancelled when
+	// an unrelated cluster migrates.
+	other := logicalcluster.Name("99")
+	target.UpsertLogicalCluster("root", newLogicalCluster("99"))
+	otherCtx, otherCancel := target.ClusterContext(context.Background(), other)
+	t.Cleanup(otherCancel)
+
+	target.UpsertLogicalCluster("amber", newLogicalCluster("34")) // re-migrate 34, not 99
+	select {
+	case <-otherCtx.Done():
+		t.Fatal("expected watch context for unrelated cluster to stay open")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestLookupMountRequiresAcceptableURL(t *testing.T) {
+	t.Parallel()
+	target := New(nil)
+
+	target.UpsertShard("root", "https://root.io")
+	target.UpsertLogicalCluster("root", newLogicalCluster("root"))
+	target.UpsertWorkspace("root", newWorkspace("org", "root", "34"))
+	target.UpsertLogicalCluster("root", newLogicalCluster("34"))
+
+	ref := tenancyv1alpha1.ObjectReference{Kind: "KubeCluster", Name: "prod-cluster", APIVersion: "proxy.kcp.dev/v1alpha1"}
+	for _, insecure := range []string{
+		"http://kcp.dev.local/services/custom-url/proxy",
+		"https://user:pass@kcp.dev.local/services/custom-url/proxy",
+		"https://kcp.dev.local/services/custom-url/proxy?watch=true",
+		"kcp.dev.local/services/custom-url/proxy",
+	} {
+		target.UpsertWorkspace("root", withURL(withPhase(newWorkspaceWithMount("mount", "34", "", ref), "Ready"), insecure))
+		if r, found := target.Lookup(logicalcluster.NewPath("root:org:mount")); found {
+			t.Errorf("mount with URL %q must not be routable, got %+v", insecure, r)
+		}
+		if r, found := target.LookupURL(logicalcluster.NewPath("root:org:mount")); found {
+			t.Errorf("mount with URL %q must not be routable, got %+v", insecure, r)
+		}
+	}
+
+	target.UpsertWorkspace("root", withURL(withPhase(newWorkspaceWithMount("mount", "34", "", ref), "Ready"), "https://kcp.dev.local/services/custom-url/proxy"))
+	r, found := target.Lookup(logicalcluster.NewPath("root:org:mount"))
+	if !found {
+		t.Fatal("expected to find the mount")
+	}
+	if !r.IsMount() {
+		t.Fatalf("expected a mount result, got %+v", r)
+	}
+	if r.URL != "https://kcp.dev.local/services/custom-url/proxy" || r.Shard != "root" {
+		t.Fatalf("unexpected result %+v", r)
+	}
+}
+
+func TestLookupURLRoutesMountsToParentShard(t *testing.T) {
+	t.Parallel()
+	target := New(nil)
+
+	target.UpsertShard("root", "https://root.io")
+	target.UpsertShard("beta", "https://beta.io/")
+	target.UpsertLogicalCluster("root", newLogicalCluster("root"))
+	target.UpsertWorkspace("root", newWorkspace("org", "root", "34"))
+	target.UpsertLogicalCluster("beta", newLogicalCluster("34"))
+	target.UpsertWorkspace("beta", withURL(withPhase(newWorkspaceWithMount("mount", "34", "", tenancyv1alpha1.ObjectReference{
+		Kind: "KubeCluster", Name: "prod-cluster", APIVersion: "proxy.kcp.dev/v1alpha1",
+	}), "Ready"), "https://kcp.dev.local/services/custom-url/proxy"))
+
+	// Mount traffic is not sent to the mount target by the front-proxy. It is sent
+	// to the shard hosting the parent workspace, where it is authenticated and
+	// audited before the shard's mount proxy forwards it to the target. The shard
+	// resolves the mount relative to the parent's logical cluster name.
+	r, found := target.LookupURL(logicalcluster.NewPath("root:org:mount"))
+	if !found {
+		t.Fatal("expected to find a URL for the mount")
+	}
+	if r.URL != "https://beta.io/clusters/34:mount" {
+		t.Fatalf("unexpected url = %v, expected = %v", r.URL, "https://beta.io/clusters/34:mount")
+	}
+	if r.Shard != "beta" {
+		t.Fatalf("unexpected shard = %v, expected = %v", r.Shard, "beta")
+	}
+	if r.Cluster != "" {
+		t.Fatalf("unexpected cluster = %v for a mount", r.Cluster)
 	}
 }

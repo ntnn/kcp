@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,10 +21,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -34,7 +34,6 @@ import (
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/transport"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
@@ -46,18 +45,21 @@ import (
 	"github.com/kcp-dev/sdk/apis/tenancy/initialization"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
+	"github.com/kcp-dev/virtual-workspace-framework/framework"
+	virtualworkspacesdynamic "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apidefinition"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apiserver"
+	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/handler"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/rootapiserver"
 
 	rootphase0 "github.com/kcp-dev/kcp/config/root-phase0"
+	"github.com/kcp-dev/kcp/pkg/authorization"
 	"github.com/kcp-dev/kcp/pkg/authorization/delegated"
+	"github.com/kcp-dev/kcp/pkg/indexers"
 	"github.com/kcp-dev/kcp/pkg/server/requestinfo"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework"
-	virtualworkspacesdynamic "github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/apidefinition"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/apiserver"
-	dynamiccontext "github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/context"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/handler"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/rootapiserver"
 	"github.com/kcp-dev/kcp/pkg/virtual/initializingworkspaces"
+	virtualshared "github.com/kcp-dev/kcp/pkg/virtual/shared"
 )
 
 const (
@@ -66,15 +68,28 @@ const (
 	workspaceContentName        = initializingworkspaces.VirtualWorkspaceName + "-workspace-content"
 )
 
+// BuildVirtualWorkspace builds the initializing-workspaces virtual workspaces.
+//
+// externalLogicalClusterAdminClient is used for SubjectAccessReview calls
+// against the workspacetype's logical cluster. In sharded deployments, the
+// workspacetype can live on a different shard than the workspace, so this
+// client must be able to reach any cluster (typically routed through the
+// front-proxy). When nil, kubeClusterClient is used as a fallback, which only
+// works when the workspacetype is co-located with the VW's shard.
 func BuildVirtualWorkspace(
 	cfg *rest.Config,
 	rootPathPrefix string,
 	dynamicClusterClient kcpdynamic.ClusterInterface,
-	kubeClusterClient kcpkubernetesclientset.ClusterInterface,
-	wildcardKcpInformers kcpinformers.SharedInformerFactory,
+	kubeClusterClient, externalLogicalClusterAdminClient kcpkubernetesclientset.ClusterInterface,
+	wildcardKcpInformers, cachedKcpInformers kcpinformers.SharedInformerFactory,
 ) ([]rootapiserver.NamedVirtualWorkspace, error) {
 	if !strings.HasSuffix(rootPathPrefix, "/") {
 		rootPathPrefix += "/"
+	}
+
+	sarKubeClusterClient := externalLogicalClusterAdminClient
+	if sarKubeClusterClient == nil {
+		sarKubeClusterClient = kubeClusterClient
 	}
 
 	logicalClusterResource := apisv1alpha1.APIResourceSchema{}
@@ -93,7 +108,20 @@ func BuildVirtualWorkspace(
 		v.Schema.Raw = bs // wipe schemas. We don't want validation here.
 	}
 
-	cachingAuthorizer := delegated.NewCachingAuthorizer(kubeClusterClient, authorizerWithCache, delegated.CachingOptions{})
+	// The inner DelegatedAuthorizer caches SAR decisions. Its default
+	// DenyCacheTTL is 30s, which is the same as wait.ForeverTestTimeout and
+	// — more importantly — far longer than the moment between a user being
+	// granted the "initialize" verb and using it. A just-in-time RBAC grant
+	// followed by an immediate request through the VW would otherwise be
+	// rejected for 30s after the first racing SAR returned Deny (e.g. the
+	// shard's RBAC informer hadn't observed the new ClusterRoleBinding yet),
+	// because every subsequent SAR within that window hits the cached Deny.
+	// 5s leaves room to absorb a brief denial loop without hammering the SAR
+	// endpoint on a genuine denial, while keeping fresh grants effective
+	// within one or two poll intervals of typical test/operator workflows.
+	cachingAuthorizer := delegated.NewCachingAuthorizer(sarKubeClusterClient, authorizerWithCache, delegated.CachingOptions{
+		Options: delegated.Options{DenyCacheTTL: 5 * time.Second},
+	})
 	wildcardLogicalClusters := &virtualworkspacesdynamic.DynamicVirtualWorkspace{
 		RootPathResolver: framework.RootPathResolverFunc(func(urlPath string, requestContext context.Context) (accepted bool, prefixToStrip string, completedContext context.Context) {
 			cluster, apiDomain, prefixToStrip, ok := digestUrl(urlPath, rootPathPrefix)
@@ -201,7 +229,9 @@ func BuildVirtualWorkspace(
 				defer close(workspaceContentReadyCh)
 
 				for name, informer := range map[string]cache.SharedIndexInformer{
-					"logicalclusters": wildcardKcpInformers.Core().V1alpha1().LogicalClusters().Informer(),
+					"logicalclusters":       wildcardKcpInformers.Core().V1alpha1().LogicalClusters().Informer(),
+					"workspacetypes":        wildcardKcpInformers.Tenancy().V1alpha1().WorkspaceTypes().Informer(),
+					"cached-workspacetypes": cachedKcpInformers.Tenancy().V1alpha1().WorkspaceTypes().Informer(),
 				} {
 					if !cache.WaitForNamedCacheSync(name, hookContext.Done(), informer.HasSynced) {
 						klog.Background().Error(nil, "informer not synced")
@@ -220,6 +250,14 @@ func BuildVirtualWorkspace(
 			}
 
 			lister := wildcardKcpInformers.Core().V1alpha1().LogicalClusters().Lister()
+			localWSTIndexer := wildcardKcpInformers.Tenancy().V1alpha1().WorkspaceTypes().Informer().GetIndexer()
+			cachedWSTIndexer := cachedKcpInformers.Tenancy().V1alpha1().WorkspaceTypes().Informer().GetIndexer()
+			indexers.AddIfNotPresentOrDie(localWSTIndexer, cache.Indexers{
+				indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
+			})
+			indexers.AddIfNotPresentOrDie(cachedWSTIndexer, cache.Indexers{
+				indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
+			})
 			return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				cluster, err := genericapirequest.ClusterNameFrom(request.Context())
 				if err != nil {
@@ -238,15 +276,73 @@ func BuildVirtualWorkspace(
 					return
 				}
 
-				rawInfo, ok := logicalCluster.Annotations[tenancyv1alpha1.ExperimentalWorkspaceOwnerAnnotationKey]
-				if !ok {
-					http.Error(writer, fmt.Sprintf("LogicalCluster %s|%s had no user recorded", cluster, corev1alpha1.LogicalClusterName), http.StatusInternalServerError)
+				// Refuse to proxy a request that re-enters "/services/" (another virtual
+				// workspace, e.g. /services/admin).
+				if authorization.LifecycleProxyPathEscapesWorkspace(request.URL.Path) {
+					http.Error(writer, fmt.Sprintf("initializer %q may not access virtual workspace endpoints (/services/...) outside the workspace being initialized", initializer), http.StatusForbidden)
 					return
 				}
-				var info authenticationv1.UserInfo
-				if err := json.Unmarshal([]byte(rawInfo), &info); err != nil {
-					http.Error(writer, fmt.Sprintf("could not unmarshal user info for cluster %q: %v", cluster, err), http.StatusInternalServerError)
+
+				// Fetch the WorkspaceType the initializer originates from. If it
+				// declares initializerPermissions, evaluate the request in-process
+				// against those rules and forward with the controller's own identity
+				// plus a synthetic group; otherwise fall back to owner impersonation.
+				// See resolveInitializerWorkspaceType for the fail-closed policy.
+				//
+				// TODO(mjudeikis): Fallback should be removed in favor of always requiring
+				// initializerPermissions in the future releases.
+				wst, lookupErr := resolveInitializerWorkspaceType(initializer, localWSTIndexer, cachedWSTIndexer)
+				if lookupErr != nil {
+					klog.FromContext(request.Context()).Error(lookupErr, "WorkspaceType lookup for initializer failed; refusing to proxy", "initializer", initializer)
+					http.Error(writer, fmt.Sprintf("initializer %q: WorkspaceType not found in local or cached indexer; refusing to fall back to owner impersonation: %v", initializer, lookupErr), http.StatusServiceUnavailable)
 					return
+				}
+
+				if wst != nil && len(wst.Spec.InitializerPermissions) > 0 {
+					caller := authorization.RequestUserInfo(request)
+					if caller == nil {
+						http.Error(writer, "no user information in request context", http.StatusInternalServerError)
+						return
+					}
+					// Evaluate the initializer's permissions. If not allowed, reject the request. If
+					// allowed, forward with the initializer's identity plus a synthetic group that signals.
+					if allowed, reason := authorization.EvaluateLifecyclePermissions(request, caller, wst.Spec.InitializerPermissions); !allowed {
+						http.Error(writer, fmt.Sprintf("initializer %q denied by initializerPermissions: %s", initializer, reason), http.StatusForbidden)
+						return
+					}
+
+					thisCfg := rest.CopyConfig(cfg)
+					extra := map[string][]string{}
+					for k, v := range caller.GetExtra() {
+						extra[k] = v
+					}
+					thisCfg.Impersonate = rest.ImpersonationConfig{
+						UserName: caller.GetName(),
+						UID:      caller.GetUID(),
+						// Inject the synthetic group so the workspace content authorizer
+						// trusts this request as pre-authorized by the VW. This will be used for auditing.
+						Groups: append([]string{authorization.InitializerGroup(initializer)}, caller.GetGroups()...),
+						Extra:  extra,
+					}
+					authenticatingTransport, err := rest.TransportFor(thisCfg)
+					if err != nil {
+						http.Error(writer, fmt.Sprintf("could not create round-tripper: %v", err), http.StatusInternalServerError)
+						return
+					}
+					virtualshared.ServeProxy(writer, request, forwardedHost, authenticatingTransport)
+					return
+				}
+
+				// Owner-impersonation fallback (mode 2).
+				if logicalCluster.Spec.CreatedBy == nil {
+					http.Error(writer, fmt.Sprintf("LogicalCluster %s|%s had no createdBy recorded", cluster, corev1alpha1.LogicalClusterName), http.StatusInternalServerError)
+					return
+				}
+				info := authenticationv1.UserInfo{
+					Username: logicalCluster.Spec.CreatedBy.Username,
+					UID:      logicalCluster.Spec.CreatedBy.UID,
+					Groups:   logicalCluster.Spec.CreatedBy.Groups,
+					Extra:    logicalCluster.Spec.CreatedBy.Extra,
 				}
 				extra := map[string][]string{}
 				for k, v := range info.Extra {
@@ -262,30 +358,10 @@ func BuildVirtualWorkspace(
 				}
 				authenticatingTransport, err := rest.TransportFor(thisCfg)
 				if err != nil {
-					http.Error(writer, fmt.Sprintf("could create round-tripper: %v", err), http.StatusInternalServerError)
+					http.Error(writer, fmt.Sprintf("could not create round-tripper: %v", err), http.StatusInternalServerError)
 					return
 				}
-				proxy := &httputil.ReverseProxy{
-					Director: func(request *http.Request) {
-						for _, header := range []string{
-							"Authorization",
-							transport.ImpersonateUserHeader,
-							transport.ImpersonateUIDHeader,
-							transport.ImpersonateGroupHeader,
-						} {
-							request.Header.Del(header)
-						}
-						for key := range request.Header {
-							if strings.HasPrefix(key, transport.ImpersonateUserExtraHeaderPrefix) {
-								request.Header.Del(key)
-							}
-						}
-						request.URL.Scheme = forwardedHost.Scheme
-						request.URL.Host = forwardedHost.Host
-					},
-					Transport: authenticatingTransport,
-				}
-				proxy.ServeHTTP(writer, request)
+				virtualshared.ServeProxy(writer, request, forwardedHost, authenticatingTransport)
 			}), nil
 		}),
 	}
@@ -364,6 +440,30 @@ func digestUrl(urlPath, rootPathPrefix string) (
 	return cluster, dynamiccontext.APIDomainKey(initializerName), strings.TrimSuffix(urlPath, realPath), true
 }
 
+// resolveInitializerWorkspaceType resolves the WorkspaceType referenced by an
+// initializer. It returns:
+//
+//   - (wst, nil)  — the initializer encodes a WST reference and the WST was
+//     found in the local or cache-server indexer; caller should evaluate
+//     wst.Spec.InitializerPermissions (Mode 1).
+//   - (nil, nil)  — the initializer is a known system initializer
+//     (e.g. "system:apibindings"): well-formed but intentionally not backed
+//     by a WST. Caller should fall through to owner impersonation (Mode 2).
+//   - (nil, err)  — either the initializer is malformed (TypeFrom failed) or
+//     it encodes a real (non-system) WST reference that neither indexer has.
+//     Both cases must fail closed: granting Mode 2 to an initializer we
+//     cannot validate would be a silent privilege escalation.
+func resolveInitializerWorkspaceType(
+	initializer corev1alpha1.LogicalClusterInitializer,
+	localWSTIndexer, cachedWSTIndexer cache.Indexer,
+) (*tenancyv1alpha1.WorkspaceType, error) {
+	return virtualshared.ResolveLifecycleWorkspaceType(
+		"initializer", string(initializer),
+		func() (logicalcluster.Name, string, error) { return initialization.TypeFrom(initializer) },
+		localWSTIndexer, cachedWSTIndexer,
+	)
+}
+
 // URLFor returns the absolute path for the specified initializer.
 func URLFor(initializerName corev1alpha1.LogicalClusterInitializer) string {
 	// TODO(ncdc): make /services hard-coded everywhere instead of configurable.
@@ -408,6 +508,12 @@ func (a *singleResourceAPIDefinitionSetProvider) GetAPIDefinitionSet(ctx context
 var _ apidefinition.APIDefinitionSetGetter = &singleResourceAPIDefinitionSetProvider{}
 
 func authorizerWithCache(ctx context.Context, cache delegated.Cache, attr authorizer.Attributes) (authorizer.Decision, string, error) {
+	// No impersonation is allowed through this virtual workspace. Any request attempting
+	// to use the "impersonate" verb will be denied outright.
+	if attr.GetVerb() == "impersonate" {
+		return authorizer.DecisionDeny, "impersonation is not permitted on the initializingworkspaces virtual workspace", nil
+	}
+
 	clusterName, name, err := initialization.TypeFrom(corev1alpha1.LogicalClusterInitializer(dynamiccontext.APIDomainKeyFrom(ctx)))
 	if err != nil {
 		klog.FromContext(ctx).V(2).Info(err.Error())

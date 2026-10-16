@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -48,7 +48,7 @@ func (o *Options) AddFlags(fss *cliflag.NamedFlagSets) {
 	logsapiv1.AddFlags(o.Logs, fss.FlagSet("logging"))
 
 	// add flags that are filtered out from upstream, but overridden here with our own version
-	fss.FlagSet("KCP").Var(kcpfeatures.NewFlagValue(), "feature-gates", ""+
+	fss.FlagSet("kcp").Var(kcpfeatures.NewFlagValue(), "feature-gates", ""+
 		"A set of key=value pairs that describe feature gates for alpha/experimental features. "+
 		"Options are:\n"+strings.Join(kcpfeatures.KnownFeatures(), "\n")) // hide kube-only gates
 }
@@ -58,9 +58,5 @@ func (o *Options) Complete() error {
 }
 
 func (o *Options) Validate() []error {
-	var errs []error
-
-	errs = append(errs, o.Proxy.Validate()...)
-
-	return errs
+	return o.Proxy.Validate()
 }

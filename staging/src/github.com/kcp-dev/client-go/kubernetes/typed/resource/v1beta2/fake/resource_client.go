@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -44,6 +44,10 @@ func (c *ResourceV1beta2ClusterClient) DeviceClasses() kcpresourcev1beta2.Device
 	return newFakeDeviceClassClusterClient(c)
 }
 
+func (c *ResourceV1beta2ClusterClient) DeviceTaintRules() kcpresourcev1beta2.DeviceTaintRuleClusterInterface {
+	return newFakeDeviceTaintRuleClusterClient(c)
+}
+
 func (c *ResourceV1beta2ClusterClient) ResourceClaims() kcpresourcev1beta2.ResourceClaimClusterInterface {
 	return newFakeResourceClaimClusterClient(c)
 }
@@ -63,6 +67,10 @@ type ResourceV1beta2Client struct {
 
 func (c *ResourceV1beta2Client) DeviceClasses() resourcev1beta2.DeviceClassInterface {
 	return newFakeDeviceClassClient(c.Fake, c.ClusterPath)
+}
+
+func (c *ResourceV1beta2Client) DeviceTaintRules() resourcev1beta2.DeviceTaintRuleInterface {
+	return newFakeDeviceTaintRuleClient(c.Fake, c.ClusterPath)
 }
 
 func (c *ResourceV1beta2Client) ResourceClaims(namespace string) resourcev1beta2.ResourceClaimInterface {

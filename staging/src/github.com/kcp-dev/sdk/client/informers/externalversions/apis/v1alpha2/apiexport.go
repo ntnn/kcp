@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ func NewAPIExportClusterInformer(client kcpcluster.ClusterInterface, resyncPerio
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredAPIExportClusterInformer(client kcpcluster.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions kcpinternalinterfaces.TweakListOptionsFunc) kcpcache.ScopeableSharedIndexInformer {
 	return kcpinformers.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
@@ -76,7 +76,7 @@ func NewFilteredAPIExportClusterInformer(client kcpcluster.ClusterInterface, res
 				}
 				return client.ApisV1alpha2().APIExports().Watch(context.Background(), options)
 			},
-		},
+		}, client),
 		&kcpapisv1alpha2.APIExport{},
 		resyncPeriod,
 		indexers,
@@ -149,7 +149,7 @@ func NewAPIExportInformer(client kcpversioned.Interface, resyncPeriod time.Durat
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredAPIExportInformer(client kcpversioned.Interface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions kcpinternalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
 	return cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
@@ -162,7 +162,7 @@ func NewFilteredAPIExportInformer(client kcpversioned.Interface, resyncPeriod ti
 				}
 				return client.ApisV1alpha2().APIExports().Watch(context.Background(), options)
 			},
-		},
+		}, client),
 		&kcpapisv1alpha2.APIExport{},
 		resyncPeriod,
 		indexers,

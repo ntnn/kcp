@@ -67,7 +67,7 @@ You can run kcp inside a [Lima](https://github.com/lima-vm/lima)-managed VM, whi
     This is essentially a development environment, where one can start a single instance of kcp for testing or limited-scope use cases. This is in no way intended for production usage.
 
 Create a Lima template for kcp and save the following as `kcp.yaml`:
- ```yaml
+```yaml
 minimumLimaVersion: 1.1.0
 
 base: template://_images/ubuntu-lts
@@ -136,17 +136,17 @@ probes:
 
 copyToHost:
 - guest: "/var/.kcp/admin.kubeconfig"
-  host: "{{ '{{.Dir}}' }}/copied-from-guest/kubeconfig.yaml"
+  host: "{{.Dir}}/copied-from-guest/kubeconfig.yaml"
   deleteOnStop: true
 
 message: |
   To run `kubectl` on the host (assumes kubectl is installed), run:
   ------
-  export KUBECONFIG="{{ '{{.Dir}}' }}/copied-from-guest/kubeconfig.yaml"
+  export KUBECONFIG="{{.Dir}}/copied-from-guest/kubeconfig.yaml"
   kubectl get workspaces
   ------
 
- ```
+```
 Initialize the VM
 ```sh
 limactl create --name=kcp ./kcp.yaml
@@ -159,7 +159,7 @@ limactl start kcp --vm-type=qemu
 !!! info
 On macOS, Lima may default to vz (Apple Virtualization), while on Linux it defaults to qemu, and on Windows to wsl2. If you want consistency across environments, you can explicitly pass --vm-type=qemu when starting the VM.
 
-Export the KCP kubeconfig
+Export the kcp kubeconfig
 ```sh
 export KUBECONFIG="/Users/<user>/.lima/kcp/copied-from-guest/kubeconfig.yaml"
 ```
@@ -175,3 +175,29 @@ logicalclusters             core.kcp.io/v1alpha1     false   LogicalCluster
 ...
 ```
 
+## KubeStellar Console
+
+[KubeStellar Console](https://console.kubestellar.io) is an open-source Kubernetes dashboard that provides a web-based interface for kcp. It connects via kubeconfig and works read-only without requiring any cluster-side agent.
+
+Features relevant to kcp users include:
+
+- **Guided kcp installation mission** — a step-by-step workflow that walks you through setting up kcp and creating your first workspaces
+- **Workspace visualization** — browse and navigate the kcp workspace hierarchy
+- **API browsing** — explore API resources exposed by kcp
+- **Multi-tenant observability** — view resources across workspaces from a single pane
+- **AI-assisted operations** — natural-language queries against your kcp environment
+
+### Quick start
+
+Install with a single command:
+
+```sh
+curl -sL https://raw.githubusercontent.com/kubestellar/console/main/install.sh | bash
+```
+
+Or deploy into a Kubernetes cluster — see the [GitHub repository](https://github.com/kubestellar/console) for Helm chart and other installation options.
+
+### Links
+
+- Live demo: [console.kubestellar.io](https://console.kubestellar.io)
+- Source: [github.com/kubestellar/console](https://github.com/kubestellar/console)

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,8 +30,12 @@ import (
 	"k8s.io/component-base/logs"
 	logsapiv1 "k8s.io/component-base/logs/api/v1"
 
+	frameworkvwoptions "github.com/kcp-dev/virtual-workspace-framework/pkg/options"
+
 	cacheoptions "github.com/kcp-dev/kcp/pkg/cache/client/options"
 	corevwoptions "github.com/kcp-dev/kcp/pkg/virtual/options"
+
+	_ "github.com/kcp-dev/kcp/pkg/logging/json/register"
 )
 
 // DefaultRootPathPrefix is basically constant forever, or we risk a breaking change. The
@@ -42,21 +46,21 @@ const DefaultRootPathPrefix string = "/services"
 type Options struct {
 	Output io.Writer
 
-	KubeconfigFile   string
-	Context          string
-	RootPathPrefix   string
-	ShardExternalURL string
+	KubeconfigFile                            string
+	ExternalLogicalClusterAdminKubeconfigFile string
+	Context                                   string
+	RootPathPrefix                            string
 
 	Cache          cacheoptions.Cache
 	SecureServing  genericapiserveroptions.SecureServingOptions
 	Authentication genericapiserveroptions.DelegatingAuthenticationOptions
-	Authorization  corevwoptions.Authorization
+	Authorization  frameworkvwoptions.Authorization
 	Audit          genericapiserveroptions.AuditOptions
 
 	Logs *logs.Options
 
 	CoreVirtualWorkspaces     corevwoptions.Options
-	VirtualWorkspaceAdmission corevwoptions.Admission
+	VirtualWorkspaceAdmission frameworkvwoptions.Admission
 
 	ProfilerAddress string
 }
@@ -65,18 +69,17 @@ func NewOptions() *Options {
 	opts := &Options{
 		Output: nil,
 
-		RootPathPrefix:   DefaultRootPathPrefix,
-		ShardExternalURL: "",
+		RootPathPrefix: DefaultRootPathPrefix,
 
 		Cache:          *cacheoptions.NewCache(),
 		SecureServing:  *genericapiserveroptions.NewSecureServingOptions(),
 		Authentication: *genericapiserveroptions.NewDelegatingAuthenticationOptions(),
-		Authorization:  *corevwoptions.NewAuthorization(),
+		Authorization:  *frameworkvwoptions.NewAuthorization(),
 		Audit:          *genericapiserveroptions.NewAuditOptions(),
 		Logs:           logs.NewOptions(),
 
 		CoreVirtualWorkspaces:     *corevwoptions.NewOptions(),
-		VirtualWorkspaceAdmission: *corevwoptions.NewAdmission(),
+		VirtualWorkspaceAdmission: *frameworkvwoptions.NewAdmission(),
 		ProfilerAddress:           "",
 	}
 
@@ -95,11 +98,18 @@ func (o *Options) AddFlags(flags *pflag.FlagSet) {
 	logsapiv1.AddFlags(o.Logs, flags)
 	o.CoreVirtualWorkspaces.AddFlags(flags)
 
-	flags.StringVar(&o.ShardExternalURL, "shard-external-url", o.ShardExternalURL, "URL used by outside clients to talk to the kcp shard this virtual workspace is related to")
+	flags.String("shard-external-url", "", "DEPRECATED: URL used by outside clients to talk to the kcp shard this virtual workspace is related to")
+	flags.MarkHidden("shard-external-url") //nolint:errcheck
 
 	flags.StringVar(&o.KubeconfigFile, "kubeconfig", o.KubeconfigFile,
-		"The kubeconfig file of the KCP instance that hosts workspaces.")
+		"The kubeconfig file of the kcp instance that hosts workspaces.")
 	_ = cobra.MarkFlagRequired(flags, "kubeconfig")
+
+	flags.StringVar(&o.ExternalLogicalClusterAdminKubeconfigFile, "external-logical-cluster-admin-kubeconfig", o.ExternalLogicalClusterAdminKubeconfigFile,
+		"Optional kubeconfig pointing at the front-proxy. Used by virtual workspaces "+
+			"to issue SubjectAccessReview against clusters that may live on a different "+
+			"shard than this VW (e.g. a workspacetype's cluster). When unset, falls back "+
+			"to --kubeconfig, which only works in non-sharded deployments.")
 
 	flags.StringVar(&o.Context, "context", o.Context, "Name of the context in the kubeconfig file to use")
 	flags.StringVar(&o.ProfilerAddress, "profiler-address", "", "[Address]:port to bind the profiler to")
@@ -111,10 +121,6 @@ func (o *Options) Validate() error {
 	errs = append(errs, o.SecureServing.Validate()...)
 	errs = append(errs, o.Authentication.Validate()...)
 	errs = append(errs, o.CoreVirtualWorkspaces.Validate()...)
-
-	if len(o.ShardExternalURL) == 0 {
-		errs = append(errs, fmt.Errorf(("--shard-external-url is required")))
-	}
 
 	if len(o.KubeconfigFile) == 0 {
 		errs = append(errs, fmt.Errorf("--kubeconfig is required for this command"))

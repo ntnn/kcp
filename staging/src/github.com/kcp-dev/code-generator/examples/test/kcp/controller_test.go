@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ limitations under the License.
 package kcp
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -36,12 +35,13 @@ import (
 
 // TestFakeClient demonstrates how to use a fake client with SharedInformerFactory in tests.
 func TestFakeClient(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Parallel()
+
+	ctx := t.Context()
 
 	watcherStarted := make(chan struct{})
 	// Create the fake client.
-	client := fake.NewSimpleClientset()
+	client := fake.NewSimpleClientset() //nolint:staticcheck
 	// A catch-all watch reactor that allows us to inject the watcherStarted channel.
 	client.PrependWatchReactor("*", func(action clienttesting.Action) (handled bool, ret watch.Interface, err error) {
 		gvr := action.GetResource()

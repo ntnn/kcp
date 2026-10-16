@@ -1,6 +1,6 @@
 /*
 Copyright 2018 The Kubernetes Authors.
-Modifications Copyright 2022 The KCP Authors.
+Modifications Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -62,7 +62,7 @@ func NewSimpleMetadataClient(scheme *runtime.Scheme, objects ...runtime.Object) 
 	}
 
 	codecs := serializer.NewCodecFactory(scheme)
-	o := kcptesting.NewObjectTracker(scheme, codecs.UniversalDecoder())
+	o := kcptesting.NewObjectTracker(scheme, codecs.UniversalDeserializer())
 	for _, obj := range objects {
 		metaObj, ok := obj.(logicalcluster.Object)
 		if !ok {
@@ -173,6 +173,10 @@ func (c *FakeMetadataClient) Tracker() kcptesting.ScopedObjectTracker {
 // Resource returns an interface for accessing the provided resource.
 func (c *FakeMetadataClient) Resource(resource schema.GroupVersionResource) metadata.Getter {
 	return &metadataResourceClient{client: c, resource: resource}
+}
+
+func (c *FakeMetadataClient) IsWatchListSemanticsUnSupported() bool {
+	return true
 }
 
 type metadataResourceClient struct {
@@ -426,6 +430,7 @@ func (c *metadataResourceClient) List(ctx context.Context, opts metav1.ListOptio
 }
 
 func (c *metadataResourceClient) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	opts.Watch = true
 	switch {
 	case len(c.namespace) == 0:
 		return c.client.Fake.

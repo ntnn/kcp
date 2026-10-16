@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,11 +30,11 @@ import (
 
 	kcpkubernetesinformers "github.com/kcp-dev/client-go/informers"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
+	frameworkvwoptions "github.com/kcp-dev/virtual-workspace-framework/pkg/options"
+	virtualrootapiserver "github.com/kcp-dev/virtual-workspace-framework/pkg/rootapiserver"
 
 	virtualcommandoptions "github.com/kcp-dev/kcp/cmd/virtual-workspaces/options"
 	kcpserveroptions "github.com/kcp-dev/kcp/pkg/server/options"
-	virtualrootapiserver "github.com/kcp-dev/kcp/pkg/virtual/framework/rootapiserver"
-	virtualoptions "github.com/kcp-dev/kcp/pkg/virtual/options"
 )
 
 type mux interface {
@@ -55,9 +55,10 @@ type CompletedVirtualConfig struct {
 func newVirtualConfig(
 	o kcpserveroptions.CompletedOptions,
 	config *rest.Config,
+	cacheConfig *rest.Config,
+	externalLogicalClusterAdminConfig *rest.Config,
 	kubeSharedInformerFactory kcpkubernetesinformers.SharedInformerFactory,
 	kcpSharedInformerFactory, cacheKcpSharedInformerFactory kcpinformers.SharedInformerFactory,
-	shardExternalURL func() string,
 ) (*VirtualConfig, error) {
 	scheme := runtime.NewScheme()
 	metav1.AddToGroupVersion(scheme, schema.GroupVersion{Group: "", Version: "v1"})
@@ -76,7 +77,7 @@ func newVirtualConfig(
 		return nil, err
 	}
 
-	authorizationOptions := virtualoptions.NewAuthorization()
+	authorizationOptions := frameworkvwoptions.NewAuthorization()
 	authorizationOptions.AlwaysAllowGroups = o.Authorization.AlwaysAllowGroups
 	authorizationOptions.AlwaysAllowPaths = o.Authorization.AlwaysAllowPaths
 	if err := authorizationOptions.ApplyTo(&recommendedConfig.Config, func() []virtualrootapiserver.NamedVirtualWorkspace {
@@ -85,7 +86,7 @@ func newVirtualConfig(
 		return nil, err
 	}
 
-	admissionOptions := virtualoptions.NewAdmission()
+	admissionOptions := frameworkvwoptions.NewAdmission()
 	if err := admissionOptions.ApplyTo(&recommendedConfig.Config, func() []virtualrootapiserver.NamedVirtualWorkspace {
 		return c.Extra.VirtualWorkspaces
 	}); err != nil {
@@ -94,8 +95,9 @@ func newVirtualConfig(
 
 	c.Extra.VirtualWorkspaces, err = o.Virtual.VirtualWorkspaces.NewVirtualWorkspaces(
 		config,
+		cacheConfig,
+		externalLogicalClusterAdminConfig,
 		virtualcommandoptions.DefaultRootPathPrefix,
-		shardExternalURL,
 		kubeSharedInformerFactory,
 		kcpSharedInformerFactory,
 		cacheKcpSharedInformerFactory,

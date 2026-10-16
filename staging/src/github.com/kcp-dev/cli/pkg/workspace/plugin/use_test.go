@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,6 +46,7 @@ import (
 )
 
 func TestUse(t *testing.T) {
+	t.Parallel()
 	homeWorkspace := logicalcluster.NewPath("root:users:ab:cd:user-name")
 
 	discoveryFor := func(pths ...string) map[logicalcluster.Path][]*metav1.APIResourceList {
@@ -736,6 +737,7 @@ func TestUse(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var got *clientcmdapi.Config
 
 			cluster := tt.config.Clusters[tt.config.Contexts[tt.config.CurrentContext].Cluster]
@@ -764,7 +766,7 @@ func TestUse(t *testing.T) {
 					objs = append(objs, obj)
 				}
 			}
-			client := kcpfakeclient.NewSimpleClientset(objs...)
+			client := kcpfakeclient.NewSimpleClientset(objs...) //nolint:staticcheck
 			client.PrependReactor("get", "workspaces", func(action kcptesting.Action) (handled bool, ret runtime.Object, err error) {
 				getAction := action.(kcptesting.GetAction)
 				if getAction.GetCluster() != core.RootCluster.Path() {

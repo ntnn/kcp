@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -104,18 +104,19 @@ func NewServer(c CompletedConfig, delegationTarget genericapiserver.DelegationTa
 
 		verbsProviderFactory: &storageAwareResourceVerbsProviderFactory{
 			getAPIExportByPath: getAPIExportByPath,
-			getAPIExportsByVirtualResourceIdentity: func(vrIdentity string) ([]*apisv1alpha2.APIExport, error) {
+			getAPIExportsByVirtualResourceFingerprint: func(fingerprint string) ([]*apisv1alpha2.APIExport, error) {
 				return indexers.ByIndexWithFallback[*apisv1alpha2.APIExport](
 					c.Extra.LocalAPIExportInformer.Informer().GetIndexer(),
 					c.Extra.GlobalAPIExportInformer.Informer().GetIndexer(),
-					indexers.APIExportByVirtualResourceIdentities,
-					vrIdentity,
+					indexers.APIExportByVirtualResourceFingerprint,
+					fingerprint,
 				)
 			},
 			virtualStorageClientOptions: &virtualStorageClientOptions{
 				VWClientConfig:                     c.Extra.VWClientConfig,
 				ThisShardName:                      shard.Name(c.Extra.ShardName),
 				ThisShardVirtualWorkspaceURLGetter: c.Extra.ShardVirtualWorkspaceURLGetter,
+				ThisShardLabels:                    c.Extra.ThisShardLabels,
 				GetUnstructuredEndpointSlice: func(ctx context.Context, cluster logicalcluster.Name, shard shard.Name, gvr schema.GroupVersionResource, name string) (*unstructured.Unstructured, error) {
 					// We assume the endpoint slice is cluster-scoped.
 					return c.Extra.DynamicClusterClient.
@@ -196,7 +197,7 @@ func apiResourcesForGroupVersion(ctx context.Context, requestedGroup, requestedV
 				continue
 			}
 
-			// HACK: support the case when we add core resources through CRDs (KCP scenario)
+			// HACK: support the case when we add core resources through CRDs (kcp scenario)
 			groupVersion := crd.Spec.Group + "/" + v.Name
 			if crd.Spec.Group == "" {
 				groupVersion = v.Name

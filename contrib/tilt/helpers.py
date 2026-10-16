@@ -1,4 +1,4 @@
-# Copyright 2026 The KCP Authors.
+# Copyright 2026 The kcp Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 def kcp_build(exe):
     local_resource(
         'build '+exe,
-        cmd='go build -o ./bin/{exe} ../../cmd/{exe}'.format(exe = exe),
+        cmd='CGO_ENABLED=0 GOOS=linux go build -o ./bin/{exe} ../../cmd/{exe}'.format(exe = exe),
         deps = [
             '../../cmd',
             '../../pkg',

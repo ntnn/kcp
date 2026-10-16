@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 )
 
 func TestWithLockedResources(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	expired := time.Now().Add(-1).UTC().Format(time.RFC3339)
 	notExpired := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
@@ -175,6 +176,7 @@ func TestWithLockedResources(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			got, locked, skipped, err := WithLockedResources(tt.crds, now, tt.lc, tt.grs, tt.binding)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("WithLockedResources() error = %v, wantErr %v", err, tt.wantErr)

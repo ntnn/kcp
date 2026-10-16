@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -49,6 +49,7 @@ var mockNow = func() metav1.Time {
 }
 
 func TestValidate(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		name                         string
 		attr                         admission.Attributes
@@ -208,6 +209,7 @@ func TestValidate(t *testing.T) {
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
 			indexer := cache.NewIndexer(kcpcache.MetaClusterNamespaceKeyFunc, cache.Indexers{kcpcache.ClusterIndexName: kcpcache.ClusterIndexFunc})
 			for _, obj := range scenario.initialObjects {
 				if err := indexer.Add(obj); err != nil {

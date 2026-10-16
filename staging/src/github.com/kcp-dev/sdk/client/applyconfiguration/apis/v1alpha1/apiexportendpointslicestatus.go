@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,14 +20,22 @@ package v1alpha1
 
 import (
 	conditionsv1alpha1 "github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1"
+	corev1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/core/v1alpha1"
 )
 
 // APIExportEndpointSliceStatusApplyConfiguration represents a declarative configuration of the APIExportEndpointSliceStatus type for use
 // with apply.
+//
+// APIExportEndpointSliceStatus defines the observed state of APIExportEndpointSlice.
 type APIExportEndpointSliceStatusApplyConfiguration struct {
-	Conditions         *conditionsv1alpha1.Conditions        `json:"conditions,omitempty"`
-	APIExportEndpoints []APIExportEndpointApplyConfiguration `json:"endpoints,omitempty"`
-	ShardSelector      *string                               `json:"shardSelector,omitempty"`
+	// conditions is a list of conditions that apply to the APIExportEndpointSlice.
+	Conditions *conditionsv1alpha1.Conditions `json:"conditions,omitempty"`
+	// endpoints contains all the URLs of the APIExport service.
+	APIExportEndpoints []corev1alpha1.EndpointApplyConfiguration `json:"endpoints,omitempty"`
+	// shardSelector is the selector used to filter the shards. It is used to filter the shards
+	// when determining partition scope when deriving the endpoints. This is set by owning shard,
+	// and is used by follower shards to determine if its inscope or not.
+	ShardSelector *string `json:"shardSelector,omitempty"`
 }
 
 // APIExportEndpointSliceStatusApplyConfiguration constructs a declarative configuration of the APIExportEndpointSliceStatus type for use with
@@ -47,7 +55,7 @@ func (b *APIExportEndpointSliceStatusApplyConfiguration) WithConditions(value co
 // WithAPIExportEndpoints adds the given value to the APIExportEndpoints field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the APIExportEndpoints field.
-func (b *APIExportEndpointSliceStatusApplyConfiguration) WithAPIExportEndpoints(values ...*APIExportEndpointApplyConfiguration) *APIExportEndpointSliceStatusApplyConfiguration {
+func (b *APIExportEndpointSliceStatusApplyConfiguration) WithAPIExportEndpoints(values ...*corev1alpha1.EndpointApplyConfiguration) *APIExportEndpointSliceStatusApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithAPIExportEndpoints")

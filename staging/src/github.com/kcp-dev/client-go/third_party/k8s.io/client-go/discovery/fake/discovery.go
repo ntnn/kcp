@@ -1,6 +1,6 @@
 /*
 Copyright 2016 The Kubernetes Authors.
-Modifications Copyright 2022 The KCP Authors.
+Modifications Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -86,7 +86,7 @@ func (c *FakeDiscovery) ServerGroupsAndResources() ([]*metav1.APIGroup, []*metav
 		ClusterPath: c.ClusterPath,
 	}
 	if _, err = c.Invokes(action, nil); err != nil {
-		return nil, nil, err
+		return resultGroups, c.Resources[c.ClusterPath], err
 	}
 	return resultGroups, c.Resources[c.ClusterPath], nil
 }

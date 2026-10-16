@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,9 +24,13 @@ import (
 
 // WorkspaceTypeReferenceApplyConfiguration represents a declarative configuration of the WorkspaceTypeReference type for use
 // with apply.
+//
+// WorkspaceTypeReference is a globally unique, fully qualified reference to a workspace type.
 type WorkspaceTypeReferenceApplyConfiguration struct {
+	// name is the name of the WorkspaceType
 	Name *tenancyv1alpha1.WorkspaceTypeName `json:"name,omitempty"`
-	Path *string                            `json:"path,omitempty"`
+	// path is an absolute reference to the workspace that owns this type, e.g. root:org:ws.
+	Path *string `json:"path,omitempty"`
 }
 
 // WorkspaceTypeReferenceApplyConfiguration constructs a declarative configuration of the WorkspaceTypeReference type for use with

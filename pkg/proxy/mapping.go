@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,9 +26,9 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"k8s.io/component-base/metrics/legacyregistry"
 	"k8s.io/klog/v2"
 
+	"github.com/kcp-dev/kcp/pkg/proxy/metrics"
 	"github.com/kcp-dev/kcp/pkg/server/proxy"
 	"github.com/kcp-dev/kcp/pkg/server/proxy/types"
 )
@@ -53,13 +53,7 @@ func isShardMapping(m types.PathMapping) bool {
 
 func NewHandler(ctx context.Context, mappings []types.PathMapping) (http.Handler, error) {
 	handlers := proxy.HttpHandler{
-		Mappings: types.HttpHandlerMappings{
-			{
-				Weight:  0,
-				Path:    "/metrics",
-				Handler: legacyregistry.Handler(),
-			},
-		},
+		Mappings: types.HttpHandlerMappings{},
 	}
 
 	logger := klog.FromContext(ctx)
@@ -80,11 +74,13 @@ func NewHandler(ctx context.Context, mappings []types.PathMapping) (http.Handler
 		if isShardMapping(m) {
 			clusterProxy := newShardReverseProxy()
 			clusterProxy.Transport = transport
+			clusterProxy.ErrorHandler = metrics.NewProxyErrorHandler()
 			handler = clusterProxy
 		} else {
 			// TODO: handle virtual workspace apiservers per shard
 			proxy := httputil.NewSingleHostReverseProxy(u)
 			proxy.Transport = transport
+			proxy.ErrorHandler = metrics.NewProxyErrorHandler()
 			handler = proxy
 		}
 

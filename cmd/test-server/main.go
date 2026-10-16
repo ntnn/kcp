@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/wait"
+	kuser "k8s.io/apiserver/pkg/authentication/user"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 
 	"github.com/kcp-dev/sdk/testing/third_party/library-go/crypto"
@@ -103,6 +104,31 @@ func start(shardFlags []string, workDirPath, logDirPath string, quiet bool) erro
 		return fmt.Errorf("failed to create client-ca: %w", err)
 	}
 
+	// Requests for mounted workspaces carry the caller's identity in X-Remote-*
+	// headers only, which a target trusts solely when presented over a client
+	// certificate signed by its requestheader CA. In standalone mode mounts point
+	// back at the shard itself, so give the shard a requestheader CA and a
+	// matching client cert for its mount proxy, like the sharded setup does.
+	requestHeaderCA, _, err := crypto.EnsureCA(
+		filepath.Join(workDirPath, ".kcp", "requestheader-ca.crt"),
+		filepath.Join(workDirPath, ".kcp", "requestheader-ca.key"),
+		filepath.Join(workDirPath, ".kcp", "requestheader-ca-serial.txt"),
+		"kcp-requestheader-ca",
+		365,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create requestheader-ca: %w", err)
+	}
+	_, _, err = requestHeaderCA.EnsureClientCertificate(
+		filepath.Join(workDirPath, ".kcp", "mounts-proxy.crt"),
+		filepath.Join(workDirPath, ".kcp", "mounts-proxy.key"),
+		&kuser.DefaultInfo{Name: "kcp-mounts-proxy"},
+		365,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create mounts proxy client cert: %w", err)
+	}
+
 	logFilePath := filepath.Join(workDirPath, ".kcp", "kcp.log")
 	if logDirPath != "" {
 		logFilePath = filepath.Join(logDirPath, "kcp.log")
@@ -115,6 +141,14 @@ func start(shardFlags []string, workDirPath, logDirPath string, quiet bool) erro
 		append(shardFlags,
 			"--audit-log-path", filepath.Join(filepath.Dir(logFilePath), "audit.log"),
 			"--client-ca-file", filepath.Join(workDirPath, ".kcp", "client-ca.crt"),
+			"--requestheader-client-ca-file", filepath.Join(workDirPath, ".kcp", "requestheader-ca.crt"),
+			"--requestheader-username-headers=X-Remote-User",
+			"--requestheader-group-headers=X-Remote-Group",
+			"--requestheader-extra-headers-prefix=X-Remote-Extra-",
+			"--requestheader-allowed-names=kcp-mounts-proxy",
+			"--mount-proxy-client-cert-file", filepath.Join(workDirPath, ".kcp", "mounts-proxy.crt"),
+			"--mount-proxy-client-key-file", filepath.Join(workDirPath, ".kcp", "mounts-proxy.key"),
+			"--mount-proxy-server-ca-file", filepath.Join(workDirPath, ".kcp", "apiserver.crt"),
 		),
 	)
 	if err := s.Start(ctx, quiet); err != nil {
@@ -149,6 +183,14 @@ func start(shardFlags []string, workDirPath, logDirPath string, quiet bool) erro
 	defer metricsCancel()
 
 	s.GatherMetrics(metricsCtx)
+
+	// Stop the shard and wait for its process to actually exit before we
+	// return, instead of relying on the deferred cancel() above, which
+	// only asynchronously triggers termination. Without this, main() can
+	// return - and the process running it can exit - while the shard is
+	// still shutting down and flushing its log/audit files.
+	cancel()
+	<-errCh
 
 	return nil
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 )
 
 func TestPartition(t *testing.T) {
+	t.Parallel()
 	shards := []*corev1alpha1.Shard{
 		{
 			ObjectMeta: metav1.ObjectMeta{
@@ -118,25 +119,26 @@ func TestPartition(t *testing.T) {
 	}
 
 	matchLabelsMap := partition(shards, []string{}, nil)
-	require.Equal(t, 0, len(matchLabelsMap), "No label selector expected when no dimension is provided, got: %v", matchLabelsMap)
+	require.Empty(t, matchLabelsMap, "No label selector expected when no dimension is provided, got: %v", matchLabelsMap)
 
 	matchLabelsMap = partition(shards, []string{"doesnotexist"}, nil)
-	require.Equal(t, 0, len(matchLabelsMap), "No label selector expected when no shard with the dimension, got: %v", matchLabelsMap)
+	require.Empty(t, matchLabelsMap, "No label selector expected when no shard with the dimension, got: %v", matchLabelsMap)
 
 	matchLabelsMap = partition(shards, []string{"region"}, nil)
-	require.Equal(t, 2, len(matchLabelsMap), "2 label selectors for region: Europe and Asia expected, got: %v", matchLabelsMap)
+	require.Len(t, matchLabelsMap, 2, "2 label selectors for region: Europe and Asia expected, got: %v", matchLabelsMap)
 
 	matchLabelsMap = partition(shards, []string{"region", "cloud"}, nil)
-	require.Equal(t, 3, len(matchLabelsMap), "3 label selectors for: Asia/Azure, Europe/AWS and Europe/Azure expected, got: %v", matchLabelsMap)
+	require.Len(t, matchLabelsMap, 3, "3 label selectors for: Asia/Azure, Europe/AWS and Europe/Azure expected, got: %v", matchLabelsMap)
 
 	matchLabelsMap = partition(shards, []string{"region", "cloud"}, map[string]string{"environment": "prod"})
-	require.Equal(t, 3, len(matchLabelsMap), "3 label selectors for: Asia/Azure, Europe/AWS, Europe/Azure expected, got: %v", matchLabelsMap)
+	require.Len(t, matchLabelsMap, 3, "3 label selectors for: Asia/Azure, Europe/AWS, Europe/Azure expected, got: %v", matchLabelsMap)
 	for _, v := range matchLabelsMap {
 		require.Equal(t, "prod", v["environment"], "Expected that all partitions have a label selector for environment = prod")
 	}
 }
 
 func TestGeneratePartitionName(t *testing.T) {
+	t.Parallel()
 	name := generatePartitionName(
 		"partitionset",
 		map[string]string{"region": "europe", "cloud": "EKS", "verylong": "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"},

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 
 // TestAPIBindingAPIExportReferenceCELValidation will validate the APIExport reference for an otherwise valid APIBinding.
 func TestAPIBindingAPIExportReferenceCELValidation(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name         string
 		current, old map[string]any
@@ -60,7 +61,7 @@ func TestAPIBindingAPIExportReferenceCELValidation(t *testing.T) {
 					"name": "CHANGE",
 				},
 			},
-			wantErrs: []string{"openAPIV3Schema.properties.spec.properties.reference: Invalid value: \"object\": APIExport reference must not be changed"},
+			wantErrs: []string{"openAPIV3Schema.properties.spec.properties.reference: Invalid value: APIExport reference must not be changed"},
 		},
 		{
 			name: "change path",
@@ -76,7 +77,7 @@ func TestAPIBindingAPIExportReferenceCELValidation(t *testing.T) {
 					"name": "bar",
 				},
 			},
-			wantErrs: []string{"openAPIV3Schema.properties.spec.properties.reference: Invalid value: \"object\": APIExport reference must not be changed"},
+			wantErrs: []string{"openAPIV3Schema.properties.spec.properties.reference: Invalid value: APIExport reference must not be changed"},
 		},
 	}
 
@@ -88,6 +89,7 @@ func TestAPIBindingAPIExportReferenceCELValidation(t *testing.T) {
 		require.True(t, found, "failed to find validator for %s", pth)
 
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			errs := validator(tc.current, tc.old)
 			t.Log(errs)
 

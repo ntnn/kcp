@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ import (
 )
 
 func TestEnqueueAPIResourceSchema(t *testing.T) {
+	t.Parallel()
 	c := &APIReconciler{
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
@@ -67,7 +68,7 @@ func TestEnqueueAPIResourceSchema(t *testing.T) {
 	logger, _ := ktesting.NewTestContext(t)
 	c.enqueueAPIResourceSchema(schema, logger)
 
-	require.Equal(t, c.queue.Len(), 2)
+	require.Equal(t, 2, c.queue.Len())
 
 	// get the queue keys
 	actual := sets.New[string]()

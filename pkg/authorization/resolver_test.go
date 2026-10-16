@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,8 +30,6 @@ import (
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/endpoints/request"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	"k8s.io/kubernetes/pkg/features"
 	rbacregistryvalidation "k8s.io/kubernetes/pkg/registry/rbac/validation"
 	"k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac"
 )
@@ -43,6 +41,7 @@ import (
 // Everything of this is already tested in the kube carry patch. But as this
 // is important functionality, we want to make sure it is not broken.
 func TestResolverWithWarrants(t *testing.T) {
+	t.Parallel()
 	getPods := &authorizer.DefaultResourceRuleInfo{
 		Verbs:     []string{"get"},
 		APIGroups: []string{""},
@@ -81,7 +80,6 @@ func TestResolverWithWarrants(t *testing.T) {
 		wantResourceRules    []authorizer.ResourceRuleInfo
 		wantNonResourceRules []authorizer.NonResourceRuleInfo
 		wantError            bool
-		skip                 bool
 	}{
 		{
 			name:                 "base without warrants",
@@ -131,19 +129,16 @@ func TestResolverWithWarrants(t *testing.T) {
 			wantResourceRules:    []authorizer.ResourceRuleInfo{getServices},
 			wantNonResourceRules: nil, // global service accounts do no work without a cluster.
 		},
-		// TODO(cnvergence): restore the skip field once we drop the global service account feature flag
 		{
 			name:                 "service account with this cluster",
 			user:                 &user.DefaultInfo{Name: "system:serviceaccount:default:sa", Groups: []string{"system:serviceaccounts", user.AllAuthenticated}, Extra: map[string][]string{authserviceaccount.ClusterNameKey: {"this"}}},
 			wantResourceRules:    []authorizer.ResourceRuleInfo{getServices},
 			wantNonResourceRules: []authorizer.NonResourceRuleInfo{getReadyz},
-			skip:                 !utilfeature.DefaultFeatureGate.Enabled(features.GlobalServiceAccount),
 		},
 		{
 			name:                 "service account with other cluster",
 			user:                 &user.DefaultInfo{Name: "system:serviceaccount:default:sa", Groups: []string{"system:serviceaccounts", user.AllAuthenticated}, Extra: map[string][]string{authserviceaccount.ClusterNameKey: {"other"}}},
 			wantNonResourceRules: []authorizer.NonResourceRuleInfo{getMetrics},
-			skip:                 !utilfeature.DefaultFeatureGate.Enabled(features.GlobalServiceAccount),
 		},
 		{
 			name:                 "base with service account warrant without cluster, ignored",
@@ -191,6 +186,7 @@ func TestResolverWithWarrants(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			_, sr := rbacregistryvalidation.NewTestRuleResolver(nil, nil,
 				[]*rbacv1.ClusterRole{{
 					ObjectMeta: metav1.ObjectMeta{Name: "get-pods"},
@@ -283,7 +279,7 @@ func TestResolverWithWarrants(t *testing.T) {
 			sort.Sort(sortedResourceRules(resourceRules))
 			sort.Sort(sortedNonResourceRules(nonResourceRules))
 
-			if !tt.wantError && !tt.skip {
+			if !tt.wantError {
 				if diff := cmp.Diff(resourceRules, tt.wantResourceRules); diff != "" {
 					t.Errorf("resourceRules differs: +want -got:\n%s", diff)
 				}

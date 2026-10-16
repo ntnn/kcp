@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ import (
 	kcpexternalversionscache "github.com/kcp-dev/sdk/client/informers/externalversions/cache"
 	kcpcore "github.com/kcp-dev/sdk/client/informers/externalversions/core"
 	kcpinternalinterfaces "github.com/kcp-dev/sdk/client/informers/externalversions/internalinterfaces"
+	kcpmigration "github.com/kcp-dev/sdk/client/informers/externalversions/migration"
 	kcptenancy "github.com/kcp-dev/sdk/client/informers/externalversions/tenancy"
 	kcptopology "github.com/kcp-dev/sdk/client/informers/externalversions/topology"
 )
@@ -103,6 +104,7 @@ func NewSharedInformerFactory(client kcpcluster.ClusterInterface, defaultResync 
 // NewFilteredSharedInformerFactory constructs a new instance of sharedInformerFactory.
 // Listers obtained via this SharedInformerFactory will be subject to the same filters
 // as specified here.
+//
 // Deprecated: Please use NewSharedInformerFactoryWithOptions instead
 func NewFilteredSharedInformerFactory(client kcpcluster.ClusterInterface, defaultResync time.Duration, tweakListOptions kcpinternalinterfaces.TweakListOptionsFunc) SharedInformerFactory {
 	return NewSharedInformerFactoryWithOptions(client, defaultResync, WithTweakListOptions(tweakListOptions))
@@ -227,7 +229,7 @@ type ScopedDynamicSharedInformerFactory interface {
 //
 // It is typically used like this:
 //
-//	ctx, cancel := context.Background()
+//	ctx, cancel := context.WithCancel(context.Background())
 //	defer cancel()
 //	factory := NewSharedInformerFactory(client, resyncPeriod)
 //	defer factory.WaitForStop()    // Returns immediately if nothing was started.
@@ -282,6 +284,7 @@ type SharedInformerFactory interface {
 	Apis() kcpapis.ClusterInterface
 	Cache() kcpexternalversionscache.ClusterInterface
 	Core() kcpcore.ClusterInterface
+	Migration() kcpmigration.ClusterInterface
 	Tenancy() kcptenancy.ClusterInterface
 	Topology() kcptopology.ClusterInterface
 }
@@ -296,6 +299,10 @@ func (f *sharedInformerFactory) Cache() kcpexternalversionscache.ClusterInterfac
 
 func (f *sharedInformerFactory) Core() kcpcore.ClusterInterface {
 	return kcpcore.New(f, f.tweakListOptions)
+}
+
+func (f *sharedInformerFactory) Migration() kcpmigration.ClusterInterface {
+	return kcpmigration.New(f, f.tweakListOptions)
 }
 
 func (f *sharedInformerFactory) Tenancy() kcptenancy.ClusterInterface {
@@ -453,6 +460,7 @@ type SharedScopedInformerFactory interface {
 	Apis() kcpapis.Interface
 	Cache() kcpexternalversionscache.Interface
 	Core() kcpcore.Interface
+	Migration() kcpmigration.Interface
 	Tenancy() kcptenancy.Interface
 	Topology() kcptopology.Interface
 }
@@ -467,6 +475,10 @@ func (f *sharedScopedInformerFactory) Cache() kcpexternalversionscache.Interface
 
 func (f *sharedScopedInformerFactory) Core() kcpcore.Interface {
 	return kcpcore.NewScoped(f, f.namespace, f.tweakListOptions)
+}
+
+func (f *sharedScopedInformerFactory) Migration() kcpmigration.Interface {
+	return kcpmigration.NewScoped(f, f.namespace, f.tweakListOptions)
 }
 
 func (f *sharedScopedInformerFactory) Tenancy() kcptenancy.Interface {

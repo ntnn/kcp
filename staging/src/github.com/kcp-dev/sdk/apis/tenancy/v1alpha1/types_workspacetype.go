@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -87,10 +88,14 @@ type WorkspaceTypeSpec struct {
 	// +optional
 	Terminator bool `json:"terminator,omitempty"`
 
-	// extend is a list of other WorkspaceTypes whose initializers and limitAllowedChildren
-	// and limitAllowedParents this WorkspaceType is inheriting. By (transitively) extending
-	// another WorkspaceType, this WorkspaceType will be considered as that
-	// other type in evaluation of limitAllowedChildren and limitAllowedParents constraints.
+	// extend is a list of other WorkspaceTypes whose initializers and
+	// limitAllowedChildren and limitAllowedParents this WorkspaceType inherits.
+	// Extension is additive: by (transitively) extending another WorkspaceType,
+	// this WorkspaceType is considered to be that other type when evaluating
+	// limitAllowedChildren and limitAllowedParents constraints. As a result, a
+	// type that extends multiple types satisfies a constraint that allows any
+	// one of those types, so the effective allowed set is the union of the
+	// extended types and not their intersection.
 	//
 	// A dependency cycle stop this WorkspaceType from being admitted as the type
 	// of a Workspace.
@@ -146,6 +151,32 @@ type WorkspaceTypeSpec struct {
 	//
 	// +optional
 	AuthenticationConfigurations []AuthenticationConfigurationReference `json:"authenticationConfigurations,omitempty"`
+
+	// initializerPermissions are the RBAC rules granted to initializer controllers when they
+	// access workspace content through the initializing virtual workspace's content proxy.
+	// Rules are evaluated in-process by the VW proxy on each request; no ClusterRole or
+	// ClusterRoleBinding objects are created inside the workspace.
+	//
+	// When empty (the default), the VW content proxy falls back to impersonating the
+	// workspace owner (full cluster-admin), preserving the historical behavior.
+	//
+	// Changes take effect immediately for all workspaces of this type.
+	//
+	// +optional
+	InitializerPermissions []rbacv1.PolicyRule `json:"initializerPermissions,omitempty"`
+
+	// terminatorPermissions are the RBAC rules granted to terminator controllers when they
+	// access workspace content through the terminating virtual workspace's content proxy.
+	// Rules are evaluated in-process by the VW proxy on each request; no ClusterRole or
+	// ClusterRoleBinding objects are created inside the workspace.
+	//
+	// When empty (the default), the VW content proxy falls back to impersonating the
+	// workspace owner (full cluster-admin), preserving the historical behavior.
+	//
+	// Changes take effect immediately for all workspaces of this type.
+	//
+	// +optional
+	TerminatorPermissions []rbacv1.PolicyRule `json:"terminatorPermissions,omitempty"`
 }
 
 // APIExportReference provides the fields necessary to resolve an APIExport.
@@ -211,8 +242,7 @@ type WorkspaceTypeSelector struct {
 // composed together to add functionality to the owning WorkspaceType.
 type WorkspaceTypeExtension struct {
 	// with are WorkspaceTypes whose initializers are added to the list
-	// for the owning type, and for whom the owning type becomes an alias, as long
-	// as all of their required types are not mentioned in without.
+	// for the owning type, and for whom the owning type becomes an alias.
 	//
 	// +optional
 	With []WorkspaceTypeReference `json:"with,omitempty"`

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/endpoints/request"
@@ -97,6 +98,7 @@ func (b *shardBuilder) virtualWorkspaceURL(u string) *shardBuilder {
 }
 
 func TestAdmitIgnoresOtherResources(t *testing.T) {
+	t.Parallel()
 	o := &shard{
 		Handler: admission.NewHandler(admission.Create, admission.Update),
 	}
@@ -123,6 +125,7 @@ func TestAdmitIgnoresOtherResources(t *testing.T) {
 }
 
 func TestAdmit(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		shard    *corev1alpha1.Shard
@@ -157,6 +160,7 @@ func TestAdmit(t *testing.T) {
 
 		for aType, a := range attrs {
 			t.Run(tt.name+" "+aType, func(t *testing.T) {
+				t.Parallel()
 				o := &shard{
 					Handler: admission.NewHandler(admission.Create, admission.Update),
 				}
@@ -173,4 +177,87 @@ func TestAdmit(t *testing.T) {
 			})
 		}
 	}
+}
+
+func validateAttr(op admission.Operation, obj, old *corev1alpha1.Shard, groups ...string) admission.Attributes {
+	var objU, oldU *unstructured.Unstructured
+	if obj != nil {
+		objU = helpers.ToUnstructuredOrDie(obj)
+	}
+	if old != nil {
+		oldU = helpers.ToUnstructuredOrDie(old)
+	}
+	var objObj, oldObj runtime.Object
+	if objU != nil {
+		objObj = objU
+	}
+	if oldU != nil {
+		oldObj = oldU
+	}
+	return admission.NewAttributesRecord(
+		objObj,
+		oldObj,
+		corev1alpha1.Kind("Shard").WithVersion("v1alpha1"),
+		"",
+		"root",
+		corev1alpha1.Resource("shards").WithVersion("v1alpha1"),
+		"",
+		op,
+		&metav1.UpdateOptions{},
+		false,
+		&user.DefaultInfo{Name: "someone", Groups: groups},
+	)
+}
+
+func testShard() *corev1alpha1.Shard {
+	return &corev1alpha1.Shard{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Annotations: map[string]string{}},
+		Spec:       corev1alpha1.ShardSpec{BaseURL: "https://root"},
+	}
+}
+
+func TestValidateDeniesUserCreate(t *testing.T) {
+	t.Parallel()
+	o := &shard{Handler: admission.NewHandler(admission.Create, admission.Update, admission.Delete)}
+	err := o.Validate(context.Background(), validateAttr(admission.Create, testShard(), nil, "system:authenticated"), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Admin workspace")
+}
+
+func TestValidateDeniesUserDelete(t *testing.T) {
+	t.Parallel()
+	o := &shard{Handler: admission.NewHandler(admission.Create, admission.Update, admission.Delete)}
+	err := o.Validate(context.Background(), validateAttr(admission.Delete, nil, nil, "system:authenticated"), nil)
+	require.Error(t, err)
+}
+
+func TestValidateDeniesUserSpecUpdate(t *testing.T) {
+	t.Parallel()
+	o := &shard{Handler: admission.NewHandler(admission.Create, admission.Update, admission.Delete)}
+	updated := testShard()
+	updated.Spec.BaseURL = "https://tampered"
+	err := o.Validate(context.Background(), validateAttr(admission.Update, updated, testShard(), "system:authenticated"), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Admin workspace")
+}
+
+func TestValidateDeniesUserAnnotationUpdate(t *testing.T) {
+	t.Parallel()
+	o := &shard{Handler: admission.NewHandler(admission.Create, admission.Update, admission.Delete)}
+	updated := testShard()
+	updated.Annotations["experimental.core.kcp.io/unschedulable"] = "true"
+	err := o.Validate(context.Background(), validateAttr(admission.Update, updated, testShard(), "system:authenticated"), nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Admin workspace")
+}
+
+func TestValidateExemptsSystemMasters(t *testing.T) {
+	t.Parallel()
+	o := &shard{Handler: admission.NewHandler(admission.Create, admission.Update, admission.Delete)}
+	err := o.Validate(context.Background(), validateAttr(admission.Create, testShard(), nil, "system:masters"), nil)
+	require.NoError(t, err)
+	updated := testShard()
+	updated.Spec.BaseURL = "https://new"
+	err = o.Validate(context.Background(), validateAttr(admission.Update, updated, testShard(), "system:masters"), nil)
+	require.NoError(t, err)
 }

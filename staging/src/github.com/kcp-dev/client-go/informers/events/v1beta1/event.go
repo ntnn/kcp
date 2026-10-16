@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ func NewEventClusterInformer(client kcpkubernetes.ClusterInterface, resyncPeriod
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredEventClusterInformer(client kcpkubernetes.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions kcpinternalinterfaces.TweakListOptionsFunc) kcpcache.ScopeableSharedIndexInformer {
 	return kcpinformers.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
@@ -77,7 +77,7 @@ func NewFilteredEventClusterInformer(client kcpkubernetes.ClusterInterface, resy
 				}
 				return client.EventsV1beta1().Events().Watch(context.Background(), options)
 			},
-		},
+		}, client),
 		&apieventsv1beta1.Event{},
 		resyncPeriod,
 		indexers,

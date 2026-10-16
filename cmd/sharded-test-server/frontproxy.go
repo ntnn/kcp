@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -70,14 +70,6 @@ func startFrontProxy(
 
 	mappings := []types.PathMapping{
 		{
-			Path: "/services/",
-			// TODO: support multiple virtual workspace backend servers
-			Backend:         fmt.Sprintf("https://localhost:%s", vwPort),
-			BackendServerCA: filepath.Join(workDirPath, ".kcp", "serving-ca.crt"),
-			ProxyClientCert: filepath.Join(workDirPath, ".kcp-front-proxy", "requestheader.crt"),
-			ProxyClientKey:  filepath.Join(workDirPath, ".kcp-front-proxy", "requestheader.key"),
-		},
-		{
 			Path:            "/e2e/clusters/{cluster}/",
 			Backend:         "https://localhost:2443",
 			BackendServerCA: filepath.Join(workDirPath, ".kcp", "serving-ca.crt"),
@@ -88,6 +80,13 @@ func startFrontProxy(
 		{
 			Path: "/clusters/",
 			// this path is not actually used, since shard URLs are determined based on the Shard
+			Backend:         "https://localhost:6444",
+			BackendServerCA: filepath.Join(workDirPath, ".kcp", "serving-ca.crt"),
+			ProxyClientCert: filepath.Join(workDirPath, ".kcp-front-proxy", "requestheader.crt"),
+			ProxyClientKey:  filepath.Join(workDirPath, ".kcp-front-proxy", "requestheader.key"),
+		},
+		{
+			Path:            "/services/admin",
 			Backend:         "https://localhost:6444",
 			BackendServerCA: filepath.Join(workDirPath, ".kcp", "serving-ca.crt"),
 			ProxyClientCert: filepath.Join(workDirPath, ".kcp-front-proxy", "requestheader.crt"),
@@ -140,7 +139,21 @@ func startFrontProxy(
 		fmt.Sprintf("--root-directory=%s", filepath.Join(workDirPath, ".kcp-front-proxy")),
 		fmt.Sprintf("--root-kubeconfig=%s", filepath.Join(workDirPath, ".kcp", "root.kubeconfig")),
 		fmt.Sprintf("--shards-kubeconfig=%s", filepath.Join(workDirPath, ".kcp-front-proxy", "shards.kubeconfig")),
+		fmt.Sprintf("--shard-peer-kubeconfig=%s", filepath.Join(workDirPath, ".kcp-front-proxy", "peers.kubeconfig")),
 		fmt.Sprintf("--client-ca-file=%s", filepath.Join(workDirPath, ".kcp", "client-ca.crt")),
+		// Trust requestheader-CA-signed clients (e.g. a shard's local proxy re-entering
+		// the front-proxy while forwarding a mounted workspace) to assert identity via
+		// X-Remote-* headers. Without this the front-proxy cannot authenticate the
+		// forwarded identity on that hop and clears the headers, breaking mounts.
+		fmt.Sprintf("--requestheader-client-ca-file=%s", filepath.Join(workDirPath, ".kcp", "requestheader-ca.crt")),
+		"--requestheader-username-headers=X-Remote-User",
+		"--requestheader-group-headers=X-Remote-Group",
+		"--requestheader-extra-headers-prefix=X-Remote-Extra-",
+		// Restrict which requestheader-CA-signed client certs may assert identity to the
+		// known infra CNs (the front-proxy itself and the shards' local proxy). This keeps
+		// the front-proxy stricter than the shards: only these certs can forward headers,
+		// not any cert the requestheader CA happens to sign.
+		"--requestheader-allowed-names=kcp-front-proxy,kcp-mounts-proxy",
 		fmt.Sprintf("--tls-cert-file=%s", filepath.Join(workDirPath, ".kcp-front-proxy", "apiserver.crt")),
 		fmt.Sprintf("--tls-private-key-file=%s", filepath.Join(workDirPath, ".kcp-front-proxy", "apiserver.key")),
 		"--secure-port=6443",
@@ -289,6 +302,38 @@ func writeAdminKubeConfig(hostIP string, workDirPath string) error {
 	}
 
 	return clientcmd.WriteToFile(kubeConfig, filepath.Join(workDirPath, ".kcp", "admin.kubeconfig"))
+}
+
+// writePeersKubeConfig writes a kubeconfig whose named clusters are the
+// shards of this installation, used by the front-proxy's
+// --shard-peer-kubeconfig to discover Shards through the Admin workspace
+// instead of watching the root shard.
+func writePeersKubeConfig(workDirPath string, numberOfShards int) error {
+	var kubeConfig clientcmdapi.Config
+	kubeConfig.AuthInfos = map[string]*clientcmdapi.AuthInfo{
+		"shard-admin": {
+			ClientKey:         filepath.Join(workDirPath, ".kcp-front-proxy", "shard-admin.key"),
+			ClientCertificate: filepath.Join(workDirPath, ".kcp-front-proxy", "shard-admin.crt"),
+		},
+	}
+	kubeConfig.Clusters = map[string]*clientcmdapi.Cluster{}
+	for i := range numberOfShards {
+		name := fmt.Sprintf("shard-%d", i)
+		kubeConfig.Clusters[name] = &clientcmdapi.Cluster{
+			Server:               fmt.Sprintf("https://localhost:%d", 6444+i),
+			CertificateAuthority: filepath.Join(workDirPath, ".kcp", "serving-ca.crt"),
+		}
+	}
+	kubeConfig.Contexts = map[string]*clientcmdapi.Context{
+		"peers": {Cluster: "shard-0", AuthInfo: "shard-admin"},
+	}
+	kubeConfig.CurrentContext = "peers"
+
+	if err := clientcmdapi.FlattenConfig(&kubeConfig); err != nil {
+		return err
+	}
+
+	return clientcmd.WriteToFile(kubeConfig, filepath.Join(workDirPath, ".kcp-front-proxy", "peers.kubeconfig"))
 }
 
 func writeShardKubeConfig(workDirPath string) error {

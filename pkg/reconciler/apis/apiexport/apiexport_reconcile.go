@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -178,7 +178,7 @@ func (c *controller) ensureSecretNamespaceExists(ctx context.Context, clusterNam
 }
 
 func (c *controller) createIdentitySecret(ctx context.Context, clusterName logicalcluster.Path, apiExportName string) error {
-	secret, err := GenerateIdentitySecret(ctx, c.secretNamespace, apiExportName)
+	secret, err := identity.GenerateIdentitySecret(ctx, c.secretNamespace, apiExportName)
 	if err != nil {
 		return err
 	}
@@ -196,7 +196,7 @@ func (c *controller) updateOrVerifyIdentitySecretHash(ctx context.Context, clust
 		return err
 	}
 
-	hash, err := IdentityHash(secret)
+	hash, err := identity.IdentityHash(secret)
 	if err != nil {
 		return err
 	}

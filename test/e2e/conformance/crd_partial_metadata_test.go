@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,6 +40,7 @@ import (
 	"github.com/kcp-dev/sdk/apis/core"
 	conditionsv1alpha1 "github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/third_party/conditions/util/conditions"
+	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	kcptesting "github.com/kcp-dev/sdk/testing"
 	kcptestinghelpers "github.com/kcp-dev/sdk/testing/helpers"
 
@@ -251,6 +252,9 @@ func TestPartialMetadataSameCRDMultipleWorkspaces(t *testing.T) {
 	dynamicClusterClient, err := dynamic.NewForConfig(cfg)
 	require.NoError(t, err)
 
+	kcpClusterClient, err := kcpclientset.NewForConfig(cfg)
+	require.NoError(t, err)
+
 	gvrV1 := schema.GroupVersionResource{
 		Group:    crd.Spec.Group,
 		Version:  "v1",
@@ -274,6 +278,7 @@ func TestPartialMetadataSameCRDMultipleWorkspaces(t *testing.T) {
 
 	// Create a CR in ws1
 	t.Logf("Workspace %s: creating CR instance with version v1", workspace1.Name)
+	kcptesting.WaitForAPIReady(t, kcpClusterClient.Cluster(workspace1Path).Discovery(), gvrV1.GroupVersion())
 	cr1, err := dynamicClusterClient.Cluster(workspace1Path).Resource(gvrV1).Create(ctx, crForGroupVersion(group, "v1"), metav1.CreateOptions{})
 	require.NoError(t, err)
 
@@ -285,6 +290,7 @@ func TestPartialMetadataSameCRDMultipleWorkspaces(t *testing.T) {
 
 	// Create a CR in ws2
 	t.Logf("Workspace %s: creating CR instance with version v2", workspace2.Name)
+	kcptesting.WaitForAPIReady(t, kcpClusterClient.Cluster(workspace2Path).Discovery(), gvrV2.GroupVersion())
 	cr2, err := dynamicClusterClient.Cluster(workspace2Path).Resource(gvrV2).Create(ctx, crForGroupVersion(group, "v2"), metav1.CreateOptions{})
 	require.NoError(t, err)
 
@@ -354,7 +360,7 @@ type crdConditionsAdapter struct {
 }
 
 func (ca *crdConditionsAdapter) GetConditions() conditionsv1alpha1.Conditions {
-	conditions := conditionsv1alpha1.Conditions{}
+	conditions := make(conditionsv1alpha1.Conditions, 0, len(ca.Status.Conditions))
 	for _, c := range ca.Status.Conditions {
 		conditions = append(conditions, conditionsv1alpha1.Condition{
 			Type:   conditionsv1alpha1.ConditionType(c.Type),

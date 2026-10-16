@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -42,6 +42,7 @@ import (
 )
 
 func TestCreate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		config clientcmdapi.Config
@@ -251,9 +252,6 @@ func TestCreate(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		// TODO(sttts): tt has a data race here due to the parallel test execution. But unaliasing it breaks the tests. WTF.
-		// tt := tt
-
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -285,7 +283,7 @@ func TestCreate(t *testing.T) {
 					},
 				})
 			}
-			client := kcpfakeclient.NewSimpleClientset(objects...)
+			client := kcpfakeclient.NewSimpleClientset(objects...) //nolint:staticcheck
 
 			// Fill up the resources map for the discovery client
 			for _, name := range append(tt.existingWorkspaces, tt.newWorkspaceName) {

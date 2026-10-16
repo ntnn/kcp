@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -70,12 +70,12 @@ type workspaceNamespaceLifecycle struct {
 }
 
 func newWorkspaceNamespaceLifecycle() (*workspaceNamespaceLifecycle, error) {
-	legacyLifecycle, err := lifecycle.NewLifecycle(sets.NewString(metav1.NamespaceDefault, metav1.NamespaceSystem, metav1.NamespacePublic))
+	legacyLifecycle, err := lifecycle.NewLifecycle(sets.New[string](metav1.NamespaceDefault, metav1.NamespaceSystem, metav1.NamespacePublic))
 	if err != nil {
 		return nil, err
 	}
 
-	lifecycle, err := lifecycle.NewLifecycle(sets.NewString())
+	lifecycle, err := lifecycle.NewLifecycle(sets.New[string]())
 	if err != nil {
 		return nil, err
 	}

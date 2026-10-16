@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,9 +25,12 @@ import (
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	"github.com/kcp-dev/sdk/client"
+
+	"github.com/kcp-dev/kcp/pkg/indexers"
 )
 
 func TestIndexAPIExportByAPIResourceSchemas(t *testing.T) {
+	t.Parallel()
 	tests := map[string]struct {
 		obj     interface{}
 		want    []string
@@ -77,13 +80,14 @@ func TestIndexAPIExportByAPIResourceSchemas(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			got, err := indexAPIExportsByAPIResourceSchemasFunc(tt.obj)
+			t.Parallel()
+			got, err := indexers.IndexAPIExportByAPIResourceSchema(tt.obj)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("indexAPIExportsByAPIResourceSchemasFunc() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("indexers.IndexAPIExportByAPIResourceSchema() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("indexAPIExportsByAPIResourceSchemasFunc() got = %v, want %v", got, tt.want)
+				t.Errorf("indexers.IndexAPIExportByAPIResourceSchema() got = %v, want %v", got, tt.want)
 			}
 		})
 	}

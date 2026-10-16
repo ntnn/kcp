@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	genericrequest "k8s.io/apiserver/pkg/endpoints/request"
@@ -51,7 +53,8 @@ func (c *controller) reconcile(ctx context.Context, gvrKey string) error {
 	info := c.Gvrs[gvr]
 
 	r := &reconciler{
-		shardName: c.shardName,
+		shardName:        c.shardName,
+		cacheOwnedFields: info.CacheOwnedFields,
 		getLocalCopy: func(cluster logicalcluster.Name, namespace, name string) (*unstructured.Unstructured, error) {
 			key := kcpcache.ToClusterAwareKey(cluster.String(), namespace, name)
 			obj, exists, err := info.Local.GetIndexer().GetByKey(key)
@@ -111,12 +114,16 @@ func (c *controller) reconcile(ctx context.Context, gvrKey string) error {
 		deleteObject: func(ctx context.Context, cluster logicalcluster.Name, ns, name string) error {
 			return c.dynamicCacheClient.Cluster(cluster.Path()).Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
 		},
+		updateLocalObject: func(ctx context.Context, cluster logicalcluster.Name, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+			return c.dynamicLocalClient.Cluster(cluster.Path()).Resource(gvr).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{})
+		},
 	}
 	return r.reconcile(ctx, key)
 }
 
 type reconciler struct {
-	shardName string
+	shardName        string
+	cacheOwnedFields [][]string
 
 	getLocalCopy  func(cluster logicalcluster.Name, namespace, name string) (*unstructured.Unstructured, error)
 	getGlobalCopy func(cluster logicalcluster.Name, namespace, name string) (*unstructured.Unstructured, error)
@@ -124,6 +131,8 @@ type reconciler struct {
 	createObject func(ctx context.Context, cluster logicalcluster.Name, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
 	updateObject func(ctx context.Context, cluster logicalcluster.Name, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
 	deleteObject func(ctx context.Context, cluster logicalcluster.Name, ns, name string) error
+
+	updateLocalObject func(ctx context.Context, cluster logicalcluster.Name, obj *unstructured.Unstructured) (*unstructured.Unstructured, error)
 }
 
 // reconcile makes sure that the object under the given key from the local shard is replicated to the cache server.
@@ -160,6 +169,11 @@ func (r *reconciler) reconcile(ctx context.Context, key string) error {
 			return nil
 		}
 
+		if localExists && len(localCopy.GetFinalizers()) > 0 {
+			// But do respect finalizers. We'll try to delete it on the next iteration.
+			return nil
+		}
+
 		// Object doesn't exist anymore, delete it from the global cache.
 		logger.V(2).WithValues("cluster", clusterName, "namespace", ns, "name", name).Info("Deleting object from global cache")
 		if err := r.deleteObject(ctx, clusterName, ns, name); err != nil && !apierrors.IsNotFound(err) {
@@ -192,6 +206,24 @@ func (r *reconciler) reconcile(ctx context.Context, key string) error {
 		return nil
 	}
 
+	// Cache-owned fields carry admin intent written through the Admin
+	// workspace: they flow cache -> local. Apply them to the local
+	// (authoritative) object first; the update retriggers reconciliation and
+	// the regular local -> cache sync below then sees converged values.
+	if len(r.cacheOwnedFields) > 0 && localCopy.GetDeletionTimestamp().IsZero() {
+		changed, err := syncCacheOwnedFields(globalCopy, localCopy, r.cacheOwnedFields)
+		if err != nil {
+			return err
+		}
+		if changed {
+			logger.V(2).Info("applying cache-owned fields to the local object")
+			if _, err := r.updateLocalObject(ctx, clusterName, localCopy); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+
 	// update global copy and compare
 	metaChanged, err := ensureMeta(globalCopy, localCopy)
 	if err != nil {
@@ -209,4 +241,32 @@ func (r *reconciler) reconcile(ctx context.Context, key string) error {
 	logger.V(2).WithValues("kind", globalCopy.GetKind(), "namespace", globalCopy.GetNamespace(), "name", globalCopy.GetName()).Info("Updating object in global cache")
 	_, err = r.updateObject(ctx, clusterName, globalCopy) // no need for patch because there is only this actor
 	return err
+}
+
+// syncCacheOwnedFields copies the given field paths from the cache copy onto
+// the local copy (absence meaning removal) and reports whether the local copy
+// changed.
+func syncCacheOwnedFields(globalCopy, localCopy *unstructured.Unstructured, paths [][]string) (bool, error) {
+	changed := false
+	for _, path := range paths {
+		globalValue, globalOK, err := unstructured.NestedFieldNoCopy(globalCopy.Object, path...)
+		if err != nil {
+			return false, err
+		}
+		localValue, localOK, err := unstructured.NestedFieldNoCopy(localCopy.Object, path...)
+		if err != nil {
+			return false, err
+		}
+		switch {
+		case globalOK && (!localOK || !equality.Semantic.DeepEqual(localValue, globalValue)):
+			if err := unstructured.SetNestedField(localCopy.Object, runtime.DeepCopyJSONValue(globalValue), path...); err != nil {
+				return false, err
+			}
+			changed = true
+		case !globalOK && localOK:
+			unstructured.RemoveNestedField(localCopy.Object, path...)
+			changed = true
+		}
+	}
+	return changed, nil
 }

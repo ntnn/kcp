@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,9 +24,16 @@ import (
 
 // CustomResourceConversionApplyConfiguration represents a declarative configuration of the CustomResourceConversion type for use
 // with apply.
+//
+// CustomResourceConversion describes how to convert different versions of a CR.
 type CustomResourceConversionApplyConfiguration struct {
+	// strategy specifies how custom resources are converted between versions. Allowed values are:
+	// - `"None"`: The converter only change the apiVersion and would not touch any other field in the custom resource.
+	// - `"Webhook"`: API Server will call to an external webhook to do the conversion. Additional information
+	// is needed for this option. This requires spec.preserveUnknownFields to be false, and spec.conversion.webhook to be set.
 	Strategy *apisv1alpha1.ConversionStrategyType `json:"strategy,omitempty"`
-	Webhook  *WebhookConversionApplyConfiguration `json:"webhook,omitempty"`
+	// webhook describes how to call the conversion webhook. Required when `strategy` is set to `"Webhook"`.
+	Webhook *WebhookConversionApplyConfiguration `json:"webhook,omitempty"`
 }
 
 // CustomResourceConversionApplyConfiguration constructs a declarative configuration of the CustomResourceConversion type for use with

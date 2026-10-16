@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,22 +23,27 @@ import (
 	"io"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/admission"
 	kuser "k8s.io/apiserver/pkg/authentication/user"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 	corev1alpha1listers "github.com/kcp-dev/sdk/client/listers/core/v1alpha1"
 
 	kcpinitializers "github.com/kcp-dev/kcp/pkg/admission/initializers"
+	"github.com/kcp-dev/kcp/pkg/authorization"
 	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
 )
 
-// Protects deletion of LogicalCluster if spec.directlyDeletable is false.
+// Restricts writes to LogicalClusters to kcp admins and system identities, and
+// protects deletion of LogicalCluster if spec.directlyDeletable is false.
 
 const (
 	PluginName = "core.kcp.io/LogicalCluster"
@@ -135,6 +140,12 @@ func (o *plugin) Validate(ctx context.Context, a admission.Attributes, _ admissi
 		return nil
 	}
 
+	// Only kcp admins may write LogicalClusters besides the system identities above.
+	// They are still subject to the validations below.
+	if !groups.Has(bootstrap.SystemKcpAdminGroup) {
+		return admission.NewForbidden(a, fmt.Errorf("only members of %q or system identities may write LogicalClusters", bootstrap.SystemKcpAdminGroup))
+	}
+
 	switch a.GetOperation() {
 	case admission.Update:
 		u, ok := a.GetObject().(*unstructured.Unstructured)
@@ -153,6 +164,25 @@ func (o *plugin) Validate(ctx context.Context, a admission.Attributes, _ admissi
 		old := &corev1alpha1.LogicalCluster{}
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, old); err != nil {
 			return fmt.Errorf("failed to convert unstructured to LogicalCluster: %w", err)
+		}
+
+		if errs := validation.ValidateImmutableField(logicalCluster.Spec.CreatedBy, old.Spec.CreatedBy, field.NewPath("spec", "createdBy")); len(errs) > 0 {
+			return admission.NewForbidden(a, errs.ToAggregate())
+		}
+
+		// These annotations are authorization-relevant: required-groups gates all
+		// access to the workspace and the owner annotation identifies who created it.
+		// They are stamped onto the LogicalCluster by the scheduler at creation and
+		// must not be changed afterwards by anything but system identities (which
+		// return early above). Otherwise a workspace admin could lift restrictions
+		// imposed by a parent workspace.
+		for _, key := range []string{
+			authorization.RequiredGroupsAnnotationKey,
+			tenancyv1alpha1.ExperimentalWorkspaceOwnerAnnotationKey,
+		} {
+			if logicalCluster.Annotations[key] != old.Annotations[key] {
+				return admission.NewForbidden(a, fmt.Errorf("annotation %s may only be changed by system identities", key))
+			}
 		}
 
 		oldSpec := toSet(old.Spec.Initializers)
@@ -185,6 +215,23 @@ func (o *plugin) Validate(ctx context.Context, a admission.Attributes, _ admissi
 
 		if phaseOrdinal[old.Status.Phase] > phaseOrdinal[logicalCluster.Status.Phase] {
 			return admission.NewForbidden(a, fmt.Errorf("cannot transition from %q to %q", old.Status.Phase, logicalCluster.Status.Phase))
+		}
+
+		wasInactive := corev1alpha1.IsLogicalClusterInactive(old.Annotations)
+		isInactive := corev1alpha1.IsLogicalClusterInactive(logicalCluster.Annotations)
+
+		// Prevent marking a cluster as inactive when it is not in phase ready.
+		// Doing so can lead to undefined behaviour, as the cluster might be in the process of being initialized or terminated.
+		// Both require access to the LC, which the inactive annotation would prevent, deadlocking processes.
+		if logicalCluster.Status.Phase != corev1alpha1.LogicalClusterPhaseReady && !wasInactive && isInactive {
+			return admission.NewForbidden(a, fmt.Errorf("LogicalCluster can only be marked inactive in phase %q, but is in phase %q", corev1alpha1.LogicalClusterPhaseReady, logicalCluster.Status.Phase))
+		}
+
+		// Only system identities (which return early above) may toggle the
+		// inactive annotation: marking a cluster inactive shuts down nearly all
+		// access to it, and reactivating it requires the same privilege.
+		if wasInactive != isInactive {
+			return admission.NewForbidden(a, fmt.Errorf("annotation %s may only be changed by system identities", corev1alpha1.LogicalClusterInactiveAnnotationKey))
 		}
 
 		return nil

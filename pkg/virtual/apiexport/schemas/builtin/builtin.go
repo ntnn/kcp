@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,8 +18,10 @@ package builtin
 
 import (
 	"fmt"
+	"strings"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	certificatesv1 "k8s.io/api/certificates/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -35,10 +37,10 @@ import (
 	"github.com/kcp-dev/sdk/apis/apis"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	generatedkcpopenapi "github.com/kcp-dev/sdk/openapi"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/internalapis"
 
-	generatedkcpopenapi "github.com/kcp-dev/kcp/pkg/openapi"
 	kcpscheme "github.com/kcp-dev/kcp/pkg/server/scheme"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/internalapis"
 )
 
 // Create APIResourceSchemas for built-in APIs available as permission claims
@@ -48,7 +50,7 @@ func init() {
 	schemes := []*runtime.Scheme{kcpscheme.Scheme}
 	openAPIDefinitionsGetters := []common.GetOpenAPIDefinitions{
 		generatedopenapi.GetOpenAPIDefinitions,    // core types
-		generatedkcpopenapi.GetOpenAPIDefinitions, // KCP core types for LogicalCluster
+		generatedkcpopenapi.GetOpenAPIDefinitions, // kcp core types for LogicalCluster
 	}
 
 	apis, err := internalapis.CreateAPIResourceSchemas(schemes, openAPIDefinitionsGetters, BuiltInAPIs...)
@@ -69,11 +71,34 @@ func init() {
 // IsBuiltInAPI indicates whether the API identified by group and resource is
 // built-in.
 func IsBuiltInAPI(gr apis.GroupResource) bool {
-	_, exists := builtInAPIResourceSchemas[apisv1alpha1.GroupResource{
+	resource, sub, hasSub := strings.Cut(gr.GetResource(), "/")
+	s, exists := builtInAPIResourceSchemas[apisv1alpha1.GroupResource{
 		Group:    gr.GetGroup(),
-		Resource: gr.GetResource(),
+		Resource: resource,
 	}]
+	if !exists || !hasSub {
+		return exists
+	}
+	if sub == "status" {
+		for _, v := range s.Spec.Versions {
+			if v.Subresources.Status != nil {
+				return true
+			}
+		}
+		return false
+	}
+	subresources, ok := BuiltInSubresources[schema.GroupResource{Group: gr.GetGroup(), Resource: resource}]
+	if !ok {
+		return false
+	}
+	_, exists = subresources[sub]
 	return exists
+}
+
+var BuiltInSubresources = map[schema.GroupResource]map[string]schema.GroupVersionKind{
+	{Group: "", Resource: "serviceaccounts"}: {
+		"token": authenticationv1.SchemeGroupVersion.WithKind("TokenRequest"),
+	},
 }
 
 // GetBuiltInAPISchema retrieves the APIResourceSchema for a built-in API.
@@ -252,6 +277,26 @@ var BuiltInAPIs = []internalapis.InternalAPI{
 	},
 	{
 		Names: apiextensionsv1.CustomResourceDefinitionNames{
+			Plural:   "mutatingadmissionpolicies",
+			Singular: "mutatingadmissionpolicy",
+			Kind:     "MutatingAdmissionPolicy",
+		},
+		GroupVersion:  schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1"},
+		Instance:      &admissionregistrationv1.MutatingAdmissionPolicy{},
+		ResourceScope: apiextensionsv1.ClusterScoped,
+	},
+	{
+		Names: apiextensionsv1.CustomResourceDefinitionNames{
+			Plural:   "mutatingadmissionpolicybindings",
+			Singular: "mutatingadmissionpolicybinding",
+			Kind:     "MutatingAdmissionPolicyBinding",
+		},
+		GroupVersion:  schema.GroupVersion{Group: "admissionregistration.k8s.io", Version: "v1"},
+		Instance:      &admissionregistrationv1.MutatingAdmissionPolicyBinding{},
+		ResourceScope: apiextensionsv1.ClusterScoped,
+	},
+	{
+		Names: apiextensionsv1.CustomResourceDefinitionNames{
 			Plural:   "validatingadmissionpolicies",
 			Singular: "validatingadmissionpolicy",
 			Kind:     "ValidatingAdmissionPolicy",
@@ -312,5 +357,15 @@ var BuiltInAPIs = []internalapis.InternalAPI{
 		GroupVersion:  schema.GroupVersion{Group: "authorization.k8s.io", Version: "v1"},
 		Instance:      &authorizationv1.LocalSubjectAccessReview{},
 		ResourceScope: apiextensionsv1.NamespaceScoped,
+	},
+	{
+		Names: apiextensionsv1.CustomResourceDefinitionNames{
+			Plural:   "tokenreviews",
+			Singular: "tokenreview",
+			Kind:     "TokenReview",
+		},
+		GroupVersion:  schema.GroupVersion{Group: "authentication.k8s.io", Version: "v1"},
+		Instance:      &authenticationv1.TokenReview{},
+		ResourceScope: apiextensionsv1.ClusterScoped,
 	},
 }

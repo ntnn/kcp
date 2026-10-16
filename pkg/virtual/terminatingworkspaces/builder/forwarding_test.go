@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 )
 
 func TestValidateOnlyTerminatorChanged(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		expErr     bool
@@ -78,9 +79,30 @@ func TestValidateOnlyTerminatorChanged(t *testing.T) {
 		},
 		{
 			name:   "no object changes",
-			expErr: true, // we expect an error here, as we always expect the number of terminators to decrease
+			expErr: false, // condition-only status updates that don't touch terminators are allowed
 			old:    &corev1alpha1.LogicalCluster{},
 			new:    &corev1alpha1.LogicalCluster{},
+		},
+		{
+			name:       "no terminator change with terminators present",
+			expErr:     false,
+			terminator: "t1",
+			old: &corev1alpha1.LogicalCluster{
+				Status: corev1alpha1.LogicalClusterStatus{
+					Terminators: []corev1alpha1.LogicalClusterTerminator{
+						"t1",
+						"t2",
+					},
+				},
+			},
+			new: &corev1alpha1.LogicalCluster{
+				Status: corev1alpha1.LogicalClusterStatus{
+					Terminators: []corev1alpha1.LogicalClusterTerminator{
+						"t1",
+						"t2",
+					},
+				},
+			},
 		},
 	}
 
@@ -89,6 +111,7 @@ func TestValidateOnlyTerminatorChanged(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			// mimic the real unstructured.Unstructured objects which are coming into the validateTerminatorsUpdate funcs
 			oldMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(tc.old)
 			if err != nil {

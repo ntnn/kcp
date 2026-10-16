@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -114,6 +114,24 @@ func TestGroupFilter(t *testing.T) {
 
 			requestedGroups: []string{"foo", "foo2", "bar1", "bar2", "baz", "baz1", "baz2"},
 			wantGroups:      []string{"bar1", "bar2", "foo2"},
+		},
+		{
+			// The front-proxy ships with system:kcp:initializer:* and
+			// system:kcp:terminator:* in DropGroups so callers cannot self-assert the
+			// synthetic groups injected by the lifecycle VWs. This regression-guards
+			// that the prefix-drop semantics actually strip *every* sub-group under
+			// those prefixes, regardless of the trailing path.
+			name:               "drops kcp lifecycle synthetic group prefixes",
+			dropGroupsPrefixes: []string{"system:kcp:initializer:", "system:kcp:terminator:"},
+
+			requestedGroups: []string{
+				"system:authenticated",
+				"system:kcp:initializer:root:tenant",
+				"system:kcp:initializer:root:other:nested",
+				"system:kcp:terminator:root:tenant",
+				"system:kcp:other",
+			},
+			wantGroups: []string{"system:authenticated", "system:kcp:other"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

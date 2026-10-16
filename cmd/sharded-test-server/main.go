@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,22 +21,21 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	kuser "k8s.io/apiserver/pkg/authentication/user"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 
-	"github.com/kcp-dev/sdk/apis/core"
-	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
+	kcpclient "github.com/kcp-dev/sdk/client/clientset/versioned"
 	"github.com/kcp-dev/sdk/testing/third_party/library-go/crypto"
 
 	testshard "github.com/kcp-dev/kcp/cmd/test-server/kcp"
@@ -44,12 +43,14 @@ import (
 )
 
 func main() {
+	klog.InitFlags(flag.CommandLine)
 	logDirPath := flag.String("log-dir-path", "", "Path to the log files. If empty, log files are stored in the dot directories.")
 	workDirPath := flag.String("work-dir-path", "", "Path to the working directory where the .kcp* dot directories are created. If empty, the working directory is the current directory.")
 	numberOfShards := flag.Int("number-of-shards", 1, "The number of shards to create. The first created is assumed root.")
 	cacheSyntheticDelay := flag.Duration("cache-synthetic-delay", 0, "The duration of time the cache server will inject a delay for to all inbound requests.")
 	quiet := flag.Bool("quiet", false, "Suppress output of the subprocesses")
 	cacheServerKubeconfig := flag.String("cache-kubeconfig", "", "Path to a kubeconfig of an external cache-server. If empty, a dedicated cache-server is started.")
+	externalEtcdServers := flag.String("external-etcd-servers", "", "Comma-separated list of etcd server URLs to use for shards and the cache-server instead of starting embedded etcds. Each component gets its own --etcd-prefix.")
 
 	// split flags into --proxy-*, --shard-* and everything else (generic). The former are
 	// passed to the respective components.
@@ -65,13 +66,13 @@ func main() {
 	}
 	flag.CommandLine.Parse(genericFlags) //nolint:errcheck
 
-	if err := start(proxyFlags, shardFlags, *logDirPath, *workDirPath, *numberOfShards, *quiet, *cacheSyntheticDelay, *cacheServerKubeconfig); err != nil {
+	if err := start(proxyFlags, shardFlags, *logDirPath, *workDirPath, *numberOfShards, *quiet, *cacheSyntheticDelay, *cacheServerKubeconfig, *externalEtcdServers); err != nil {
 		fmt.Println(err.Error())
 		os.Exit(1)
 	}
 }
 
-func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numberOfShards int, quiet bool, cacheSyntheticDelay time.Duration, cacheServerConfigPath string) error {
+func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numberOfShards int, quiet bool, cacheSyntheticDelay time.Duration, cacheServerConfigPath, externalEtcdServers string) error {
 	// We use a shutdown context to know that it's time to gather metrics, before stopping the shards, proxy, etc.
 	shutdownCtx, shutdownCancel := context.WithCancel(genericapiserver.SetupSignalContext())
 	defer shutdownCancel()
@@ -99,6 +100,21 @@ func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numb
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create requestheader client cert: %w", err)
+	}
+
+	// Client cert (signed by the requestheader CA) that a shard's local proxy presents
+	// when it forwards a request for a mounted workspace back to the front-proxy. The
+	// front-proxy's requestheader authenticator verifies this cert and then takes the
+	// identity from the forwarded X-Remote-* headers. The CN must be listed in the
+	// front-proxy's --requestheader-allowed-names (see frontproxy.go).
+	_, _, err = requestHeaderCA.EnsureClientCertificate(
+		filepath.Join(workDirPath, ".kcp", "mounts-proxy.crt"),
+		filepath.Join(workDirPath, ".kcp", "mounts-proxy.key"),
+		&kuser.DefaultInfo{Name: "kcp-mounts-proxy"},
+		365,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create mounts proxy client cert: %w", err)
 	}
 
 	// create client CA and kcp-admin client cert to connect through front-proxy
@@ -199,7 +215,7 @@ func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numb
 
 	cacheServerErrCh := make(chan indexErrTuple)
 	if cacheServerConfigPath == "" {
-		cacheServerCh, configPath, err := startCacheServer(ctx, logDirPath, workDirPath, hostIP.String(), cacheSyntheticDelay)
+		cacheServerCh, configPath, err := startCacheServer(ctx, logDirPath, workDirPath, hostIP.String(), cacheSyntheticDelay, clientCA, filepath.Join(workDirPath, ".kcp", "client-ca.crt"), externalEtcdServers)
 		if err != nil {
 			return fmt.Errorf("error starting the cache server: %w", err)
 		}
@@ -221,7 +237,7 @@ func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numb
 	// start shards
 	shards := make([]*testshard.Shard, numberOfShards)
 	for i := range numberOfShards {
-		shard, err := newShard(ctx, i, shardFlags, standaloneVW, servingCA, hostIP.String(), logDirPath, workDirPath, cacheServerConfigPath, clientCA)
+		shard, err := newShard(ctx, i, shardFlags, standaloneVW, servingCA, hostIP.String(), logDirPath, workDirPath, cacheServerConfigPath, clientCA, externalEtcdServers)
 		if err != nil {
 			return err
 		}
@@ -231,7 +247,26 @@ func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numb
 		shards[i] = shard
 	}
 
-	// Start virtual-workspace servers
+	// Wait for shards to be ready before starting virtual workspaces.
+	// Virtual workspaces depend on shards for token authentication (TokenReview),
+	// so shards must be fully ready before VWs can accept authenticated requests.
+	shardsErrCh := make(chan indexErrTuple)
+	for i, s := range shards {
+		terminatedCh, err := s.WaitForReady(ctx)
+		if err != nil {
+			return err
+		}
+		err = testshard.ScrapeMetrics(ctx, s, workDirPath)
+		if err != nil {
+			return err
+		}
+		go func(i int, terminatedCh <-chan error) {
+			err := <-terminatedCh
+			shardsErrCh <- indexErrTuple{i, err}
+		}(i, terminatedCh)
+	}
+
+	// Start virtual-workspace servers after shards are ready
 	vwPort := "6444"
 	var virtualWorkspaces []*VirtualWorkspace
 	if standaloneVW {
@@ -248,23 +283,6 @@ func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numb
 			}
 			virtualWorkspaces = append(virtualWorkspaces, vw)
 		}
-	}
-
-	// Wait for shards to be ready
-	shardsErrCh := make(chan indexErrTuple)
-	for i, s := range shards {
-		terminatedCh, err := s.WaitForReady(ctx)
-		if err != nil {
-			return err
-		}
-		err = testshard.ScrapeMetrics(ctx, s, workDirPath)
-		if err != nil {
-			return err
-		}
-		go func(i int, terminatedCh <-chan error) {
-			err := <-terminatedCh
-			shardsErrCh <- indexErrTuple{i, err}
-		}(i, terminatedCh)
 	}
 
 	// Wait for virtual workspaces to be ready
@@ -290,13 +308,20 @@ func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numb
 	if err := writeShardKubeConfig(workDirPath); err != nil {
 		return err
 	}
+	// peers used by the front-proxy to discover Shards via the Admin workspace
+	if err := writePeersKubeConfig(workDirPath, numberOfShards); err != nil {
+		return err
+	}
 
 	// start front-proxy
 	if err := startFrontProxy(ctx, proxyFlags, servingCA, hostIP.String(), logDirPath, workDirPath, vwPort, quiet); err != nil {
 		return err
 	}
 
-	// Label region of shards
+	// Shard labels come from --shard-labels on each shard. Wait for all
+	// shards to be visible in the Admin workspace (through the front-proxy)
+	// before declaring the environment ready, so tests can rely on the
+	// aggregated view.
 	clientConfig, err := loadKubeConfig(filepath.Join(workDirPath, ".kcp", "admin.kubeconfig"), "base")
 	if err != nil {
 		return err
@@ -305,26 +330,25 @@ func start(proxyFlags, shardFlags []string, logDirPath, workDirPath string, numb
 	if err != nil {
 		return err
 	}
-	client, err := kcpclientset.NewForConfig(config)
+	baseURL, err := url.Parse(config.Host)
 	if err != nil {
 		return err
 	}
-	for i := range shards {
-		name := fmt.Sprintf("shard-%d", i)
-		if i == 0 {
-			name = "root"
+	baseURL.Path = "/services/admin"
+	config.Host = baseURL.String()
+	adminClient, err := kcpclient.NewForConfig(config)
+	if err != nil {
+		return err
+	}
+	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+		shardList, err := adminClient.CoreV1alpha1().Shards().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			// the front-proxy or the shards may not be fully ready yet, keep polling
+			return false, nil //nolint:nilerr
 		}
-
-		if i >= len(regions) {
-			break
-		}
-		patch := fmt.Sprintf(`{"metadata":{"labels":{"region":%q,"shared": "true"}}}`, regions[i])
-		if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-			_, err := client.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().Patch(ctx, name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
-			return err
-		}); err != nil {
-			return err
-		}
+		return len(shardList.Items) >= numberOfShards, nil
+	}); err != nil {
+		return fmt.Errorf("failed waiting for %d shards in the Admin workspace: %w", numberOfShards, err)
 	}
 
 	readyToTestFile, err := os.Create(filepath.Join(workDirPath, ".kcp", "ready-to-test"))

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -95,7 +95,7 @@ func TestURLs(t *testing.T) {
 			if !assert.Equal(t, testPath.expectedStatusCode, resp.StatusCode) {
 				t.Logf("Expected status code %d, got %d", testPath.expectedStatusCode, resp.StatusCode)
 				b, err := io.ReadAll(resp.Body)
-				assert.NoError(t, err)
+				assert.NoError(t, err) //nolint:testifylint // using assert here to still get the response body as far as possible
 				t.Logf("Response body: %s", string(b))
 			}
 		})

@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ package v1alpha1
 
 // ClaimMappingsApplyConfiguration represents a declarative configuration of the ClaimMappings type for use
 // with apply.
+//
+// ClaimMappings provides the configuration for claim mapping.
 type ClaimMappingsApplyConfiguration struct {
 	Username *PrefixedClaimOrExpressionApplyConfiguration `json:"username,omitempty"`
 	Groups   *PrefixedClaimOrExpressionApplyConfiguration `json:"groups,omitempty"`

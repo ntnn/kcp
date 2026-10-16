@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,22 +19,94 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/rbac/v1"
+
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 )
 
 // WorkspaceTypeSpecApplyConfiguration represents a declarative configuration of the WorkspaceTypeSpec type for use
 // with apply.
 type WorkspaceTypeSpecApplyConfiguration struct {
-	Initializer                  *bool                                                    `json:"initializer,omitempty"`
-	Terminator                   *bool                                                    `json:"terminator,omitempty"`
-	Extend                       *WorkspaceTypeExtensionApplyConfiguration                `json:"extend,omitempty"`
-	AdditionalWorkspaceLabels    map[string]string                                        `json:"additionalWorkspaceLabels,omitempty"`
-	DefaultChildWorkspaceType    *WorkspaceTypeReferenceApplyConfiguration                `json:"defaultChildWorkspaceType,omitempty"`
-	LimitAllowedChildren         *WorkspaceTypeSelectorApplyConfiguration                 `json:"limitAllowedChildren,omitempty"`
-	LimitAllowedParents          *WorkspaceTypeSelectorApplyConfiguration                 `json:"limitAllowedParents,omitempty"`
-	DefaultAPIBindings           []APIExportReferenceApplyConfiguration                   `json:"defaultAPIBindings,omitempty"`
-	DefaultAPIBindingLifecycle   *tenancyv1alpha1.APIBindingLifecycleMode                 `json:"defaultAPIBindingLifecycle,omitempty"`
+	// initializer determines if this WorkspaceType has an associated initializing
+	// controller. These controllers are used to add functionality to a Workspace;
+	// all controllers must finish their work before the Workspace becomes ready
+	// for use.
+	//
+	// One initializing controller is supported per WorkspaceType; the identifier
+	// for this initializer will be a colon-delimited string using the workspace in which
+	// the WorkspaceType is defined, and the type's name. For example, if a
+	// WorkspaceType `example` is created in the `root:org` workspace, the implicit
+	// initializer name is `root:org:example`.
+	Initializer *bool `json:"initializer,omitempty"`
+	// Terminator determines if this WorkspaceType has an associated terminating
+	// controller. These controllers are used to add functionality to a Workspace;
+	// all controllers must finish their work before the Workspace is being deleted.
+	//
+	// One terminating controller is supported per WorkspaceType; the identifier
+	// for this terminator will be a colon-delimited string using the workspace in which
+	// the WorkspaceType is defined, and the type's name. For example, if a
+	// WorkspaceType `example` is created in the `root:org` workspace, the implicit
+	// terminator name is `root:org:example`.
+	Terminator *bool `json:"terminator,omitempty"`
+	// extend is a list of other WorkspaceTypes whose initializers and
+	// limitAllowedChildren and limitAllowedParents this WorkspaceType inherits.
+	// Extension is additive: by (transitively) extending another WorkspaceType,
+	// this WorkspaceType is considered to be that other type when evaluating
+	// limitAllowedChildren and limitAllowedParents constraints. As a result, a
+	// type that extends multiple types satisfies a constraint that allows any
+	// one of those types, so the effective allowed set is the union of the
+	// extended types and not their intersection.
+	//
+	// A dependency cycle stop this WorkspaceType from being admitted as the type
+	// of a Workspace.
+	//
+	// A non-existing dependency stop this WorkspaceType from being admitted as the type
+	// of a Workspace.
+	Extend *WorkspaceTypeExtensionApplyConfiguration `json:"extend,omitempty"`
+	// additionalWorkspaceLabels are a set of labels that will be added to a
+	// Workspace on creation.
+	AdditionalWorkspaceLabels map[string]string `json:"additionalWorkspaceLabels,omitempty"`
+	// defaultChildWorkspaceType is the WorkspaceType that will be used
+	// by default if another, nested Workspace is created in a workspace
+	// of this type. When this field is unset, the user must specify a type when
+	// creating nested workspaces. Extending another WorkspaceType does
+	// not inherit its defaultChildWorkspaceType.
+	DefaultChildWorkspaceType *WorkspaceTypeReferenceApplyConfiguration `json:"defaultChildWorkspaceType,omitempty"`
+	// limitAllowedChildren specifies constraints for sub-workspaces created in workspaces
+	// of this type. These are in addition to child constraints of types this one extends.
+	LimitAllowedChildren *WorkspaceTypeSelectorApplyConfiguration `json:"limitAllowedChildren,omitempty"`
+	// limitAllowedParents specifies constraints for the parent workspace that workspaces
+	// of this type are created in. These are in addition to parent constraints of types this one
+	// extends.
+	LimitAllowedParents *WorkspaceTypeSelectorApplyConfiguration `json:"limitAllowedParents,omitempty"`
+	// defaultAPIBindings are the APIs to bind during initialization of workspaces created from this type.
+	// The APIBinding names will be generated dynamically.
+	DefaultAPIBindings []APIExportReferenceApplyConfiguration `json:"defaultAPIBindings,omitempty"`
+	// Configure the lifecycle behaviour of defaultAPIBindings.
+	DefaultAPIBindingLifecycle *tenancyv1alpha1.APIBindingLifecycleMode `json:"defaultAPIBindingLifecycle,omitempty"`
+	// authenticationConfigurations are additional authentication options that should apply to any
+	// workspace using this workspace type.
 	AuthenticationConfigurations []AuthenticationConfigurationReferenceApplyConfiguration `json:"authenticationConfigurations,omitempty"`
+	// initializerPermissions are the RBAC rules granted to initializer controllers when they
+	// access workspace content through the initializing virtual workspace's content proxy.
+	// Rules are evaluated in-process by the VW proxy on each request; no ClusterRole or
+	// ClusterRoleBinding objects are created inside the workspace.
+	//
+	// When empty (the default), the VW content proxy falls back to impersonating the
+	// workspace owner (full cluster-admin), preserving the historical behavior.
+	//
+	// Changes take effect immediately for all workspaces of this type.
+	InitializerPermissions []v1.PolicyRule `json:"initializerPermissions,omitempty"`
+	// terminatorPermissions are the RBAC rules granted to terminator controllers when they
+	// access workspace content through the terminating virtual workspace's content proxy.
+	// Rules are evaluated in-process by the VW proxy on each request; no ClusterRole or
+	// ClusterRoleBinding objects are created inside the workspace.
+	//
+	// When empty (the default), the VW content proxy falls back to impersonating the
+	// workspace owner (full cluster-admin), preserving the historical behavior.
+	//
+	// Changes take effect immediately for all workspaces of this type.
+	TerminatorPermissions []v1.PolicyRule `json:"terminatorPermissions,omitempty"`
 }
 
 // WorkspaceTypeSpecApplyConfiguration constructs a declarative configuration of the WorkspaceTypeSpec type for use with
@@ -135,6 +207,26 @@ func (b *WorkspaceTypeSpecApplyConfiguration) WithAuthenticationConfigurations(v
 			panic("nil value passed to WithAuthenticationConfigurations")
 		}
 		b.AuthenticationConfigurations = append(b.AuthenticationConfigurations, *values[i])
+	}
+	return b
+}
+
+// WithInitializerPermissions adds the given value to the InitializerPermissions field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the InitializerPermissions field.
+func (b *WorkspaceTypeSpecApplyConfiguration) WithInitializerPermissions(values ...v1.PolicyRule) *WorkspaceTypeSpecApplyConfiguration {
+	for i := range values {
+		b.InitializerPermissions = append(b.InitializerPermissions, values[i])
+	}
+	return b
+}
+
+// WithTerminatorPermissions adds the given value to the TerminatorPermissions field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the TerminatorPermissions field.
+func (b *WorkspaceTypeSpecApplyConfiguration) WithTerminatorPermissions(values ...v1.PolicyRule) *WorkspaceTypeSpecApplyConfiguration {
+	for i := range values {
+		b.TerminatorPermissions = append(b.TerminatorPermissions, values[i])
 	}
 	return b
 }

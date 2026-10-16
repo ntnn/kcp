@@ -1,6 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
-Modifications Copyright 2025 The KCP Authors.
+Modifications Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -90,7 +90,7 @@ func (v *version) Compare(other *version) int {
 func (g *genericGenerator) GenerateType(c *generator.Context, t *types.Type, w io.Writer) error {
 	sw := generator.NewSnippetWriter(w, c, "{{", "}}")
 
-	groups := []group{}
+	groups := make([]group, 0, len(g.groupVersions))
 	schemeGVs := make(map[*version]*types.Type)
 
 	orderer := namer.Orderer{Namer: namer.NewPrivateNamer(0)}

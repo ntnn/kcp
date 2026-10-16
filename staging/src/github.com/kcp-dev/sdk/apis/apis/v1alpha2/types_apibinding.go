@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -79,10 +79,51 @@ type APIBindingSpec struct {
 	// +listMapKey=resource
 	// +listMapKey=identityHash
 	PermissionClaims []AcceptablePermissionClaim `json:"permissionClaims,omitempty"`
+
+	// deletionPolicy controls what happens to instances of bound resources when
+	// this APIBinding is deleted and no other APIBinding adopts them.
+	//
+	// "Delete" (the default) deletes all instances of all bound resources.
+	// "WaitForSuccessor" holds the APIBinding's finalizer until every bound
+	// group/resource that still has instances gains a successor APIBinding to
+	// adopt them: the binding stays in deletion with condition
+	// BindingResourceDeleteSuccess=False, reason WaitingForSuccessor, and the
+	// instances remain in storage, covered by this binding, until the handover
+	// completes. Patch the policy back to "Delete" to let deletion proceed
+	// destructively.
+	//
+	// Independent of this policy, instances of a bound group/resource are never
+	// deleted if, at deletion time, another APIBinding in the workspace
+	// references an APIExport serving the same group/resource with the same
+	// APIResourceSchema (by UID) and the same identity: that binding adopts the
+	// instances instead.
+	//
+	// +optional
+	// +kubebuilder:validation:Enum=Delete;WaitForSuccessor
+	// +kubebuilder:default=Delete
+	DeletionPolicy APIBindingDeletionPolicy `json:"deletionPolicy,omitempty"`
 }
+
+// APIBindingDeletionPolicy determines what happens to instances of bound
+// resources when their APIBinding is deleted.
+type APIBindingDeletionPolicy string
+
+const (
+	// APIBindingDeletionPolicyDelete deletes all instances of all bound
+	// resources when the APIBinding is deleted. This is the default.
+	APIBindingDeletionPolicyDelete APIBindingDeletionPolicy = "Delete"
+
+	// APIBindingDeletionPolicyWaitForSuccessor holds the APIBinding's
+	// finalizer until every bound group/resource that still has instances has
+	// a successor APIBinding to adopt them. Instances are never deleted and
+	// never left uncovered by a live APIBinding.
+	APIBindingDeletionPolicyWaitForSuccessor APIBindingDeletionPolicy = "WaitForSuccessor"
+)
 
 // ScopedPermissionClaim embeds a PermissionClaim and adds a selector to
 // scope down access to objects of the claimed resource.
+//
+// +kubebuilder:validation:XValidation:rule="!self.resource.contains('/') || (has(self.selector.matchAll) && self.selector.matchAll)",message="for subresource claims the selector is ignored, scope is inherited from the parent resource claim"
 type ScopedPermissionClaim struct {
 	PermissionClaim `json:",inline"`
 
@@ -246,12 +287,27 @@ const (
 	// successfully when the APIBinding is deleting.
 	BindingResourceDeleteSuccess conditionsv1alpha1.ConditionType = "BindingResourceDeleteSuccess"
 
+	// IdentityMigrationCompleted is a condition for APIBinding that is False
+	// while an identity rotation drain is in progress for any bound resource
+	// of this binding (a boundResources entry lists more than one identity
+	// hash), and True when all old identity prefixes are verified empty and
+	// pruned.
+	IdentityMigrationCompleted conditionsv1alpha1.ConditionType = "IdentityMigrationCompleted"
+
+	// IdentityMigrationInProgressReason indicates that the identity migrator
+	// is still draining instances from an old identity prefix.
+	IdentityMigrationInProgressReason = "IdentityMigrationInProgress"
+
 	// PermissionClaimsValid is a condition for APIBinding that indicates that the permission claims were valid or not.
 	PermissionClaimsValid conditionsv1alpha1.ConditionType = "PermissionClaimsValid"
 
 	// InvalidPermissionClaimsReason indicates there were unexpected and/or invalid permission claims (e.g. due to
 	// identity mismatch).
 	InvalidPermissionClaimsReason = "InvalidPermissionClaims"
+
+	// PermissionClaimsMismatchReason indicates the accepted permission claims have different verbs or selectors
+	// than what the APIExport requested. This is a warning - the binding still works but with reduced permissions.
+	PermissionClaimsMismatchReason = "PermissionClaimsMismatch"
 
 	// PermissionClaimsApplied is a condition for APIBinding that indicates that all the accepted permission claims
 	// have been applied.
@@ -287,6 +343,19 @@ type BoundAPIResource struct {
 	// +optional
 	// +listType=set
 	StorageVersions []string `json:"storageVersions,omitempty"`
+
+	// identityHashes lists every identity hash under which instances of this
+	// resource may exist in storage. It mirrors storageVersions for identity
+	// rotation: the drain target is always the schema's current identityHash;
+	// every other entry is a drain source that the identity migrator empties
+	// and then prunes from this list. Normally it contains exactly the
+	// schema's current identityHash.
+	//
+	// Hashes may not be removed while instances exist under them in storage.
+	//
+	// +optional
+	// +listType=set
+	IdentityHashes []string `json:"identityHashes,omitempty"`
 }
 
 // BoundAPIResourceSchema is a reference to an APIResourceSchema.

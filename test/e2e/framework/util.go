@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,16 +22,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/martinlindhe/base36"
-
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/client-go/rest"
 
+	kcpcrypto "github.com/kcp-dev/apimachinery/v2/pkg/util/crypto"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
-	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	testing2 "github.com/kcp-dev/sdk/testing"
 
 	"github.com/kcp-dev/kcp/pkg/admission/workspace"
@@ -61,7 +59,7 @@ func ConfigWithToken(token string, cfg *rest.Config) *rest.Config {
 // some random 8 character base36 string. suffix must start with a dot if the
 // random string should be dot-separated.
 func UniqueGroup(suffix string) string {
-	ret := strings.ToLower(base36.Encode(rand.Uint64())[:8]) + suffix
+	ret := kcpcrypto.Base36.IntPad(rand.Uint64(), kcpcrypto.Base36Uint64Width)[:8] + suffix
 	if ret[0] >= '0' && ret[0] <= '9' {
 		return "a" + ret[1:]
 	}
@@ -70,8 +68,8 @@ func UniqueGroup(suffix string) string {
 
 // VirtualWorkspaceURL returns the virtual workspace URL base URL of the shard
 // the workspace is scheduled on.
-func VirtualWorkspaceURL(ctx context.Context, kcpClusterClient kcpclientset.ClusterInterface, ws *tenancyv1alpha1.Workspace, urls []string) (string, bool, error) {
-	shard, err := testing2.WorkspaceShard(ctx, kcpClusterClient, ws)
+func VirtualWorkspaceURL(ctx context.Context, cfg *rest.Config, ws *tenancyv1alpha1.Workspace, urls []string) (string, bool, error) {
+	shard, err := testing2.WorkspaceShard(ctx, cfg, ws)
 	if err != nil {
 		return "", false, err
 	}
@@ -96,10 +94,10 @@ func ExportVirtualWorkspaceURLs(export *apisv1alpha1.APIExportEndpointSlice) []s
 }
 
 // ReplicationVirtualWorkspaceURLs returns the URLs of the virtual workspaces of the
-// given CachedResourceEndpointSlice.
-func ReplicationVirtualWorkspaceURLs(slice *cachev1alpha1.CachedResourceEndpointSlice) []string {
-	urls := make([]string, 0, len(slice.Status.CachedResourceEndpoints))
-	for _, vw := range slice.Status.CachedResourceEndpoints {
+// given ClusterCachedResourceEndpointSlice.
+func ReplicationVirtualWorkspaceURLs(slice *cachev1alpha1.ClusterCachedResourceEndpointSlice) []string {
+	urls := make([]string, 0, len(slice.Status.ClusterCachedResourceEndpoints))
+	for _, vw := range slice.Status.ClusterCachedResourceEndpoints {
 		urls = append(urls, vw.URL)
 	}
 	return urls

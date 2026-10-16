@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -65,8 +65,19 @@ func NewAuthentication() *Authentication {
 			WithWebHook(),
 		// SystemLogicalClusterAdmin is privileged and only for internal traffic,
 		// SystemExternalLogicalClusterAdmin must be used for all logical-cluster-admin
-		// requests via the proxy, so we drop SystemLogicalClusterAdmin here
-		DropGroups: []string{user.SystemPrivilegedGroup, bootstrap.SystemLogicalClusterAdmin},
+		// requests via the proxy, so we drop SystemLogicalClusterAdmin here.
+		//
+		// system:kcp:initializer:* and system:kcp:terminator:* are synthetic groups
+		// that lifecycle VW content proxies inject after they have evaluated the
+		// request against the WorkspaceType's initializer/terminator permissions.
+		// Stripping them on ingress prevents clients from self-asserting them and
+		// bypassing the in-process RBAC evaluation.
+		DropGroups: []string{
+			user.SystemPrivilegedGroup,
+			bootstrap.SystemLogicalClusterAdmin,
+			bootstrap.SystemKcpInitializerGroupPrefix + "*",
+			bootstrap.SystemKcpTerminatorGroupPrefix + "*",
+		},
 	}
 	auth.BuiltInOptions.ServiceAccounts.Issuers = []string{"https://kcp.default.svc"}
 	return auth
@@ -101,6 +112,18 @@ func (c *Authentication) ApplyTo(ctx context.Context, authenticationInfo *generi
 	if authenticatorConfig.ClientCAContentProvider != nil {
 		if err = authenticationInfo.ApplyClientCert(authenticatorConfig.ClientCAContentProvider, servingInfo); err != nil {
 			return fmt.Errorf("unable to load client CA file: %w", err)
+		}
+	}
+
+	// Also advertise and verify the requestheader CA on the serving side. This unions
+	// the requestheader CA into the TLS CertificateRequest's acceptable-CA list, so a
+	// trusted upstream (e.g. a shard's mount proxy re-entering the front-proxy) actually
+	// presents its requestheader-CA-signed client cert. Without this, the Go TLS client
+	// finds no cert matching the advertised CAs and sends none, the requestheader
+	// authenticator never runs, and forwarded identity headers get cleared.
+	if authenticatorConfig.RequestHeaderConfig != nil && authenticatorConfig.RequestHeaderConfig.CAContentProvider != nil {
+		if err = authenticationInfo.ApplyClientCert(authenticatorConfig.RequestHeaderConfig.CAContentProvider, servingInfo); err != nil {
+			return fmt.Errorf("unable to load requestheader CA file: %w", err)
 		}
 	}
 

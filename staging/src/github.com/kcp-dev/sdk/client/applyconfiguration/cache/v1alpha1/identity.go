@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,11 @@ import (
 
 // IdentityApplyConfiguration represents a declarative configuration of the Identity type for use
 // with apply.
+//
+// Identity defines the identity of a ClusterCachedResource, i.e. determines the cached resource access
+// of the resources, that are published by this ClusterCachedResource.
 type IdentityApplyConfiguration struct {
+	// secretRef is a reference to a secret that contains the API identity in the 'key' file.
 	SecretRef *v1.SecretReference `json:"secretRef,omitempty"`
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -37,10 +37,10 @@ import (
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
 	"github.com/kcp-dev/sdk/apis/core"
 	"github.com/kcp-dev/sdk/apis/tenancy/v1alpha1/helper"
-	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	kcptesting "github.com/kcp-dev/sdk/testing"
 	kcptestinghelpers "github.com/kcp-dev/sdk/testing/helpers"
 
+	"github.com/kcp-dev/kcp/test/e2e/fixtures/authfixtures"
 	"github.com/kcp-dev/kcp/test/e2e/framework"
 )
 
@@ -53,12 +53,10 @@ func TestServiceAccounts(t *testing.T) {
 
 	server := kcptesting.SharedKcpServer(t)
 	orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
-	wsPath, ws := kcptesting.NewWorkspaceFixture(t, server, orgPath)
+	wsPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath)
 
 	cfg := server.BaseConfig(t)
 	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(cfg)
-	require.NoError(t, err)
-	kcpClusterClient, err := kcpclientset.NewForConfig(cfg)
 	require.NoError(t, err)
 
 	t.Log("Creating namespace")
@@ -180,21 +178,21 @@ func TestServiceAccounts(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Run("Access workspace with the service account", func(t *testing.T) {
+				t.Parallel()
 				_, err := saKubeClusterClient.Cluster(wsPath).CoreV1().ConfigMaps(namespace.Name).List(ctx, metav1.ListOptions{})
 				require.NoError(t, err)
 			})
 
 			t.Run("Access workspace with the service account, but without /clusters path like InCluster clients", func(t *testing.T) {
+				t.Parallel()
 				_, err := saKubeClient.CoreV1().ConfigMaps(namespace.Name).List(ctx, metav1.ListOptions{})
 				require.NoError(t, err)
 			})
 
-			t.Run("Access another workspace in the same org and shard", func(t *testing.T) {
+			t.Run("Access another workspace in the same org", func(t *testing.T) {
+				t.Parallel()
 				t.Log("Create workspace with the same name")
-				// Ensure this new workspace is scheduled onto the same shard, so that it and the ServiceAccount
-				// can be resolved. See https://github.com/kcp-dev/kcp/issues/3510 for tracking multi-shard support.
-				opts := kcptesting.WithShard(kcptesting.WorkspaceShardOrDie(t, kcpClusterClient, ws).Name)
-				otherPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath, opts)
+				otherPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath)
 				_, err := kubeClusterClient.Cluster(otherPath).CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: namespace.Name,
@@ -204,7 +202,7 @@ func TestServiceAccounts(t *testing.T) {
 
 				t.Log("Accessing workspace with the service account")
 				obj, err := saKubeClusterClient.Cluster(otherPath).CoreV1().ConfigMaps(namespace.Name).List(ctx, metav1.ListOptions{})
-				require.Error(t, err, fmt.Sprintf("expected error accessing workspace with the service account, got: %v", obj))
+				require.Error(t, err, "expected error accessing workspace with the service account, got: %v", obj)
 
 				t.Log("Giving the access to configmaps in the other workspace")
 				_, err = kubeClusterClient.Cluster(otherPath).RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
@@ -246,10 +244,7 @@ func TestServiceAccounts(t *testing.T) {
 				t.Log("Accessing other workspace with the (there foreign) service account should eventually work because it is authenticated")
 				kcptestinghelpers.Eventually(t, func() (bool, string) {
 					_, err := saKubeClusterClient.Cluster(otherPath).CoreV1().ConfigMaps(namespace.Name).List(ctx, metav1.ListOptions{})
-					if err != nil {
-						return false, err.Error()
-					}
-					return true, ""
+					return err == nil, fmt.Sprintf("err = %v", err)
 				}, wait.ForeverTestTimeout, time.Millisecond*100)
 
 				t.Log("Taking away the authenticated access to the other workspace, restricting to only service accounts")
@@ -281,8 +276,7 @@ func TestServiceAccounts(t *testing.T) {
 			})
 
 			t.Run("Access an equally named workspace in another org", func(t *testing.T) {
-				// See https://github.com/kcp-dev/kcp/issues/3397
-				t.Skip()
+				t.Parallel()
 				t.Log("Create namespace with the same name")
 				otherOrgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
 				otherPath, _ := kcptesting.NewWorkspaceFixture(t, server, otherOrgPath)
@@ -295,12 +289,13 @@ func TestServiceAccounts(t *testing.T) {
 
 				t.Log("Accessing workspace with the service account")
 				obj, err := saKubeClusterClient.Cluster(otherPath).CoreV1().ConfigMaps(namespace.Name).List(ctx, metav1.ListOptions{})
-				require.Error(t, err, fmt.Sprintf("expected error accessing workspace with the service account, got: %v", obj))
+				require.Error(t, err, "expected error accessing workspace with the service account, got: %v", obj)
 			})
 
 			t.Run("A service account is allowed to escalate permissions implicitly", func(t *testing.T) {
+				t.Parallel()
 				t.Log("Creating cluster role that allows service account to get secrets and create cluster roles")
-				_, err = kubeClusterClient.Cluster(wsPath).RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
+				_, err := kubeClusterClient.Cluster(wsPath).RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: fmt.Sprintf("implicit-escalation-%d", i),
 					},
@@ -361,8 +356,9 @@ func TestServiceAccounts(t *testing.T) {
 			})
 
 			t.Run("A service account is allowed to escalate permissions explicitly", func(t *testing.T) {
+				t.Parallel()
 				t.Log("Creating cluster role that allows service account to get secrets and create cluster roles")
-				_, err = kubeClusterClient.Cluster(wsPath).RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
+				_, err := kubeClusterClient.Cluster(wsPath).RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: fmt.Sprintf("explicit-clusterrole-%d", i),
 					},
@@ -398,7 +394,7 @@ func TestServiceAccounts(t *testing.T) {
 
 				t.Log("Verifying if service account is allowed to escalate")
 				kcptestinghelpers.Eventually(t, func() (bool, string) { // authz makes this eventually succeed
-					_, err = saKubeClusterClient.Cluster(wsPath).RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
+					_, err := saKubeClusterClient.Cluster(wsPath).RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
 						ObjectMeta: metav1.ObjectMeta{
 							Name: fmt.Sprintf("explicit-escalating-clusterrole-%d", i),
 						},
@@ -418,4 +414,94 @@ func TestServiceAccounts(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestServiceAccountsRequiredGroups verifies that service accounts from other
+// logical clusters do not bypass the required-groups check, while service
+// accounts of the gated logical cluster itself do.
+func TestServiceAccountsRequiredGroups(t *testing.T) {
+	t.Parallel()
+	framework.Suite(t, "control-plane")
+
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	t.Cleanup(cancelFunc)
+
+	server := kcptesting.SharedKcpServer(t)
+
+	t.Log("Creating an organization workspace gated by required groups")
+	gatedPath, _ := framework.NewRootShardOrganizationFixture(t, server,
+		kcptesting.PrivilegedWorkspaceOption(kcptesting.WithNamePrefix("gated")),
+		framework.WithRequiredGroups("sa-e2e-required-group"),
+	)
+
+	t.Log("Creating an ungated workspace for the foreign service account")
+	orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
+	saPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath, kcptesting.WithRootShard())
+
+	cfg := server.BaseConfig(t)
+	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(cfg)
+	require.NoError(t, err)
+
+	t.Log("Creating namespaces in both workspaces")
+	foreignNamespace, err := kubeClusterClient.Cluster(saPath).CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-sa-"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err, "failed to create namespace in the service account workspace")
+	gatedNamespace, err := kubeClusterClient.Cluster(gatedPath).CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "e2e-sa-"},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err, "failed to create namespace in the gated workspace")
+
+	t.Log("Creating service accounts in both workspaces")
+	_, foreignTokenSecret := authfixtures.CreateServiceAccount(t, kubeClusterClient, saPath, foreignNamespace.Name, "e2e-sa-")
+	_, localTokenSecret := authfixtures.CreateServiceAccount(t, kubeClusterClient, gatedPath, gatedNamespace.Name, "e2e-sa-")
+
+	t.Log("Granting all service accounts access to configmaps in the gated workspace")
+	_, err = kubeClusterClient.Cluster(gatedPath).RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "sa-access"},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				Verbs:           []string{"access"},
+				NonResourceURLs: []string{"/"},
+			},
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err, "failed to create cluster role")
+	_, err = kubeClusterClient.Cluster(gatedPath).RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "sa-access"},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:     "Group",
+				APIGroup: "rbac.authorization.k8s.io",
+				Name:     "system:serviceaccounts",
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     "ClusterRole",
+			Name:     "sa-access",
+			APIGroup: rbacv1.GroupName,
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err, "failed to create cluster role binding")
+
+	localKubeClusterClient, err := kcpkubernetesclientset.NewForConfig(framework.ConfigWithToken(string(localTokenSecret.Data["token"]), cfg))
+	require.NoError(t, err)
+	foreignKubeClusterClient, err := kcpkubernetesclientset.NewForConfig(framework.ConfigWithToken(string(foreignTokenSecret.Data["token"]), cfg))
+	require.NoError(t, err)
+
+	t.Log("The gated workspace's own service account can eventually access it, bypassing required groups")
+	kcptestinghelpers.Eventually(t, func() (bool, string) {
+		_, err := localKubeClusterClient.Cluster(gatedPath).CoreV1().ConfigMaps(gatedNamespace.Name).List(ctx, metav1.ListOptions{})
+		return err == nil, fmt.Sprintf("err = %v", err)
+	}, wait.ForeverTestTimeout, time.Millisecond*100)
+
+	t.Log("The foreign service account stays denied by required groups despite the RBAC grant")
+	_, err = foreignKubeClusterClient.Cluster(gatedPath).CoreV1().ConfigMaps(gatedNamespace.Name).List(ctx, metav1.ListOptions{})
+	require.Error(t, err, "foreign service account should be denied access to the gated workspace")
+	require.Truef(t, apierrors.IsForbidden(err), "expected forbidden error, got: %v", err)
 }

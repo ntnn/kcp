@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,10 +24,21 @@ import (
 
 // APIExportStatusApplyConfiguration represents a declarative configuration of the APIExportStatus type for use
 // with apply.
+//
+// APIExportStatus defines the observed state of APIExport.
 type APIExportStatusApplyConfiguration struct {
-	IdentityHash      *string                              `json:"identityHash,omitempty"`
-	IdentityKeyHashes []string                             `json:"identityKeyHashes,omitempty"`
-	Conditions        *conditionsv1alpha1.Conditions       `json:"conditions,omitempty"`
+	// identityHash is the stable identity of this APIExport, assigned once and
+	// immutable thereafter. For backwards compatibility, it defaults to the
+	// SHA-256 hash of the initial API identity key, but does not change when the key changes.
+	IdentityHash *string `json:"identityHash,omitempty"`
+	// identityKeyHashes is the set of SHA-256 fingerprints of the API identity keys.
+	// Unlike identityHash, these fingerprints can change when the keys change.
+	IdentityKeyHashes []string `json:"identityKeyHashes,omitempty"`
+	// conditions is a list of conditions that apply to the APIExport.
+	Conditions *conditionsv1alpha1.Conditions `json:"conditions,omitempty"`
+	// virtualWorkspaces contains all APIExport virtual workspace URLs.
+	//
+	// Deprecated: use APIExportEndpointSlice.status.endpoints instead
 	VirtualWorkspaces []VirtualWorkspaceApplyConfiguration `json:"virtualWorkspaces,omitempty"`
 }
 

@@ -166,14 +166,17 @@ spec:
                         This is the identity for a given APIExport that the APIResourceSchema belongs to.
                         The hash can be found on APIExport and APIResourceSchema's status.
                         It will be empty for core types.
-                        Note that one must look this up for a particular KCP instance.
+                        Note that one must look this up for a particular kcp instance.
                       type: string
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      maxLength: 127
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     resourceSelector:
                       description: resourceSelector is a list of claimed resource
@@ -405,6 +408,64 @@ spec:
                     Its purpose is to determine the added permissions that a service provider may
                     request and that a consumer may accept and allow the service provider access to.
                   properties:
+                    defaultSelector:
+                      description: |-
+                        defaultSelector is the default selector to use when creating APIBindings
+                        via WorkspaceType's defaultAPIBindings. If not set, the APIBinding will
+                        default to matchAll: true.
+
+                        This allows API providers to suggest a default scope for permission claims
+                        that will be used when workspaces are automatically created with default
+                        APIBindings. Users can always override the default selector by accepting the
+                        claim with a different selector or by manually creating APIBindings with a custom selector.
+                      properties:
+                        matchAll:
+                          description: matchAll grants access to all objects of the
+                            claimed resource.
+                          type: boolean
+                        matchExpressions:
+                          description: matchExpressions is a list of label selector
+                            requirements. The requirements are ANDed.
+                          items:
+                            description: |-
+                              A label selector requirement is a selector that contains values, a key, and an operator that
+                              relates the key and values.
+                            properties:
+                              key:
+                                description: key is the label key that the selector
+                                  applies to.
+                                type: string
+                              operator:
+                                description: |-
+                                  operator represents a key's relationship to a set of values.
+                                  Valid operators are In, NotIn, Exists and DoesNotExist.
+                                type: string
+                              values:
+                                description: |-
+                                  values is an array of string values. If the operator is In or NotIn,
+                                  the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                  the values array must be empty. This array is replaced during a strategic
+                                  merge patch.
+                                items:
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: atomic
+                            required:
+                            - key
+                            - operator
+                            type: object
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                            map is equivalent to an element of matchExpressions, whose key field is "key", the
+                            operator is "In", and the values array contains only "value". The requirements are ANDed.
+                          type: object
+                      type: object
+                      x-kubernetes-map-type: atomic
                     group:
                       default: ""
                       description: |-
@@ -418,14 +479,17 @@ spec:
                         This is the identity for a given APIExport that the APIResourceSchema belongs to.
                         The hash can be found on APIExport and APIResourceSchema's status.
                         It will be empty for core types.
-                        Note that one must look this up for a particular KCP instance.
+                        Note that one must look this up for a particular kcp instance.
                       type: string
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      maxLength: 127
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     verbs:
                       description: |-
@@ -441,6 +505,9 @@ spec:
                   - resource
                   - verbs
                   type: object
+                  x-kubernetes-validations:
+                  - message: defaultSelector is not allowed on subresource claims
+                    rule: '!self.resource.contains(''/'') || !has(self.defaultSelector)'
                 type: array
                 x-kubernetes-list-map-keys:
                 - group
@@ -495,10 +562,6 @@ spec:
                             a projection of the referenced resource inside the workspaces that
                             bind to the APIExport.
                           properties:
-                            identityHash:
-                              description: IdentityHash is the identity of the virtual
-                                resource.
-                              type: string
                             reference:
                               description: |-
                                 Reference points to another object that has a URL to a virtual workspace
@@ -524,7 +587,6 @@ spec:
                               type: object
                               x-kubernetes-map-type: atomic
                           required:
-                          - identityHash
                           - reference
                           type: object
                       type: object
@@ -591,6 +653,18 @@ spec:
                   - type
                   type: object
                 type: array
+              identityAliasHashes:
+                description: |-
+                  identityAliasHashes lists previous identity hashes of this APIExport
+                  that are still honored as equivalents of the current identityHash
+                  while a rotation's alias window is active. Permission claims and
+                  wildcard consumers referencing an alias hash keep resolving to this
+                  export until the alias is retired. Managed by the identity rotation
+                  controller.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               identityHash:
                 description: |-
                   identityHash is the stable identity of this APIExport, assigned once and

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@ package apibinding
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -28,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -35,6 +38,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
 	kcpapiextensionsclientset "github.com/kcp-dev/client-go/apiextensions/client"
@@ -56,11 +60,13 @@ import (
 	"github.com/kcp-dev/kcp/pkg/logging"
 	"github.com/kcp-dev/kcp/pkg/reconciler/committer"
 	"github.com/kcp-dev/kcp/pkg/reconciler/events"
+	kcpmetrics "github.com/kcp-dev/kcp/pkg/server/metrics"
 	"github.com/kcp-dev/kcp/pkg/tombstone"
 )
 
 const (
-	ControllerName = "kcp-apibinding"
+	ControllerName    = "kcp-apibinding"
+	LocksFieldManager = "apibinding-reconciler-locks"
 )
 
 var (
@@ -80,6 +86,7 @@ func NewController(
 	globalAPIResourceSchemaInformer apisv1alpha1informers.APIResourceSchemaClusterInformer,
 	globalAPIConversionInformer apisv1alpha1informers.APIConversionClusterInformer,
 	crdInformer kcpapiextensionsv1informers.CustomResourceDefinitionClusterInformer,
+	shardName string,
 ) (*controller, error) {
 	c := &controller{
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
@@ -90,6 +97,7 @@ func NewController(
 		),
 		crdClusterClient: crdClusterClient,
 		kcpClusterClient: kcpClusterClient,
+		shardName:        shardName,
 
 		listAPIBindings: func(clusterName logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error) {
 			return apiBindingInformer.Lister().Cluster(clusterName).List(labels.Everything())
@@ -136,7 +144,10 @@ func NewController(
 			if err != nil {
 				return nil, err
 			}
-			return indexers.ByIndexWithFallback[*apisv1alpha2.APIExport](apiExportInformer.Informer().GetIndexer(), globalAPIExportInformer.Informer().GetIndexer(), indexAPIExportsByAPIResourceSchema, key)
+			return indexers.ByIndexWithFallback[*apisv1alpha2.APIExport](apiExportInformer.Informer().GetIndexer(), globalAPIExportInformer.Informer().GetIndexer(), indexers.APIExportByAPIResourceSchema, key)
+		},
+		getAPIExportsByIdentity: func(identityHash string) ([]*apisv1alpha2.APIExport, error) {
+			return indexers.ByIndexWithFallback[*apisv1alpha2.APIExport](apiExportInformer.Informer().GetIndexer(), globalAPIExportInformer.Informer().GetIndexer(), indexers.APIExportByIdentity, identityHash)
 		},
 
 		getAPIResourceSchema: informer.NewScopedGetterWithFallback[*apisv1alpha1.APIResourceSchema, apisv1alpha1listers.APIResourceSchemaLister](apiResourceSchemaInformer.Lister(), globalAPIResourceSchemaInformer.Lister()),
@@ -156,11 +167,41 @@ func NewController(
 			return logicalClusterInformer.Lister().Cluster(name).Get(corev1alpha1.LogicalClusterName)
 		},
 		updateLogicalCluster: func(ctx context.Context, lc *corev1alpha1.LogicalCluster) error {
-			_, err := kcpClusterClient.CoreV1alpha1().LogicalClusters().Cluster(logicalcluster.From(lc).Path()).Update(ctx, lc, metav1.UpdateOptions{})
+			patchObj := &corev1alpha1.LogicalCluster{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: corev1alpha1.SchemeGroupVersion.String(),
+					Kind:       "LogicalCluster",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: lc.Name,
+					Annotations: map[string]string{
+						ResourceBindingsAnnotationKey: lc.Annotations[ResourceBindingsAnnotationKey],
+					},
+				},
+			}
+			patchBytes, err := json.Marshal(patchObj)
+			if err != nil {
+				return err
+			}
+			_, err = kcpClusterClient.CoreV1alpha1().LogicalClusters().Cluster(logicalcluster.From(lc).Path()).Patch(
+				ctx,
+				lc.Name,
+				types.ApplyPatchType,
+				patchBytes,
+				metav1.PatchOptions{
+					FieldManager: LocksFieldManager,
+					Force:        ptr.To(true),
+				},
+			)
 			return err
 		},
 		deletedCRDTracker: newLockedStringSet(),
-		commit:            committer.NewCommitter[*APIBinding, Patcher, *APIBindingSpec, *APIBindingStatus](kcpClusterClient.ApisV1alpha2().APIBindings()),
+		commit: committer.NewSSACommitter[*APIBinding, Patcher, *APIBindingSpec, *APIBindingStatus](
+			kcpClusterClient.ApisV1alpha2().APIBindings(),
+			ControllerName,
+		),
+		countedAPIBindings:          make(map[string]string),
+		countedAPIBindingConditions: make(map[string]map[string]string),
 	}
 
 	logger := logging.WithReconciler(klog.Background(), ControllerName)
@@ -168,20 +209,30 @@ func NewController(
 	// APIBinding handlers
 	_, _ = apiBindingInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			c.enqueueAPIBinding(tombstone.Obj[*apisv1alpha2.APIBinding](obj), logger, "")
+			binding := tombstone.Obj[*apisv1alpha2.APIBinding](obj)
+			c.enqueueAPIBinding(binding, logger, "")
+			c.handlePhaseMetricsOnAdd(binding)
+			c.handleConditionMetricsOnAdd(binding)
 		},
-		UpdateFunc: func(_, obj interface{}) {
-			c.enqueueAPIBinding(tombstone.Obj[*apisv1alpha2.APIBinding](obj), logger, "")
+		UpdateFunc: func(oldObj, obj interface{}) {
+			binding := tombstone.Obj[*apisv1alpha2.APIBinding](obj)
+			old := tombstone.Obj[*apisv1alpha2.APIBinding](oldObj)
+			c.enqueueAPIBinding(binding, logger, "")
+			c.handlePhaseMetricsOnUpdate(old, binding)
+			c.handleConditionMetricsOnUpdate(old, binding)
 		},
 		DeleteFunc: func(obj interface{}) {
-			c.enqueueAPIBinding(tombstone.Obj[*apisv1alpha2.APIBinding](obj), logger, "")
+			binding := tombstone.Obj[*apisv1alpha2.APIBinding](obj)
+			c.enqueueAPIBinding(binding, logger, "")
+			c.handlePhaseMetricsOnDelete(binding)
+			c.handleConditionMetricsOnDelete(binding)
 		},
 	})
 
 	// CRD handlers
 	_, _ = crdInformer.Informer().AddEventHandler(events.WithoutSyncs(cache.FilteringResourceEventHandler{
 		FilterFunc: func(obj interface{}) bool {
-			crd := obj.(*apiextensionsv1.CustomResourceDefinition)
+			crd := tombstone.Obj[*apiextensionsv1.CustomResourceDefinition](obj)
 			return logicalcluster.From(crd) == SystemBoundCRDsClusterName
 		},
 		Handler: cache.ResourceEventHandlerFuncs{
@@ -295,6 +346,7 @@ type CommitFunc = func(context.Context, *Resource, *Resource) error
 type controller struct {
 	queue workqueue.TypedRateLimitingInterface[string]
 
+	shardName        string
 	crdClusterClient kcpapiextensionsclientset.ClusterInterface
 	kcpClusterClient kcpclientset.ClusterInterface
 
@@ -302,8 +354,9 @@ type controller struct {
 	listAPIBindingsByAPIExport func(apiExport *apisv1alpha2.APIExport) ([]*apisv1alpha2.APIBinding, error)
 	getAPIBinding              func(clusterName logicalcluster.Name, name string) (*apisv1alpha2.APIBinding, error)
 
-	getAPIExportByPath    func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error)
-	getAPIExportsBySchema func(schema *apisv1alpha1.APIResourceSchema) ([]*apisv1alpha2.APIExport, error)
+	getAPIExportByPath      func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error)
+	getAPIExportsBySchema   func(schema *apisv1alpha1.APIResourceSchema) ([]*apisv1alpha2.APIExport, error)
+	getAPIExportsByIdentity func(identityHash string) ([]*apisv1alpha2.APIExport, error)
 
 	getAPIResourceSchema func(clusterName logicalcluster.Name, name string) (*apisv1alpha1.APIResourceSchema, error)
 
@@ -318,6 +371,12 @@ type controller struct {
 
 	deletedCRDTracker *lockedStringSet
 	commit            CommitFunc
+
+	// countedAPIBindingsLock protects countedAPIBindings and countedAPIBindingConditions.
+	countedAPIBindingsLock sync.Mutex
+	countedAPIBindings     map[string]string
+	// countedAPIBindingConditions maps binding key -> (conditionType -> status)
+	countedAPIBindingConditions map[string]map[string]string
 }
 
 // enqueueAPIBinding enqueues an APIBinding .
@@ -492,8 +551,20 @@ func (c *controller) process(ctx context.Context, key string) (bool, error) {
 	}
 
 	// If the object being reconciled changed as a result, update it.
-	oldResource := &Resource{ObjectMeta: old.ObjectMeta, Spec: &old.Spec, Status: &old.Status}
-	newResource := &Resource{ObjectMeta: binding.ObjectMeta, Spec: &binding.Spec, Status: &binding.Status}
+	oldResource := &Resource{
+		APIVersion: apisv1alpha2.SchemeGroupVersion.String(),
+		Kind:       "APIBinding",
+		ObjectMeta: old.ObjectMeta,
+		Spec:       &old.Spec,
+		Status:     &old.Status,
+	}
+	newResource := &Resource{
+		APIVersion: apisv1alpha2.SchemeGroupVersion.String(),
+		Kind:       "APIBinding",
+		ObjectMeta: binding.ObjectMeta,
+		Spec:       &binding.Spec,
+		Status:     &binding.Status,
+	}
 	if err := c.commit(ctx, oldResource, newResource); err != nil {
 		errs = append(errs, err)
 	}
@@ -514,11 +585,149 @@ func InstallIndexers(
 
 	// APIExport indexers
 	indexers.AddIfNotPresentOrDie(apiExportInformer.Informer().GetIndexer(), cache.Indexers{
-		indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
-		indexAPIExportsByAPIResourceSchema:   indexAPIExportsByAPIResourceSchemasFunc,
+		indexers.ByLogicalClusterPathAndName:  indexers.IndexByLogicalClusterPathAndName,
+		indexers.APIExportByAPIResourceSchema: indexers.IndexAPIExportByAPIResourceSchema,
+		indexers.APIExportByIdentity:          indexers.IndexAPIExportByIdentity,
 	})
 	indexers.AddIfNotPresentOrDie(globalAPIExportInformer.Informer().GetIndexer(), cache.Indexers{
-		indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
-		indexAPIExportsByAPIResourceSchema:   indexAPIExportsByAPIResourceSchemasFunc,
+		indexers.ByLogicalClusterPathAndName:  indexers.IndexByLogicalClusterPathAndName,
+		indexers.APIExportByAPIResourceSchema: indexers.IndexAPIExportByAPIResourceSchema,
+		indexers.APIExportByIdentity:          indexers.IndexAPIExportByIdentity,
 	})
+}
+
+func (c *controller) handlePhaseMetricsOnAdd(binding *apisv1alpha2.APIBinding) {
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(binding)
+	if err != nil {
+		return
+	}
+	phase := string(binding.Status.Phase)
+
+	c.countedAPIBindingsLock.Lock()
+	defer c.countedAPIBindingsLock.Unlock()
+
+	if _, exists := c.countedAPIBindings[key]; !exists {
+		c.countedAPIBindings[key] = phase
+		if phase != "" {
+			kcpmetrics.IncrementAPIBindingPhase(c.shardName, phase)
+		}
+	}
+}
+
+func (c *controller) handlePhaseMetricsOnUpdate(oldBinding, newBinding *apisv1alpha2.APIBinding) {
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(newBinding)
+	if err != nil {
+		return
+	}
+	oldPhase := string(oldBinding.Status.Phase)
+	newPhase := string(newBinding.Status.Phase)
+
+	c.countedAPIBindingsLock.Lock()
+	defer c.countedAPIBindingsLock.Unlock()
+
+	if oldPhase != newPhase {
+		if oldPhase != "" {
+			kcpmetrics.DecrementAPIBindingPhase(c.shardName, oldPhase)
+		}
+		if newPhase != "" {
+			kcpmetrics.IncrementAPIBindingPhase(c.shardName, newPhase)
+		}
+		if newPhase == string(apisv1alpha2.APIBindingPhaseBound) {
+			kcpmetrics.ObserveAPIBindingReadyDuration(c.shardName, newBinding.CreationTimestamp.Time)
+		}
+		c.countedAPIBindings[key] = newPhase
+	}
+}
+
+func (c *controller) handlePhaseMetricsOnDelete(binding *apisv1alpha2.APIBinding) {
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(binding)
+	if err != nil {
+		return
+	}
+
+	c.countedAPIBindingsLock.Lock()
+	defer c.countedAPIBindingsLock.Unlock()
+
+	if phase, exists := c.countedAPIBindings[key]; exists {
+		delete(c.countedAPIBindings, key)
+		if phase != "" {
+			kcpmetrics.DecrementAPIBindingPhase(c.shardName, phase)
+		}
+	}
+}
+
+func (c *controller) handleConditionMetricsOnAdd(binding *apisv1alpha2.APIBinding) {
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(binding)
+	if err != nil {
+		return
+	}
+
+	snapshot := make(map[string]string, len(binding.Status.Conditions))
+	for _, cond := range binding.Status.Conditions {
+		snapshot[string(cond.Type)] = string(cond.Status)
+	}
+
+	c.countedAPIBindingsLock.Lock()
+	defer c.countedAPIBindingsLock.Unlock()
+
+	if _, exists := c.countedAPIBindingConditions[key]; exists {
+		return
+	}
+	c.countedAPIBindingConditions[key] = snapshot
+	for condType, status := range snapshot {
+		kcpmetrics.IncrementAPIBindingConditionStatus(c.shardName, condType, status)
+	}
+}
+
+func (c *controller) handleConditionMetricsOnUpdate(oldBinding, newBinding *apisv1alpha2.APIBinding) {
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(newBinding)
+	if err != nil {
+		return
+	}
+
+	newSnapshot := make(map[string]string, len(newBinding.Status.Conditions))
+	for _, cond := range newBinding.Status.Conditions {
+		newSnapshot[string(cond.Type)] = string(cond.Status)
+	}
+
+	c.countedAPIBindingsLock.Lock()
+	defer c.countedAPIBindingsLock.Unlock()
+
+	oldSnapshot := c.countedAPIBindingConditions[key]
+
+	// Decrement removed or changed conditions.
+	for condType, oldStatus := range oldSnapshot {
+		newStatus, exists := newSnapshot[condType]
+		if !exists || newStatus != oldStatus {
+			kcpmetrics.DecrementAPIBindingConditionStatus(c.shardName, condType, oldStatus)
+		}
+	}
+	// Increment new or changed conditions.
+	for condType, newStatus := range newSnapshot {
+		oldStatus, exists := oldSnapshot[condType]
+		if !exists || oldStatus != newStatus {
+			kcpmetrics.IncrementAPIBindingConditionStatus(c.shardName, condType, newStatus)
+		}
+	}
+
+	c.countedAPIBindingConditions[key] = newSnapshot
+}
+
+func (c *controller) handleConditionMetricsOnDelete(binding *apisv1alpha2.APIBinding) {
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(binding)
+	if err != nil {
+		return
+	}
+
+	c.countedAPIBindingsLock.Lock()
+	defer c.countedAPIBindingsLock.Unlock()
+
+	snapshot, exists := c.countedAPIBindingConditions[key]
+	if !exists {
+		return
+	}
+	for condType, status := range snapshot {
+		kcpmetrics.DecrementAPIBindingConditionStatus(c.shardName, condType, status)
+	}
+	delete(c.countedAPIBindingConditions, key)
 }

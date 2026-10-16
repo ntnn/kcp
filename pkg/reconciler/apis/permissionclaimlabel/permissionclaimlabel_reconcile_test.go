@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,12 +24,17 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
+	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
+	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	apisv1alpha2listers "github.com/kcp-dev/sdk/client/listers/apis/v1alpha2"
 )
 
 func TestClaimSetKeys(t *testing.T) {
+	t.Parallel()
 	tests := map[string]struct {
 		claim apisv1alpha2.PermissionClaim
 		key   string
@@ -42,7 +47,7 @@ func TestClaimSetKeys(t *testing.T) {
 				},
 				IdentityHash: "",
 			},
-			key: "configmaps//",
+			key: "configmaps||",
 		},
 		"non-core built-in gr": {
 			claim: apisv1alpha2.PermissionClaim{
@@ -52,7 +57,7 @@ func TestClaimSetKeys(t *testing.T) {
 				},
 				IdentityHash: "",
 			},
-			key: "roles/rbac.authorization.k8s.io/",
+			key: "roles|rbac.authorization.k8s.io|",
 		},
 		"3rd party gr + hash": {
 			claim: apisv1alpha2.PermissionClaim{
@@ -62,12 +67,13 @@ func TestClaimSetKeys(t *testing.T) {
 				},
 				IdentityHash: "hash",
 			},
-			key: "apibindings/apis.kcp.io/hash",
+			key: "apibindings|apis.kcp.io|hash",
 		},
 	}
 
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
 			encoded := setKeyForClaim(tc.claim)
 			require.Equal(t, tc.key, encoded)
 
@@ -78,6 +84,7 @@ func TestClaimSetKeys(t *testing.T) {
 }
 
 func TestSelectorChangeDetection(t *testing.T) {
+	t.Parallel()
 	baseClaim := apisv1alpha2.PermissionClaim{
 		GroupResource: apisv1alpha2.GroupResource{
 			Group:    "",
@@ -129,6 +136,7 @@ func TestSelectorChangeDetection(t *testing.T) {
 
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
 			expectedClaims := sets.New(key)
 			acceptedClaims := sets.New(key)
 			appliedClaims := sets.New(key)
@@ -156,6 +164,199 @@ func TestSelectorChangeDetection(t *testing.T) {
 			} else {
 				require.False(t, selectorChanges.Has(key), "Expected no selector change to be detected")
 			}
+		})
+	}
+}
+
+func TestDetectClaimMismatches(t *testing.T) {
+	t.Parallel()
+	baseClaim := apisv1alpha2.PermissionClaim{
+		GroupResource: apisv1alpha2.GroupResource{
+			Group:    "",
+			Resource: "secrets",
+		},
+		IdentityHash: "test-hash",
+		Verbs:        []string{"get", "list", "watch"},
+	}
+	key := setKeyForClaim(baseClaim)
+
+	tests := map[string]struct {
+		acceptedVerbs          []string
+		exportedVerbs          []string
+		acceptedSelector       apisv1alpha2.PermissionClaimSelector
+		defaultSelector        *apisv1alpha2.PermissionClaimSelector
+		expectVerbMismatch     bool
+		expectSelectorMismatch bool
+	}{
+		"same verbs, no default selector - no mismatch": {
+			acceptedVerbs:          []string{"get", "list", "watch"},
+			exportedVerbs:          []string{"get", "list", "watch"},
+			acceptedSelector:       apisv1alpha2.PermissionClaimSelector{MatchAll: true},
+			defaultSelector:        nil,
+			expectVerbMismatch:     false,
+			expectSelectorMismatch: false,
+		},
+		"different verbs - verb mismatch": {
+			acceptedVerbs:          []string{"get", "list"},
+			exportedVerbs:          []string{"get", "list", "watch"},
+			acceptedSelector:       apisv1alpha2.PermissionClaimSelector{MatchAll: true},
+			defaultSelector:        nil,
+			expectVerbMismatch:     true,
+			expectSelectorMismatch: false,
+		},
+		"wildcard accepted - no verb mismatch": {
+			acceptedVerbs:          []string{"*"},
+			exportedVerbs:          []string{"get", "list", "watch"},
+			acceptedSelector:       apisv1alpha2.PermissionClaimSelector{MatchAll: true},
+			defaultSelector:        nil,
+			expectVerbMismatch:     false,
+			expectSelectorMismatch: false,
+		},
+		"wildcard exported - no verb mismatch": {
+			acceptedVerbs:          []string{"get", "list"},
+			exportedVerbs:          []string{"*"},
+			acceptedSelector:       apisv1alpha2.PermissionClaimSelector{MatchAll: true},
+			defaultSelector:        nil,
+			expectVerbMismatch:     false,
+			expectSelectorMismatch: false,
+		},
+		"selector differs from defaultSelector - selector mismatch": {
+			acceptedVerbs: []string{"get", "list", "watch"},
+			exportedVerbs: []string{"get", "list", "watch"},
+			acceptedSelector: apisv1alpha2.PermissionClaimSelector{
+				MatchAll: false,
+				LabelSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+			},
+			defaultSelector: &apisv1alpha2.PermissionClaimSelector{
+				MatchAll: true,
+			},
+			expectVerbMismatch:     false,
+			expectSelectorMismatch: true,
+		},
+		"selector matches defaultSelector - no mismatch": {
+			acceptedVerbs: []string{"get", "list", "watch"},
+			exportedVerbs: []string{"get", "list", "watch"},
+			acceptedSelector: apisv1alpha2.PermissionClaimSelector{
+				MatchAll: true,
+			},
+			defaultSelector: &apisv1alpha2.PermissionClaimSelector{
+				MatchAll: true,
+			},
+			expectVerbMismatch:     false,
+			expectSelectorMismatch: false,
+		},
+		"both verb and selector mismatch": {
+			acceptedVerbs: []string{"get"},
+			exportedVerbs: []string{"get", "list", "watch"},
+			acceptedSelector: apisv1alpha2.PermissionClaimSelector{
+				MatchAll: false,
+				LabelSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"foo": "bar"},
+				},
+			},
+			defaultSelector: &apisv1alpha2.PermissionClaimSelector{
+				MatchAll: true,
+			},
+			expectVerbMismatch:     true,
+			expectSelectorMismatch: true,
+		},
+	}
+
+	for testName, tc := range tests {
+		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
+			expectedClaims := sets.New(key)
+
+			acceptedClaim := baseClaim
+			acceptedClaim.Verbs = tc.acceptedVerbs
+			acceptedClaimsMap := map[string]apisv1alpha2.ScopedPermissionClaim{
+				key: {
+					PermissionClaim: acceptedClaim,
+					Selector:        tc.acceptedSelector,
+				},
+			}
+
+			exportedClaim := baseClaim
+			exportedClaim.Verbs = tc.exportedVerbs
+			exportedClaim.DefaultSelector = tc.defaultSelector
+			exportedClaimsMap := map[string]apisv1alpha2.PermissionClaim{
+				key: exportedClaim,
+			}
+
+			mismatches := detectClaimMismatches(
+				expectedClaims,
+				acceptedClaimsMap,
+				exportedClaimsMap,
+				klog.Background(),
+			)
+
+			if tc.expectVerbMismatch || tc.expectSelectorMismatch {
+				require.Len(t, mismatches, 1, "Expected exactly one mismatch")
+				require.Equal(t, tc.expectVerbMismatch, mismatches[0].verbMismatch, "Verb mismatch expectation mismatch")
+				require.Equal(t, tc.expectSelectorMismatch, mismatches[0].selectorMismatch, "Selector mismatch expectation mismatch")
+			} else {
+				require.Empty(t, mismatches, "Expected no mismatches")
+			}
+		})
+	}
+}
+
+func TestClaimedResourceServed(t *testing.T) {
+	t.Parallel()
+
+	consumer := logicalcluster.Name("consumer")
+	newBinding := func(name string, bound ...apisv1alpha2.BoundAPIResource) *apisv1alpha2.APIBinding {
+		return &apisv1alpha2.APIBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        name,
+				Annotations: map[string]string{logicalcluster.AnnotationKey: consumer.String()},
+			},
+			Status: apisv1alpha2.APIBindingStatus{BoundResources: bound},
+		}
+	}
+	cowboys := apisv1alpha2.BoundAPIResource{Group: "wildwest.dev", Resource: "cowboys"}
+
+	tests := map[string]struct {
+		claim    apisv1alpha2.PermissionClaim
+		bindings []*apisv1alpha2.APIBinding
+		want     bool
+	}{
+		"built-in resources are always served": {
+			claim: apisv1alpha2.PermissionClaim{GroupResource: apisv1alpha2.GroupResource{Resource: "secrets"}},
+			want:  true,
+		},
+		"identity claim served through a binding in the workspace": {
+			claim:    apisv1alpha2.PermissionClaim{GroupResource: apisv1alpha2.GroupResource{Group: "wildwest.dev", Resource: "cowboys"}, IdentityHash: "abc"},
+			bindings: []*apisv1alpha2.APIBinding{newBinding("other"), newBinding("wildwest", cowboys)},
+			want:     true,
+		},
+		"identity claim with no binding serving it": {
+			claim:    apisv1alpha2.PermissionClaim{GroupResource: apisv1alpha2.GroupResource{Group: "wildwest.dev", Resource: "cowboys"}, IdentityHash: "abc"},
+			bindings: []*apisv1alpha2.APIBinding{newBinding("other"), newBinding("sheriffs", apisv1alpha2.BoundAPIResource{Group: "wildwest.dev", Resource: "sheriffs"})},
+			want:     false,
+		},
+		"binding in another workspace does not count": {
+			claim: apisv1alpha2.PermissionClaim{GroupResource: apisv1alpha2.GroupResource{Group: "wildwest.dev", Resource: "cowboys"}, IdentityHash: "abc"},
+			bindings: []*apisv1alpha2.APIBinding{func() *apisv1alpha2.APIBinding {
+				b := newBinding("wildwest", cowboys)
+				b.Annotations[logicalcluster.AnnotationKey] = "elsewhere"
+				return b
+			}()},
+			want: false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			indexer := cache.NewIndexer(kcpcache.MetaClusterNamespaceKeyFunc, cache.Indexers{kcpcache.ClusterIndexName: kcpcache.ClusterIndexFunc})
+			for _, b := range tc.bindings {
+				require.NoError(t, indexer.Add(b))
+			}
+			c := &controller{apiBindingsLister: apisv1alpha2listers.NewAPIBindingClusterLister(indexer)}
+			require.Equal(t, tc.want, c.claimedResourceServed(consumer, tc.claim))
 		})
 	}
 }

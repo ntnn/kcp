@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
@@ -29,14 +30,16 @@ import (
 )
 
 func TestConvertV1Alpha2APIExports(t *testing.T) {
+	t.Parallel()
 	testcases := []APIExport{
 		{
 			Spec: APIExportSpec{},
 		},
 		{
 			Status: APIExportStatus{
-				IdentityHash:      "stable-identity",
-				IdentityKeyHashes: []string{"initial-key-hash", "rotated-key-hash"},
+				IdentityHash:        "stable-identity",
+				IdentityKeyHashes:   []string{"initial-key-hash", "rotated-key-hash"},
+				IdentityAliasHashes: []string{"previous-identity"},
 			},
 		},
 		{
@@ -113,7 +116,6 @@ func TestConvertV1Alpha2APIExports(t *testing.T) {
 								Kind:     "MyEndpointSlice",
 								Name:     "my-virtual-resource",
 							},
-							IdentityHash: "123abc",
 						},
 					},
 				}},
@@ -122,6 +124,32 @@ func TestConvertV1Alpha2APIExports(t *testing.T) {
 						Resource: "configmaps",
 					},
 					Verbs: []string{"get"},
+				}},
+			},
+		},
+		// Test case with DefaultSelector on PermissionClaim
+		{
+			Spec: APIExportSpec{
+				Resources: []ResourceSchema{{
+					Group:  "bar",
+					Name:   "foo",
+					Schema: "v1.foo.bar",
+					Storage: ResourceSchemaStorage{
+						CRD: &ResourceSchemaStorageCRD{},
+					},
+				}},
+				PermissionClaims: []PermissionClaim{{
+					GroupResource: GroupResource{
+						Resource: "configmaps",
+					},
+					Verbs: []string{"get", "list"},
+					DefaultSelector: &PermissionClaimSelector{
+						LabelSelector: metav1.LabelSelector{
+							MatchLabels: map[string]string{
+								"platform-mesh.io/enabled": "true",
+							},
+						},
+					},
 				}},
 			},
 		},
@@ -137,6 +165,7 @@ func TestConvertV1Alpha2APIExports(t *testing.T) {
 
 	for _, testcase := range testcases {
 		t.Run("", func(t *testing.T) {
+			t.Parallel()
 			v1, err := scheme.ConvertToVersion(&testcase, apisv1alpha1.SchemeGroupVersion)
 			if err != nil {
 				t.Fatalf("Failed to convert v1alpha2 to v1alpha1: %v", err)
@@ -163,6 +192,7 @@ func TestConvertV1Alpha2APIExports(t *testing.T) {
 }
 
 func TestConvertV1Alpha1APIExports(t *testing.T) {
+	t.Parallel()
 	testcases := []apisv1alpha1.APIExport{
 		{
 			Spec: apisv1alpha1.APIExportSpec{},
@@ -207,6 +237,7 @@ func TestConvertV1Alpha1APIExports(t *testing.T) {
 
 	for _, testcase := range testcases {
 		t.Run("", func(t *testing.T) {
+			t.Parallel()
 			v2, err := scheme.ConvertToVersion(&testcase, SchemeGroupVersion)
 			if err != nil {
 				t.Fatalf("Failed to convert v1alpha2 to v1alpha1: %v", err)

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import (
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/third_party/conditions/util/conditions"
 	apisv1alpha1apply "github.com/kcp-dev/sdk/client/applyconfiguration/apis/v1alpha1"
+	corev1alpha1apply "github.com/kcp-dev/sdk/client/applyconfiguration/core/v1alpha1"
 
 	virtualworkspacesoptions "github.com/kcp-dev/kcp/cmd/virtual-workspaces/options"
 	"github.com/kcp-dev/kcp/pkg/logging"
@@ -41,7 +42,7 @@ type endpointsReconciler struct {
 	getAPIExport                func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error)
 	listAPIBindingsByAPIExport  func(apiexport *apisv1alpha2.APIExport) ([]*apisv1alpha2.APIBinding, error)
 	patchAPIExportEndpointSlice func(ctx context.Context, cluster logicalcluster.Path, patch *apisv1alpha1apply.APIExportEndpointSliceApplyConfiguration) error
-	shardName                   string
+	thisShard                   string
 }
 
 type result struct {
@@ -54,7 +55,7 @@ func (c *controller) reconcile(ctx context.Context, apiExportEndpointSlice *apis
 		getMyShard:                  c.getMyShard,
 		getAPIExport:                c.getAPIExport,
 		listAPIBindingsByAPIExport:  c.listAPIBindingsByAPIExport,
-		shardName:                   c.shardName,
+		thisShard:                   c.thisShard,
 		patchAPIExportEndpointSlice: c.patchAPIExportEndpointSlice,
 	}
 
@@ -103,7 +104,7 @@ func (r *endpointsReconciler) reconcile(ctx context.Context, apiExportEndpointSl
 		patch.WithStatus(apisv1alpha1apply.APIExportEndpointSliceStatus())
 	} else {
 		patch.WithStatus(apisv1alpha1apply.APIExportEndpointSliceStatus().
-			WithAPIExportEndpoints(apisv1alpha1apply.APIExportEndpoint().WithURL(rs.url)))
+			WithAPIExportEndpoints(corev1alpha1apply.Endpoint().WithURL(rs.url)))
 	}
 	cluster := logicalcluster.From(apiExportEndpointSlice)
 	err = r.patchAPIExportEndpointSlice(ctx, cluster.Path(), patch)

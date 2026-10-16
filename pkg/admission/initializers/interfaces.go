@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,11 +20,20 @@ import (
 	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
 	kcpkubernetesinformers "github.com/kcp-dev/client-go/informers"
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
+	"github.com/kcp-dev/logicalcluster/v3"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
+	"github.com/kcp-dev/kcp/pkg/contextmanager"
+	"github.com/kcp-dev/kcp/pkg/objectcount"
 	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
 )
+
+// WantsClusterContextManager interface should be implemented by admission plugins that
+// need a per-logical-cluster context.
+type WantsClusterContextManager interface {
+	SetClusterContextManager(*contextmanager.Manager[logicalcluster.Path])
+}
 
 // WantsKcpInformers interface should be implemented by admission plugins
 // that want to have both local and global kcp informer factories injected.
@@ -72,4 +81,10 @@ type WantsDynamicClusterClient interface {
 // WantsDynamicRESTMapper is an interface that should be implemented by admission plugins that need the DynamicRESTMapper.
 type WantsDynamicRESTMapper interface {
 	SetDynamicRESTMapper(dynRESTMapper *dynamicrestmapper.DynamicRESTMapper)
+}
+
+// WantsObjectCountRegistry interface should be implemented by admission plugins
+// that want to have the per-logical-cluster object count registry injected.
+type WantsObjectCountRegistry interface {
+	SetObjectCountRegistry(*objectcount.Registry)
 }

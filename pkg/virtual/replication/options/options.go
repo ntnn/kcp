@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,8 +26,8 @@ import (
 	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/rootapiserver"
 
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/rootapiserver"
 	"github.com/kcp-dev/kcp/pkg/virtual/replication"
 	"github.com/kcp-dev/kcp/pkg/virtual/replication/builder"
 )
@@ -56,6 +56,7 @@ func (o *Replication) Validate(flagPrefix string) []error {
 func (o *Replication) NewReplication(
 	rootPathPrefix string,
 	config *rest.Config,
+	cacheConfig *rest.Config,
 	wildcardKcpInformers kcpinformers.SharedInformerFactory,
 	cacheKcpInformers kcpinformers.SharedInformerFactory,
 ) (workspaces []rootapiserver.NamedVirtualWorkspace, err error) {
@@ -69,10 +70,17 @@ func (o *Replication) NewReplication(
 		return nil, err
 	}
 
+	// We assume the cacheConfig already has the cache-related roundtrippers applied.
+	cacheDynamicClusterClient, err := kcpdynamic.NewForConfig(cacheConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	return builder.BuildVirtualWorkspace(
 		config,
 		path.Join(rootPathPrefix, replication.VirtualWorkspaceName),
 		dynamicClusterClient,
+		cacheDynamicClusterClient,
 		kubeClusterClient,
 		wildcardKcpInformers,
 		cacheKcpInformers,

@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,10 @@ import (
 
 // MaximalPermissionPolicyApplyConfiguration represents a declarative configuration of the MaximalPermissionPolicy type for use
 // with apply.
+//
+// MaximalPermissionPolicy is a wrapper type around the multiple options that would be allowed.
 type MaximalPermissionPolicyApplyConfiguration struct {
+	// local is the policy that is defined in same workspace as the API Export.
 	Local *apisv1alpha1.LocalAPIExportPolicy `json:"local,omitempty"`
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -120,7 +120,9 @@ func EventuallyCondition(t TestingT, getter func() (conditions.Getter, error), e
 	t.Helper()
 	Eventually(t, func() (bool, string) {
 		obj, err := getter()
-		require.NoError(t, err, "Error fetching object")
+		if err != nil {
+			return false, fmt.Sprintf("Error in condition getter: %v", err)
+		}
 		condition, descriptor, done := evaluator.matches(obj)
 		var reason string
 		if !done {

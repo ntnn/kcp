@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -37,6 +37,8 @@ import (
 	kcpfakecachev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/cache/v1alpha1/fake"
 	kcpcorev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/core/v1alpha1"
 	kcpfakecorev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/core/v1alpha1/fake"
+	kcpmigrationv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/migration/v1alpha1"
+	kcpfakemigrationv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/migration/v1alpha1/fake"
 	kcptenancyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/tenancy/v1alpha1"
 	kcpfaketenancyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/tenancy/v1alpha1/fake"
 	kcptopologyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/topology/v1alpha1"
@@ -45,6 +47,7 @@ import (
 	apisv1alpha2 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/apis/v1alpha2"
 	cachev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/cache/v1alpha1"
 	corev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/core/v1alpha1"
+	migrationv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/migration/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/tenancy/v1alpha1"
 	topologyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/topology/v1alpha1"
 )
@@ -54,7 +57,7 @@ import (
 // without applying any field management, validations and/or defaults. It shouldn't be considered a replacement
 // for a real clientset and is mostly useful in simple unit tests.
 //
-// DEPRECATED: NewClientset replaces this with support for field management, which significantly improves
+// Deprecated: NewClientset replaces this with support for field management, which significantly improves
 // server side apply testing. NewClientset is only available when apply configurations are generated (e.g.
 // via --with-applyconfig).
 func NewSimpleClientset(objects ...runtime.Object) *ClusterClientset {
@@ -85,6 +88,28 @@ func (c *ClusterClientset) Discovery() discovery.DiscoveryInterface {
 
 func (c *ClusterClientset) Tracker() kcptesting.ObjectTracker {
 	return c.tracker
+}
+
+// IsWatchListSemanticsUnSupported informs the reflector that this client
+// doesn't support WatchList semantics.
+//
+// This is a synthetic method whose sole purpose is to satisfy the optional
+// interface check performed by the reflector.
+// Returning true signals that WatchList can NOT be used.
+// No additional logic is implemented here.
+func (c *ClusterClientset) IsWatchListSemanticsUnSupported() bool {
+	return true
+}
+
+// IsWatchListSemanticsSupported informs the reflector that this client
+// doesn't support WatchList semantics.
+//
+// This is a synthetic method whose sole purpose is to satisfy the optional
+// interface check performed by the reflector.
+// Returning true signals that WatchList can NOT be used.
+// No additional logic is implemented here.
+func (c *Clientset) IsWatchListSemanticsUnSupported() bool {
+	return true
 }
 
 // Cluster scopes this clientset to one cluster.
@@ -118,6 +143,11 @@ func (c *ClusterClientset) CacheV1alpha1() kcpcachev1alpha1.CacheV1alpha1Cluster
 // CoreV1alpha1 retrieves the CoreV1alpha1ClusterClient
 func (c *ClusterClientset) CoreV1alpha1() kcpcorev1alpha1.CoreV1alpha1ClusterInterface {
 	return &kcpfakecorev1alpha1.CoreV1alpha1ClusterClient{Fake: &c.Fake}
+}
+
+// MigrationV1alpha1 retrieves the MigrationV1alpha1ClusterClient
+func (c *ClusterClientset) MigrationV1alpha1() kcpmigrationv1alpha1.MigrationV1alpha1ClusterInterface {
+	return &kcpfakemigrationv1alpha1.MigrationV1alpha1ClusterClient{Fake: &c.Fake}
 }
 
 // TenancyV1alpha1 retrieves the TenancyV1alpha1ClusterClient
@@ -191,6 +221,11 @@ func (c *Clientset) CacheV1alpha1() cachev1alpha1.CacheV1alpha1Interface {
 // CoreV1alpha1 retrieves the CoreV1alpha1Client
 func (c *Clientset) CoreV1alpha1() corev1alpha1.CoreV1alpha1Interface {
 	return &kcpfakecorev1alpha1.CoreV1alpha1Client{Fake: c.Fake, ClusterPath: c.clusterPath}
+}
+
+// MigrationV1alpha1 retrieves the MigrationV1alpha1Client
+func (c *Clientset) MigrationV1alpha1() migrationv1alpha1.MigrationV1alpha1Interface {
+	return &kcpfakemigrationv1alpha1.MigrationV1alpha1Client{Fake: c.Fake, ClusterPath: c.clusterPath}
 }
 
 // TenancyV1alpha1 retrieves the TenancyV1alpha1Client

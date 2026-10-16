@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,22 +18,23 @@ package workspace
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/martinlindhe/base36"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 
 	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
@@ -52,6 +53,7 @@ import (
 )
 
 func TestReconcileScheduling(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		name                     string
 		initialShards            []*corev1alpha1.Shard
@@ -75,6 +77,7 @@ func TestReconcileScheduling(t *testing.T) {
 
 				initialWS.Annotations["internal.tenancy.kcp.io/cluster"] = "root-foo"
 				initialWS.Annotations["internal.tenancy.kcp.io/shard"] = "1pfxsevk"
+				initialWS.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey] = "root"
 				initialWS.Finalizers = append(initialWS.Finalizers, "core.kcp.io/logicalcluster")
 				if !equality.Semantic.DeepEqual(ws, initialWS) {
 					t.Fatalf("unexpected Workspace:\n%s", cmp.Diff(ws, initialWS))
@@ -87,7 +90,13 @@ func TestReconcileScheduling(t *testing.T) {
 			initialShards:         []*corev1alpha1.Shard{shard("root")},
 			initialWorkspaceTypes: wellKnownWorkspaceTypes(),
 			targetWorkspace:       wellKnownFooWSForPhaseTwo(),
-			targetLogicalCluster:  &corev1alpha1.LogicalCluster{},
+			targetLogicalCluster: &corev1alpha1.LogicalCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						corev1alpha1.LogicalClusterShardAnnotationKey: "root",
+					},
+				},
+			},
 			validateWorkspace: func(t *testing.T, initialWS, wsAfterReconciliation *tenancyv1alpha1.Workspace) {
 				t.Helper()
 
@@ -120,8 +129,14 @@ func TestReconcileScheduling(t *testing.T) {
 				thisWS.Annotations["kcp.io/cluster"] = "root-foo"
 				return thisWS
 			}()},
-			targetWorkspace:      wellKnownFooWSForPhaseTwo(),
-			targetLogicalCluster: &corev1alpha1.LogicalCluster{},
+			targetWorkspace: wellKnownFooWSForPhaseTwo(),
+			targetLogicalCluster: &corev1alpha1.LogicalCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						corev1alpha1.LogicalClusterShardAnnotationKey: "root",
+					},
+				},
+			},
 			validateWorkspace: func(t *testing.T, initialWS, wsAfterReconciliation *tenancyv1alpha1.Workspace) {
 				t.Helper()
 
@@ -183,8 +198,14 @@ func TestReconcileScheduling(t *testing.T) {
 				thisWS.Annotations["kcp.io/cluster"] = "root-foo"
 				return thisWS
 			}()},
-			targetWorkspace:      wellKnownFooWSForPhaseTwo(),
-			targetLogicalCluster: &corev1alpha1.LogicalCluster{},
+			targetWorkspace: wellKnownFooWSForPhaseTwo(),
+			targetLogicalCluster: &corev1alpha1.LogicalCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						corev1alpha1.LogicalClusterShardAnnotationKey: "root",
+					},
+				},
+			},
 			validateWorkspace: func(t *testing.T, initialWS, wsAfterReconciliation *tenancyv1alpha1.Workspace) {
 				t.Helper()
 
@@ -247,6 +268,7 @@ func TestReconcileScheduling(t *testing.T) {
 
 				initialWS.Annotations["internal.tenancy.kcp.io/cluster"] = "root-foo"
 				initialWS.Annotations["internal.tenancy.kcp.io/shard"] = "29hdqnv7"
+				initialWS.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey] = "amber"
 				initialWS.Finalizers = append(initialWS.Finalizers, "core.kcp.io/logicalcluster")
 				if !equality.Semantic.DeepEqual(wsAfterReconciliation, initialWS) {
 					t.Fatalf("unexpected Workspace:\n%s", cmp.Diff(wsAfterReconciliation, initialWS))
@@ -280,11 +302,43 @@ func TestReconcileScheduling(t *testing.T) {
 			},
 			expectedStatus: reconcileStatusContinue,
 		},
+		{
+			name:                  "shard hash changed: workspace URL is rebuilt from the new shard",
+			initialShards:         []*corev1alpha1.Shard{shard("root"), shard("amber")},
+			initialWorkspaceTypes: wellKnownWorkspaceTypes(),
+			targetWorkspace: func() *tenancyv1alpha1.Workspace {
+				ws := wellKnownFooWSForPhaseTwo()
+				// metaDataReconciler has already restamped the shard hash to amber,
+				// but the URL still points at the old (root) shard.
+				ws.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey] = "amber"
+				ws.Annotations["internal.tenancy.kcp.io/shard"] = "29hdqnv7"
+				ws.Spec.URL = "https://root/clusters/root:foo"
+				ws.Spec.Cluster = "root-foo"
+				return ws
+			}(),
+			targetLogicalCluster: &corev1alpha1.LogicalCluster{},
+			validateWorkspace: func(t *testing.T, initialWS, wsAfterReconciliation *tenancyv1alpha1.Workspace) {
+				t.Helper()
+
+				clearLastTransitionTimeOnWsConditions(wsAfterReconciliation)
+				initialWS.CreationTimestamp = wsAfterReconciliation.CreationTimestamp
+				initialWS.Spec.URL = "https://amber/clusters/root:foo"
+				initialWS.Status.Conditions = append(initialWS.Status.Conditions, conditionsapi.Condition{
+					Type:   tenancyv1alpha1.WorkspaceScheduled,
+					Status: corev1.ConditionTrue,
+				})
+				if !equality.Semantic.DeepEqual(wsAfterReconciliation, initialWS) {
+					t.Fatalf("unexpected Workspace:\n%s", cmp.Diff(wsAfterReconciliation, initialWS))
+				}
+			},
+			expectedStatus: reconcileStatusContinue,
+		},
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
-			fakeKubeClient := kcpfakekubeclient.NewSimpleClientset(scenario.initialKubeClientObjects...)
-			fakeKcpClient := kcpfakeclient.NewSimpleClientset(scenario.initialKcpClientObjects...)
+			t.Parallel()
+			fakeKubeClient := kcpfakekubeclient.NewSimpleClientset(scenario.initialKubeClientObjects...) //nolint:staticcheck
+			fakeKcpClient := kcpfakeclient.NewSimpleClientset(scenario.initialKcpClientObjects...)       //nolint:staticcheck
 
 			workspaceTypeIndexer := cache.NewIndexer(kcpcache.MetaClusterNamespaceKeyFunc, cache.Indexers{})
 			indexers.AddIfNotPresentOrDie(workspaceTypeIndexer, cache.Indexers{
@@ -325,14 +379,6 @@ func TestReconcileScheduling(t *testing.T) {
 						}
 					}
 					return shards, nil
-				},
-				getShardByHash: func(hash string) (*corev1alpha1.Shard, error) {
-					for _, shard := range scenario.initialShards {
-						if shardNameToBase36Sha224(shard.Name) == hash {
-							return shard, nil
-						}
-					}
-					return nil, kerrors.NewNotFound(tenancyv1alpha1.SchemeGroupVersion.WithResource("Shard").GroupResource(), hash)
 				},
 				getWorkspaceType: getType,
 				getLogicalCluster: func(clusterName logicalcluster.Name) (*corev1alpha1.LogicalCluster, error) {
@@ -377,6 +423,137 @@ func TestReconcileScheduling(t *testing.T) {
 	}
 }
 
+func TestChooseShardWithLimits(t *testing.T) {
+	t.Parallel()
+	scenarios := []struct {
+		name string
+		// shardName -> soft, hard, current workspace count
+		shards         map[string][3]int64
+		expectedShards []string // nil means unschedulable
+	}{
+		{
+			name: "no limits configured, all shards eligible",
+			shards: map[string][3]int64{
+				"alpha": {0, 0, 1000},
+				"beta":  {0, 0, 1000},
+			},
+			expectedShards: []string{"alpha", "beta"},
+		},
+		{
+			name: "shards under their soft limit are preferred",
+			shards: map[string][3]int64{
+				"full":  {10, 20, 15},
+				"free":  {10, 20, 5},
+				"free2": {0, 0, 1000},
+			},
+			expectedShards: []string{"free", "free2"},
+		},
+		{
+			name: "shards at or over their hard limit are refused",
+			shards: map[string][3]int64{
+				"full": {10, 20, 20},
+				"free": {10, 20, 15},
+			},
+			expectedShards: []string{"free"},
+		},
+		{
+			name: "soft-limited shards are used when no shard is under its soft limit",
+			shards: map[string][3]int64{
+				"over":  {10, 20, 15},
+				"over2": {10, 20, 12},
+			},
+			expectedShards: []string{"over", "over2"},
+		},
+		{
+			name: "unschedulable when all shards are at their hard limit",
+			shards: map[string][3]int64{
+				"full":  {10, 20, 20},
+				"full2": {10, 20, 25},
+			},
+			expectedShards: nil,
+		},
+		{
+			name: "soft limit alone never blocks scheduling",
+			shards: map[string][3]int64{
+				"only": {10, 0, 1000},
+			},
+			expectedShards: []string{"only"},
+		},
+		{
+			name: "hard limit without soft limit",
+			shards: map[string][3]int64{
+				"full": {0, 20, 20},
+				"free": {0, 20, 19},
+			},
+			expectedShards: []string{"free"},
+		},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
+			shards := make([]*corev1alpha1.Shard, 0, len(scenario.shards))
+			for name, x := range scenario.shards {
+				shards = append(shards, shardWithLimits(name, x[0], x[1], x[2]))
+			}
+			target := schedulingReconciler{
+				listShards: func(selector labels.Selector) ([]*corev1alpha1.Shard, error) {
+					return shards, nil
+				},
+			}
+
+			// the choice is random among eligible shards, so sample repeatedly
+			// to verify only expected shards are ever chosen.
+			chosen := map[string]int{}
+			for range 50 {
+				shard, reason, err := target.chooseShardAndMarkCondition(klog.Background(), workspace("foo"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario.expectedShards == nil {
+					if shard != nil {
+						t.Fatalf("expected workspace to be unschedulable, but shard %q was chosen", shard.Name)
+					}
+					if reason == "" {
+						t.Fatal("expected a reason when unschedulable")
+					}
+					return
+				}
+				if shard == nil {
+					t.Fatalf("expected a shard to be chosen, got unschedulable with reason %q", reason)
+				}
+				chosen[shard.Name]++
+			}
+			for name := range chosen {
+				if !slices.Contains(scenario.expectedShards, name) {
+					t.Errorf("shard %q was chosen but is not among expected shards %v", name, scenario.expectedShards)
+				}
+			}
+		})
+	}
+}
+
+func shardWithLimits(name string, soft, hard, used int64) *corev1alpha1.Shard {
+	s := shard(name)
+	s.Status.Used = corev1.ResourceList{
+		corev1alpha1.ResourceWorkspaces: *resource.NewQuantity(used, resource.DecimalSI),
+	}
+	if soft == 0 && hard == 0 {
+		return s
+	}
+	s.Spec.ResourceLimits = &corev1alpha1.ShardResourceLimits{}
+	if soft > 0 {
+		s.Spec.ResourceLimits.Soft = corev1.ResourceList{
+			corev1alpha1.ResourceWorkspaces: *resource.NewQuantity(soft, resource.DecimalSI),
+		}
+	}
+	if hard > 0 {
+		s.Spec.ResourceLimits.Hard = corev1.ResourceList{
+			corev1alpha1.ResourceWorkspaces: *resource.NewQuantity(hard, resource.DecimalSI),
+		}
+	}
+	return s
+}
+
 func workspace(name string) *tenancyv1alpha1.Workspace {
 	return &tenancyv1alpha1.Workspace{
 		ObjectMeta: metav1.ObjectMeta{
@@ -396,6 +573,7 @@ func wellKnownFooWSForPhaseTwo() *tenancyv1alpha1.Workspace {
 	ws := workspace("foo")
 	// since this is part two we can assume the following fields are assigned
 	ws.Annotations["internal.tenancy.kcp.io/cluster"] = "root-foo"
+	ws.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey] = "root"
 	ws.Annotations["internal.tenancy.kcp.io/shard"] = "1pfxsevk"
 	ws.Annotations["experimental.tenancy.kcp.io/owner"] = `{"username":"kcp-admin"}`
 	ws.Finalizers = append(ws.Finalizers, "core.kcp.io/logicalcluster")
@@ -415,6 +593,7 @@ func wellKnownLogicalClusterForFooWS() *corev1alpha1.LogicalCluster {
 				tenancyv1alpha1.ExperimentalWorkspaceOwnerAnnotationKey: `{"username":"kcp-admin"}`,
 				tenancyv1alpha1.LogicalClusterTypeAnnotationKey:         "root:universal",
 				core.LogicalClusterPathAnnotationKey:                    "root:foo",
+				corev1alpha1.LogicalClusterShardAnnotationKey:           "root",
 			},
 		},
 		Spec: corev1alpha1.LogicalClusterSpec{
@@ -423,6 +602,9 @@ func wellKnownLogicalClusterForFooWS() *corev1alpha1.LogicalCluster {
 				Resource:   "workspaces",
 				Name:       "foo",
 				Cluster:    "root",
+			},
+			CreatedBy: &corev1alpha1.OwnerUserInfo{
+				Username: "kcp-admin",
 			},
 			Initializers: []corev1alpha1.LogicalClusterInitializer{"root:organization", "system:apibindings"},
 		},
@@ -585,10 +767,4 @@ func actionStrings(actions []kcpclientgotesting.Action) []string {
 		res = append(res, actionString(a))
 	}
 	return res
-}
-
-func shardNameToBase36Sha224(name string) string {
-	hash := sha256.Sum224([]byte(name))
-	base36hash := strings.ToLower(base36.EncodeBytes(hash[:]))
-	return base36hash[:8]
 }

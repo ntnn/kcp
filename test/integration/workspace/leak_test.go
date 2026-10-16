@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -90,16 +90,41 @@ func createAndDeleteWs(ctx context.Context, t *testing.T, kcpClient kcpclientset
 }
 
 var (
-	// These are goroutines that can pop up randomly during KCP
+	// These are goroutines that can pop up randomly during kcp
 	// operations and aren't indicative of a leak when deleting
 	// a workspace.
 	randomGoroutineSources = []goleak.Option{
+		// HTTP/HTTP2 goroutines - these are connection pool goroutines
+		// that may persist briefly after operations complete
 		goleak.IgnoreCreatedBy("net/http.(*Server).Serve"),
 		goleak.IgnoreCreatedBy("golang.org/x/net/http2.(*Transport).newClientConn"),
 		goleak.IgnoreCreatedBy("golang.org/x/net/http2.(*serverConn).serve"),
+		goleak.IgnoreCreatedBy("golang.org/x/net/http2.(*ClientConn).roundTrip"),
+		goleak.IgnoreCreatedBy("golang.org/x/net/http2.(*serverConn).scheduleHandler"),
+
+		// gRPC transport goroutines from etcd client - these are connection
+		// management goroutines that may briefly outlive operations
+		goleak.IgnoreTopFunction("google.golang.org/grpc.(*addrConn).resetTransportAndUnlock"),
+		goleak.IgnoreCreatedBy("google.golang.org/grpc.(*acBalancerWrapper).Connect"),
+
+		// API server cacher goroutines - these handle watch connections
+		// and may briefly persist after workspace deletion
+		goleak.IgnoreTopFunction("k8s.io/apiserver/pkg/storage/cacher.(*cacheWatcher).process"),
+		goleak.IgnoreTopFunction("k8s.io/apiserver/pkg/endpoints/handlers.(*WatchServer).HandleHTTP"),
+
+		// StreamWatcher goroutines - these read from watch connections
+		// and may briefly persist after workspace deletion
+		goleak.IgnoreCreatedBy("k8s.io/apimachinery/pkg/watch.NewStreamWatcherWithLogger"),
+
+		// Reflector resync goroutines
+		goleak.IgnoreTopFunction("github.com/kcp-dev/apimachinery/v2/third_party/reflector.(*Reflector).startResync"),
+
+		// Context cancellation propagation goroutines
+		goleak.IgnoreTopFunction("context.(*cancelCtx).propagateCancel.func2"),
 	}
 )
 
+//nolint:paralleltest // goleak.IgnoreCurrent captures the current goroutine baseline; running in parallel would pollute it.
 func TestWorkspaceDeletionLeak(t *testing.T) {
 	_, kcpClient, _ := framework.StartTestServer(t)
 

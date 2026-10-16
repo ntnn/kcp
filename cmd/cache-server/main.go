@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"strings"
@@ -26,18 +27,22 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/component-base/cli"
+	logsapiv1 "k8s.io/component-base/logs/api/v1"
 
 	"github.com/kcp-dev/embeddedetcd"
 	"github.com/kcp-dev/sdk/cmd/help"
 
 	cacheserver "github.com/kcp-dev/kcp/pkg/cache/server"
 	"github.com/kcp-dev/kcp/pkg/cache/server/options"
+	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
+
+	_ "github.com/kcp-dev/kcp/pkg/logging/json/register"
 )
 
 func main() {
 	rootDir := flag.String("root-directory", ".kcp-cache", "Path to the root directory where all files required by this server will be stored")
 
-	var cacheServerFlags, remainingFlags []string //nolint:prealloc
+	var cacheServerFlags, remainingFlags []string
 	for _, arg := range os.Args[1:] {
 		if strings.HasPrefix(arg, "--root-directory") {
 			cacheServerFlags = append(cacheServerFlags, arg)
@@ -51,7 +56,7 @@ func main() {
 	serverOptions := options.NewOptions(*rootDir)
 	cmd := &cobra.Command{
 		Use:   "cache-server",
-		Short: "Runs the cache server for KCP",
+		Short: "Runs the cache server for kcp",
 		Long: help.Doc(`
             Starts a server that hosts data/resources that are required by shards.
             It serves as a cache helping to reduce the storage that would have to
@@ -71,6 +76,11 @@ func main() {
 		`),
 
 		RunE: func(c *cobra.Command, args []string) error {
+			// run as early as possible to avoid races later when some components (e.g. grpc) start early using klog
+			if err := logsapiv1.ValidateAndApply(serverOptions.Logs, kcpfeatures.DefaultFeatureGate); err != nil {
+				return err
+			}
+
 			completed, err := serverOptions.Complete()
 			if err != nil {
 				return err
@@ -89,9 +99,13 @@ func main() {
 			}
 
 			ctx := genericapiserver.SetupSignalContext()
-			// the etcd server must be up before NewServer because storage decorators access it right away
+			// the etcd server must be up before NewServer because storage decorators access it right away.
+			// Use a separate context for etcd so it outlives the apiserver during graceful shutdown.
+			// This prevents CRD watch cache lazy initialization from blocking on a dead etcd.
+			etcdCtx, etcdCancel := context.WithCancel(context.Background())
+			defer etcdCancel()
 			if completedConfig.EmbeddedEtcd.Config != nil {
-				if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(ctx); err != nil {
+				if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(etcdCtx); err != nil {
 					return err
 				}
 			}

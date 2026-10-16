@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,10 +24,31 @@ import (
 
 // APIExportStatusApplyConfiguration represents a declarative configuration of the APIExportStatus type for use
 // with apply.
+//
+// APIExportStatus defines the observed state of APIExport.
 type APIExportStatusApplyConfiguration struct {
-	IdentityHash      *string                              `json:"identityHash,omitempty"`
-	IdentityKeyHashes []string                             `json:"identityKeyHashes,omitempty"`
-	Conditions        *v1alpha1.Conditions                 `json:"conditions,omitempty"`
+	// identityHash is the stable identity of this APIExport, assigned once and
+	// immutable thereafter. For backwards compatibility, it defaults to the
+	// SHA-256 hash of the initial API identity key, but does not change when the key changes.
+	IdentityHash *string `json:"identityHash,omitempty"`
+	// identityKeyHashes is the set of SHA-256 fingerprints of the API identity keys.
+	// Unlike identityHash, these fingerprints can change when the keys change.
+	IdentityKeyHashes []string `json:"identityKeyHashes,omitempty"`
+	// identityAliasHashes lists previous identity hashes of this APIExport
+	// that are still honored as equivalents of the current identityHash
+	// while a rotation's alias window is active. Permission claims and
+	// wildcard consumers referencing an alias hash keep resolving to this
+	// export until the alias is retired. Managed by the identity rotation
+	// controller.
+	IdentityAliasHashes []string `json:"identityAliasHashes,omitempty"`
+	// conditions is a list of conditions that apply to the APIExport.
+	Conditions *v1alpha1.Conditions `json:"conditions,omitempty"`
+	// virtualWorkspaces contains all APIExport virtual workspace URLs.
+	// this field is empty unless kcp has been started with the
+	// 'EnableDeprecatedAPIExportVirtualWorkspacesUrls' feature gate.
+	//
+	// Deprecated: use APIExportEndpointSlice.status.endpoints instead. This
+	// field will be removed in an upcoming API version.
 	VirtualWorkspaces []VirtualWorkspaceApplyConfiguration `json:"virtualWorkspaces,omitempty"`
 }
 
@@ -51,6 +72,16 @@ func (b *APIExportStatusApplyConfiguration) WithIdentityHash(value string) *APIE
 func (b *APIExportStatusApplyConfiguration) WithIdentityKeyHashes(values ...string) *APIExportStatusApplyConfiguration {
 	for i := range values {
 		b.IdentityKeyHashes = append(b.IdentityKeyHashes, values[i])
+	}
+	return b
+}
+
+// WithIdentityAliasHashes adds the given value to the IdentityAliasHashes field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the IdentityAliasHashes field.
+func (b *APIExportStatusApplyConfiguration) WithIdentityAliasHashes(values ...string) *APIExportStatusApplyConfiguration {
+	for i := range values {
+		b.IdentityAliasHashes = append(b.IdentityAliasHashes, values[i])
 	}
 	return b
 }

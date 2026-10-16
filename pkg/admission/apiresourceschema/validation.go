@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	crdvalidation "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/validation"
+	structuralschema "k8s.io/apiextensions-apiserver/pkg/apiserver/schema"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -44,7 +45,7 @@ var (
 
 // ValidateAPIResourceSchema validates an APIResourceSchema.
 func ValidateAPIResourceSchema(ctx context.Context, s *apisv1alpha1.APIResourceSchema) field.ErrorList {
-	allErrs := field.ErrorList{}
+	allErrs := field.ErrorList{} //nolint:prealloc // prealloc doesn't make sense for this function
 	allErrs = append(allErrs, ValidateAPIResourceSchemaName(s.Name, &s.Spec, field.NewPath("metadata", "name"))...)
 	allErrs = append(allErrs, ValidateAPIResourceSchemaGroup(s.Spec.Group, s.Annotations)...)
 	allErrs = append(allErrs, ValidateAPIResourceSchemaSpec(ctx, &s.Spec, field.NewPath("spec"))...)
@@ -101,7 +102,7 @@ func ValidateAPIResourceSchemaSpec(ctx context.Context, spec *apisv1alpha1.APIRe
 	allErrs := field.ErrorList{}
 
 	// HACK: Relax naming constraints when registering legacy schema resources through CRDs
-	// for the KCP scenario
+	// for the kcp scenario
 	if spec.Group == "" {
 		// pass. This is the core group
 	} else if spec.Group == "core" {
@@ -183,7 +184,7 @@ var defaultValidationOpts = crdvalidation.ValidationOptions{
 	RequireAtomicSetType:               true,
 	RequireMapListKeysMapSetValidation: true,
 
-	CELEnvironmentSet: environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion(), true),
+	CELEnvironmentSet: environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion()),
 }
 
 func ValidateAPIResourceVersion(ctx context.Context, version *apisv1alpha1.APIResourceVersion, fldPath *field.Path) field.ErrorList {
@@ -193,12 +194,12 @@ func ValidateAPIResourceVersion(ctx context.Context, version *apisv1alpha1.APIRe
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("deprecationWarning"), version.DeprecationWarning, err))
 	}
 
+	var crdSchemaInternal apiextensionsinternal.CustomResourceValidation
 	if len(version.Schema.Raw) == 0 || string(version.Schema.Raw) == "null" {
 		allErrs = append(allErrs, field.Required(fldPath.Child("schema"), ""))
 	} else {
 		statusEnabled := version.Subresources.Status != nil
 		var crdSchemaV1 apiextensionsv1.CustomResourceValidation
-		var crdSchemaInternal apiextensionsinternal.CustomResourceValidation
 		if err := json.Unmarshal(version.Schema.Raw, &crdSchemaV1.OpenAPIV3Schema); err != nil {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("schema"), string(version.Schema.Raw), fmt.Sprintf("invalid JSON: %v", err)))
 		} else if err := apiextensionsv1.Convert_v1_CustomResourceValidation_To_apiextensions_CustomResourceValidation(&crdSchemaV1, &crdSchemaInternal, nil); err != nil {
@@ -221,6 +222,25 @@ func ValidateAPIResourceVersion(ctx context.Context, version *apisv1alpha1.APIRe
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("additionalPrinterColumns").Index(i), version.Subresources, err.Error()))
 		} else {
 			allErrs = append(allErrs, crdvalidation.ValidateCustomResourceColumnDefinition(&crdColumn, fldPath.Child("additionalPrinterColumns").Index(i))...)
+		}
+	}
+
+	if len(version.SelectableFields) > 0 {
+		if crdSchemaInternal.OpenAPIV3Schema == nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("selectableFields"), "", "may only be set when `version.schema.openAPIV3Schema` is not included"))
+		} else {
+			structural, err := structuralschema.NewStructural(crdSchemaInternal.OpenAPIV3Schema)
+			if err != nil {
+				allErrs = append(allErrs, field.Invalid(fldPath.Child("schema").Child("openAPIV3Schema"), "", err.Error()))
+			}
+			crdSelectableFields := make([]apiextensionsinternal.SelectableField, len(version.SelectableFields))
+			for i := range version.SelectableFields {
+				if err := apiextensionsv1.Convert_v1_SelectableField_To_apiextensions_SelectableField(&version.SelectableFields[i], &crdSelectableFields[i], nil); err != nil {
+					allErrs = append(allErrs, field.Invalid(fldPath.Child("selectableFields").Index(i), version.SelectableFields[i], err.Error()))
+				}
+			}
+
+			allErrs = append(allErrs, crdvalidation.ValidateCustomResourceSelectableFields(crdSelectableFields, structural, fldPath.Child("selectableFields"), defaultValidationOpts, version.Name)...)
 		}
 	}
 

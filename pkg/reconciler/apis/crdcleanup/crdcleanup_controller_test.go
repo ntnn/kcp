@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ import (
 )
 
 func TestBoundCRDDeletion(t *testing.T) {
+	t.Parallel()
 	schemaUID := "f1249438-5c68-11ed-823e-f875a46c726b"
 
 	apiBinding := &apisv1alpha2.APIBinding{
@@ -99,6 +100,7 @@ func TestBoundCRDDeletion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			deleteHappened := false
 
 			crd := &apiextensionsv1.CustomResourceDefinition{}
@@ -126,6 +128,9 @@ func TestBoundCRDDeletion(t *testing.T) {
 						return []*apisv1alpha2.APIBinding{apiBinding}, nil
 					}
 					return []*apisv1alpha2.APIBinding{}, nil
+				},
+				getAPIBindingsClaimingCRD: func(crd *apiextensionsv1.CustomResourceDefinition) ([]*apisv1alpha2.APIBinding, error) {
+					return nil, nil
 				},
 				deleteCRD: func(ctx context.Context, name string) error {
 					deleteHappened = true

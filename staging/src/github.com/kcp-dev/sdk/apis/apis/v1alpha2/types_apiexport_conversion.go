@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,9 @@ const (
 	ResourceSchemasAnnotation          = "apis.v1alpha2.kcp.io/resource-schemas"
 	PermissionClaimsAnnotation         = "apis.v1alpha2.kcp.io/permission-claims"
 	PermissionClaimsV1Alpha1Annotation = "apis.v1alpha2.kcp.io/v1alpha1-permission-claims"
+	// StatusIdentityAliasHashesAnnotation retains status.identityAliasHashes
+	// across a v1alpha1 round-trip; v1alpha1 has no notion of identity aliases.
+	StatusIdentityAliasHashesAnnotation = "apis.v1alpha2.kcp.io/status-identity-alias-hashes"
 )
 
 // v1alpha2 -> v1alpha1 conversions.
@@ -98,7 +101,27 @@ func Convert_v1alpha2_APIExport_To_v1alpha1_APIExport(in *APIExport, out *apisv1
 		}
 	}
 
+	// v1alpha1 status has no identity aliases; retain them via an annotation
+	// so a v1alpha1 round-trip does not lose an in-progress rotation's alias.
+	if len(in.Status.IdentityAliasHashes) > 0 {
+		encoded, err := json.Marshal(in.Status.IdentityAliasHashes)
+		if err != nil {
+			return fmt.Errorf("failed to encode identity alias hashes as JSON: %w", err)
+		}
+		if out.Annotations == nil {
+			out.Annotations = map[string]string{}
+		}
+		out.Annotations[StatusIdentityAliasHashesAnnotation] = string(encoded)
+	}
+
 	return Convert_v1alpha2_APIExportStatus_To_v1alpha1_APIExportStatus(&in.Status, &out.Status, s)
+}
+
+// Convert_v1alpha2_APIExportStatus_To_v1alpha1_APIExportStatus drops
+// identityAliasHashes on down-conversion: v1alpha1 has no notion of identity
+// aliases and sees only the current identity hash.
+func Convert_v1alpha2_APIExportStatus_To_v1alpha1_APIExportStatus(in *APIExportStatus, out *apisv1alpha1.APIExportStatus, s kubeconversion.Scope) error {
+	return autoConvert_v1alpha2_APIExportStatus_To_v1alpha1_APIExportStatus(in, out, s)
 }
 
 func Convert_v1alpha2_ResourceSchemas_To_v1alpha1_LatestResourceSchemas(in APIExportSpec) ([]string, []ResourceSchema) {
@@ -198,6 +221,22 @@ func Convert_v1alpha1_APIExport_To_v1alpha2_APIExport(in *apisv1alpha1.APIExport
 		return err
 	}
 
+	if encoded, ok := in.Annotations[StatusIdentityAliasHashesAnnotation]; ok {
+		aliases := []string{}
+		if err := json.Unmarshal([]byte(encoded), &aliases); err != nil {
+			return fmt.Errorf("failed to decode identity alias hashes from JSON: %w", err)
+		}
+		if len(aliases) > 0 {
+			out.Status.IdentityAliasHashes = aliases
+		}
+		delete(out.Annotations, StatusIdentityAliasHashesAnnotation)
+
+		// Make tests for equality easier to write by turning []string into nil.
+		if len(out.Annotations) == 0 {
+			out.Annotations = nil
+		}
+	}
+
 	// Store permission claims in annotation. This is necessary for a clean conversion of
 	// fields All and FieldSelector, which went away in v1alpha2.
 	if len(in.Spec.PermissionClaims) > 0 {
@@ -248,6 +287,8 @@ func Convert_v1alpha1_APIExport_To_v1alpha2_APIExport(in *apisv1alpha1.APIExport
 				for i, opc := range out.Spec.PermissionClaims {
 					if pc.EqualGRI(opc) {
 						out.Spec.PermissionClaims[i].Verbs = pc.Verbs
+						// Also restore DefaultSelector from the annotation
+						out.Spec.PermissionClaims[i].DefaultSelector = pc.DefaultSelector
 					}
 				}
 			}

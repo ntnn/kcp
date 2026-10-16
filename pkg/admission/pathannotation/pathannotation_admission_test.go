@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@ import (
 )
 
 func TestPathAnnotationAdmit(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		name              string
 		admissionObject   runtime.Object
@@ -135,10 +136,10 @@ func TestPathAnnotationAdmit(t *testing.T) {
 			validateAdmissionObject: objectHasPathAnnotation("root:foo"),
 		},
 		{
-			name:                    "happy path: a CachedResource is annotated with a path",
+			name:                    "happy path: a ClusterCachedResource is annotated with a path",
 			admissionVerb:           admission.Create,
-			admissionResource:       cachev1alpha1.SchemeGroupVersion.WithResource("cachedresources"),
-			admissionObject:         &cachev1alpha1.CachedResource{},
+			admissionResource:       cachev1alpha1.SchemeGroupVersion.WithResource("clustercachedresources"),
+			admissionObject:         &cachev1alpha1.ClusterCachedResource{},
 			admissionContext:        admissionContextFor("foo"),
 			getLogicalCluster:       getCluster("foo"),
 			validateAdmissionObject: objectHasPathAnnotation("root:foo"),
@@ -157,6 +158,7 @@ func TestPathAnnotationAdmit(t *testing.T) {
 
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
 			target := &pathAnnotationPlugin{getLogicalCluster: scenario.getLogicalCluster}
 			attr := admission.NewAttributesRecord(
 				scenario.admissionObject,
@@ -188,6 +190,7 @@ func TestPathAnnotationAdmit(t *testing.T) {
 }
 
 func TestPathAnnotationValidate(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		name              string
 		admissionObject   runtime.Object
@@ -250,10 +253,10 @@ func TestPathAnnotationValidate(t *testing.T) {
 			getLogicalCluster: getCluster("foo"),
 		},
 		{
-			name:              "a CachedResource with incorrect path annotation is NOT admitted",
+			name:              "a ClusterCachedResource with incorrect path annotation is NOT admitted",
 			admissionVerb:     admission.Create,
-			admissionResource: cachev1alpha1.SchemeGroupVersion.WithResource("cachedresources"),
-			admissionObject:   &cachev1alpha1.CachedResource{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{core.LogicalClusterPathAnnotationKey: "root:bar"}}},
+			admissionResource: cachev1alpha1.SchemeGroupVersion.WithResource("clustercachedresources"),
+			admissionObject:   &cachev1alpha1.ClusterCachedResource{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{core.LogicalClusterPathAnnotationKey: "root:bar"}}},
 			admissionContext:  admissionContextFor("foo"),
 			getLogicalCluster: getCluster("foo"),
 			expectError:       true,
@@ -262,6 +265,7 @@ func TestPathAnnotationValidate(t *testing.T) {
 
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
 			target := &pathAnnotationPlugin{getLogicalCluster: scenario.getLogicalCluster}
 			attr := admission.NewAttributesRecord(
 				scenario.admissionObject,

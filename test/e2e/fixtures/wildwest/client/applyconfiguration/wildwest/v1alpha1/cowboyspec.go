@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ package v1alpha1
 
 // CowboySpecApplyConfiguration represents a declarative configuration of the CowboySpec type for use
 // with apply.
+//
+// CowboySpec holds the desired state of the Cowboy.
 type CowboySpecApplyConfiguration struct {
 	Intent *string `json:"intent,omitempty"`
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	genericfeatures "k8s.io/apiserver/pkg/features"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -40,11 +41,14 @@ import (
 	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/core"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	migration "github.com/kcp-dev/sdk/apis/migration/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
+	configshard "github.com/kcp-dev/kcp/config/shard"
 	cacheclient "github.com/kcp-dev/kcp/pkg/cache/client"
 	"github.com/kcp-dev/kcp/pkg/cache/client/shard"
+	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
 	"github.com/kcp-dev/kcp/pkg/indexers"
 	"github.com/kcp-dev/kcp/pkg/logging"
 )
@@ -62,6 +66,7 @@ const (
 func NewController(
 	shardName string,
 	dynamicCacheClient kcpdynamic.ClusterInterface,
+	dynamicLocalClient kcpdynamic.ClusterInterface,
 	gvrs map[schema.GroupVersionResource]ReplicatedGVR,
 ) (*controller, error) {
 	c := &controller{
@@ -73,12 +78,18 @@ func NewController(
 			},
 		),
 		dynamicCacheClient: dynamicCacheClient,
+		dynamicLocalClient: dynamicLocalClient,
 		Gvrs:               gvrs,
 	}
 
 	for gvr, info := range c.Gvrs {
+		eventFilter := IsNoSystemClusterName
+		if info.EventFilter != nil {
+			eventFilter = info.EventFilter
+		}
+
 		_, _ = info.Local.AddEventHandler(cache.FilteringResourceEventHandler{
-			FilterFunc: IsNoSystemClusterName,
+			FilterFunc: eventFilter,
 			Handler: cache.ResourceEventHandlerFuncs{
 				AddFunc:    func(obj interface{}) { c.enqueueObject(obj, gvr) },
 				UpdateFunc: func(_, obj interface{}) { c.enqueueObject(obj, gvr) },
@@ -87,7 +98,7 @@ func NewController(
 		})
 
 		_, _ = info.Global.AddEventHandler(cache.FilteringResourceEventHandler{
-			FilterFunc: IsNoSystemClusterName, // not really needed, but cannot harm
+			FilterFunc: eventFilter, // not really needed, but cannot harm
 			Handler: cache.ResourceEventHandlerFuncs{
 				AddFunc:    func(obj interface{}) { c.enqueueCacheObject(obj, gvr) },
 				UpdateFunc: func(_, obj interface{}) { c.enqueueCacheObject(obj, gvr) },
@@ -180,19 +191,52 @@ func IsNoSystemClusterName(obj interface{}) bool {
 	return true
 }
 
+// isNoSystemClusterNameExceptSystemShard is like IsNoSystemClusterName, but
+// additionally lets objects in the shard-local system:shard logical cluster
+// through. Used for resources whose authoritative copy is shard-owned, like
+// Shards.
+func isNoSystemClusterNameExceptSystemShard(obj interface{}) bool {
+	key, err := kcpcache.DeletionHandlingMetaClusterNamespaceKeyFunc(obj)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return false
+	}
+
+	clusterName, _, _, err := kcpcache.SplitMetaClusterNamespaceKey(key)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return false
+	}
+	if clusterName == configshard.SystemShardCluster {
+		return true
+	}
+	return !strings.HasPrefix(clusterName.String(), "system:")
+}
+
 type controller struct {
 	shardName string
 	queue     workqueue.TypedRateLimitingInterface[string]
 
 	dynamicCacheClient kcpdynamic.ClusterInterface
+	dynamicLocalClient kcpdynamic.ClusterInterface
 
 	Gvrs map[schema.GroupVersionResource]ReplicatedGVR
 }
 
 type ReplicatedGVR struct {
-	Kind          string
-	Filter        func(u *unstructured.Unstructured) bool
-	Global, Local cache.SharedIndexInformer
+	Kind   string
+	Filter func(u *unstructured.Unstructured) bool
+	// EventFilter overrides the default IsNoSystemClusterName event filter
+	// for this resource, e.g. to replicate objects living in a system logical
+	// cluster.
+	EventFilter func(obj interface{}) bool
+	// CacheOwnedFields lists field paths owned by the cache copy: they carry
+	// admin intent written through the Admin workspace and are applied
+	// cache -> local instead of being overwritten local -> cache. Each path is
+	// a slice of literal field names, so keys that themselves contain dots -
+	// annotation keys - address correctly.
+	CacheOwnedFields [][]string
+	Global, Local    cache.SharedIndexInformer
 }
 
 // InstallIndexers adds the additional indexers that this controller requires to the informers.
@@ -242,18 +286,32 @@ func InstallIndexers(
 			Local:  localKubeInformers.Admissionregistration().V1().ValidatingAdmissionPolicyBindings().Informer(),
 			Global: globalKubeInformers.Admissionregistration().V1().ValidatingAdmissionPolicyBindings().Informer(),
 		},
-		cachev1alpha1.SchemeGroupVersion.WithResource("cachedresources"): {
-			Kind:   "CachedResource",
-			Local:  localKcpInformers.Cache().V1alpha1().CachedResources().Informer(),
-			Global: globalKcpInformers.Cache().V1alpha1().CachedResources().Informer(),
+		cachev1alpha1.SchemeGroupVersion.WithResource("clustercachedresources"): {
+			Kind:   "ClusterCachedResource",
+			Local:  localKcpInformers.Cache().V1alpha1().ClusterCachedResources().Informer(),
+			Global: globalKcpInformers.Cache().V1alpha1().ClusterCachedResources().Informer(),
 		},
-		cachev1alpha1.SchemeGroupVersion.WithResource("cachedresourceendpointslices"): {
-			Kind:   "CachedResourceEndpointSlice",
-			Local:  localKcpInformers.Cache().V1alpha1().CachedResourceEndpointSlices().Informer(),
-			Global: globalKcpInformers.Cache().V1alpha1().CachedResourceEndpointSlices().Informer(),
+		cachev1alpha1.SchemeGroupVersion.WithResource("clustercachedresourceendpointslices"): {
+			Kind:   "ClusterCachedResourceEndpointSlice",
+			Local:  localKcpInformers.Cache().V1alpha1().ClusterCachedResourceEndpointSlices().Informer(),
+			Global: globalKcpInformers.Cache().V1alpha1().ClusterCachedResourceEndpointSlices().Informer(),
 		},
 		corev1alpha1.SchemeGroupVersion.WithResource("shards"): {
-			Kind:   "Shard",
+			Kind: "Shard",
+			// admin intent - cordoning and scheduling limits - written through
+			// the Admin workspace lands on the cache copy and flows
+			// cache -> local.
+			CacheOwnedFields: [][]string{
+				{"metadata", "annotations", corev1alpha1.ShardUnschedulableAnnotationKey},
+				{"spec", "resourceLimits"},
+			},
+			EventFilter: isNoSystemClusterNameExceptSystemShard,
+			// read-only representations mirrored into the root workspace are
+			// themselves sourced from the cache; replicating them back would
+			// present every shard twice to global informer consumers.
+			Filter: func(u *unstructured.Unstructured) bool {
+				return u.GetAnnotations()[corev1alpha1.ShardRepresentationAnnotationKey] != "true"
+			},
 			Local:  localKcpInformers.Core().V1alpha1().Shards().Informer(),
 			Global: globalKcpInformers.Core().V1alpha1().Shards().Informer(),
 		},
@@ -264,6 +322,11 @@ func InstallIndexers(
 			},
 			Local:  localKcpInformers.Core().V1alpha1().LogicalClusters().Informer(),
 			Global: globalKcpInformers.Core().V1alpha1().LogicalClusters().Informer(),
+		},
+		migration.SchemeGroupVersion.WithResource("logicalclustermigrations"): {
+			Kind:   "LogicalClusterMigration",
+			Local:  localKcpInformers.Migration().V1alpha1().LogicalClusterMigrations().Informer(),
+			Global: globalKcpInformers.Migration().V1alpha1().LogicalClusterMigrations().Informer(),
 		},
 		tenancyv1alpha1.SchemeGroupVersion.WithResource("workspacetypes"): {
 			Kind:   "WorkspaceType",
@@ -286,6 +349,18 @@ func InstallIndexers(
 			Local:  localKubeInformers.Rbac().V1().ClusterRoleBindings().Informer(),
 			Global: globalKubeInformers.Rbac().V1().ClusterRoleBindings().Informer(),
 		},
+	}
+	if kcpfeatures.DefaultFeatureGate.Enabled(genericfeatures.MutatingAdmissionPolicy) {
+		gvrs[admissionregistrationv1.SchemeGroupVersion.WithResource("mutatingadmissionpolicies")] = ReplicatedGVR{
+			Kind:   "MutatingAdmissionPolicy",
+			Local:  localKubeInformers.Admissionregistration().V1().MutatingAdmissionPolicies().Informer(),
+			Global: globalKubeInformers.Admissionregistration().V1().MutatingAdmissionPolicies().Informer(),
+		}
+		gvrs[admissionregistrationv1.SchemeGroupVersion.WithResource("mutatingadmissionpolicybindings")] = ReplicatedGVR{
+			Kind:   "MutatingAdmissionPolicyBinding",
+			Local:  localKubeInformers.Admissionregistration().V1().MutatingAdmissionPolicyBindings().Informer(),
+			Global: globalKubeInformers.Admissionregistration().V1().MutatingAdmissionPolicyBindings().Informer(),
+		}
 	}
 	for _, info := range gvrs {
 		indexers.AddIfNotPresentOrDie(

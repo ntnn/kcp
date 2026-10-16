@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package permissionclaimlabel
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -57,30 +58,49 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 		return nil
 	}
 
+	// A deleting APIBinding no longer grants anything: every applied claim must
+	// be withdrawn, i.e. the claim labels removed from the claimed objects, before
+	// the binding is finalized. Otherwise the labels outlive the binding and the
+	// APIExport virtual workspace keeps serving the objects on wildcard requests,
+	// which are scoped by label only. The apibindingdeletion controller holds the
+	// finalizer until status.appliedPermissionClaims is empty.
+	deleting := !apiBinding.DeletionTimestamp.IsZero()
+
 	exportPath := logicalcluster.NewPath(apiBinding.Spec.Reference.Export.Path)
 	if exportPath.Empty() {
 		exportPath = logicalcluster.From(apiBinding).Path()
 	}
 	apiExport, err := c.getAPIExport(exportPath, apiBinding.Spec.Reference.Export.Name)
 	if err != nil {
-		logger.Error(err, "error getting APIExport", "apiExportWorkspace", exportPath, "apiExportName", apiBinding.Spec.Reference.Export.Name)
-		return nil // nothing we can do
+		if !deleting {
+			logger.Error(err, "error getting APIExport", "apiExportWorkspace", exportPath, "apiExportName", apiBinding.Spec.Reference.Export.Name)
+			return nil // nothing we can do
+		}
+		// Withdrawing claims does not need the export: the labeler already
+		// ignores bindings whose export is gone, so relabeling drops the labels.
+		logger.V(2).Info("APIExport not found, withdrawing applied permission claims of deleting APIBinding", "apiExportWorkspace", exportPath, "apiExportName", apiBinding.Spec.Reference.Export.Name)
+		apiExport = &apisv1alpha2.APIExport{}
+	} else {
+		logger = logging.WithObject(logger, apiExport)
 	}
 
-	logger = logging.WithObject(logger, apiExport)
-
 	exportedClaims := sets.New[string]()
+	exportedClaimsMap := make(map[string]apisv1alpha2.PermissionClaim)
 	for _, claim := range apiExport.Spec.PermissionClaims {
-		exportedClaims.Insert(setKeyForClaim(claim))
+		key := setKeyForClaim(claim)
+		exportedClaims.Insert(key)
+		exportedClaimsMap[key] = claim
 	}
 
 	acceptedClaims := sets.New[string]()
 	acceptedClaimsMap := make(map[string]apisv1alpha2.ScopedPermissionClaim)
-	for _, claim := range apiBinding.Spec.PermissionClaims {
-		if claim.State == apisv1alpha2.ClaimAccepted {
-			key := setKeyForClaim(claim.PermissionClaim)
-			acceptedClaims.Insert(key)
-			acceptedClaimsMap[key] = claim.ScopedPermissionClaim
+	if !deleting {
+		for _, claim := range apiBinding.Spec.PermissionClaims {
+			if claim.State == apisv1alpha2.ClaimAccepted {
+				key := setKeyForClaim(claim.PermissionClaim)
+				acceptedClaims.Insert(key)
+				acceptedClaimsMap[key] = claim.ScopedPermissionClaim
+			}
 		}
 	}
 
@@ -111,9 +131,25 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 
 	var allErrs []error
 	applyErrors := sets.New[string]()
+	// removeErrors tracks applied claims whose labels could not be withdrawn.
+	// They stay in status.appliedPermissionClaims so that the removal is
+	// retried on the next reconcile instead of being forgotten.
+	removeErrors := sets.New[string]()
+	recordClaimError := func(s string) {
+		if acceptedClaims.Has(s) {
+			applyErrors.Insert(s)
+		}
+		if needToRemove.Has(s) {
+			removeErrors.Insert(s)
+		}
+	}
 
 	for _, s := range sets.List[string](allChanges) {
 		claim := claimFromSetKey(s)
+		// the claim references a subresource in rbac-style, the parent label applies
+		if strings.Contains(claim.Resource, "/") {
+			continue
+		}
 		if _, nonPersisted := permissionclaim.NonPersistedResourcesClaimable[schema.GroupResource{Group: claim.Group, Resource: claim.Resource}]; nonPersisted {
 			continue
 		}
@@ -122,10 +158,16 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 
 		informer, gvr, err := c.getInformerForGroupResource(claim.Group, claim.Resource)
 		if err != nil {
-			allErrs = append(allErrs, fmt.Errorf("error getting informer for group=%q, resource=%q: %w", claim.Group, claim.Resource, err))
-			if acceptedClaims.Has(s) {
-				applyErrors.Insert(s)
+			if deleting && goerrors.Is(err, errInformerAbsent) && !c.claimedResourceServed(clusterName, claim) {
+				// The claimed resource is not served in the workspace anymore, so
+				// there are no instances left to withdraw labels from. If it is
+				// still served, the informer just has not been discovered yet (e.g.
+				// right after boot) and we keep waiting instead of skipping.
+				claimLogger.V(2).Info("claimed resource not served in workspace, nothing to withdraw")
+				continue
 			}
+			allErrs = append(allErrs, fmt.Errorf("error getting informer for group=%q, resource=%q: %w", claim.Group, claim.Resource, err))
+			recordClaimError(s)
 			continue
 		}
 		claimLogger = claimLogger.WithValues("gvr", gvr)
@@ -134,9 +176,7 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 		objs, err := informer.Lister().ByCluster(clusterName).List(labels.Everything())
 		if err != nil {
 			allErrs = append(allErrs, fmt.Errorf("error listing group=%q, resource=%q: %w", claim.Group, claim.Resource, err))
-			if acceptedClaims.Has(s) {
-				applyErrors.Insert(s)
-			}
+			recordClaimError(s)
 			continue
 		}
 
@@ -186,9 +226,7 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 		if len(claimErrs) > 0 {
 			allErrs = append(allErrs, claimErrs...)
 
-			if acceptedClaims.Has(s) {
-				applyErrors.Insert(s)
-			}
+			recordClaimError(s)
 		}
 	}
 
@@ -197,6 +235,7 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 		claim := claimFromSetKey(s)
 		unexpectedOrInvalidErrors = append(unexpectedOrInvalidErrors, fmt.Errorf("unexpected/invalid claim for %s.%s (identity %q)", claim.Resource, claim.Group, claim.IdentityHash))
 	}
+
 	if len(unexpectedOrInvalidErrors) > 0 {
 		i := len(unexpectedOrInvalidErrors)
 		if i > 10 {
@@ -214,7 +253,43 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 			len(errsToDisplay.Errors()),
 			errsToDisplay,
 		)
-	} else {
+	}
+
+	// Detect verb and selector mismatches between accepted and exported claims
+	claimMismatches := detectClaimMismatches(expectedClaims, acceptedClaimsMap, exportedClaimsMap, logger)
+	if len(claimMismatches) > 0 {
+		// Build mismatch messages
+		mismatchMsgs := make([]string, 0, len(claimMismatches))
+		for _, m := range claimMismatches {
+			claim := claimFromSetKey(m.claim)
+			var parts []string
+			if m.verbMismatch {
+				parts = append(parts, fmt.Sprintf("verbs: accepted %v, exported %v", m.acceptedVerbs, m.exportedVerbs))
+			}
+			if m.selectorMismatch {
+				parts = append(parts, "selector differs from defaultSelector")
+			}
+			mismatchMsgs = append(mismatchMsgs, fmt.Sprintf("%s.%s (%s)", claim.Resource, claim.Group, strings.Join(parts, "; ")))
+		}
+
+		i := len(mismatchMsgs)
+		if i > 5 {
+			i = 5
+		}
+
+		conditions.MarkFalse(
+			apiBinding,
+			apisv1alpha2.PermissionClaimsValid,
+			apisv1alpha2.PermissionClaimsMismatchReason,
+			conditionsv1alpha1.ConditionSeverityWarning,
+			"%d permission claim(s) have mismatched verbs or selectors (showing first %d): %s",
+			len(claimMismatches),
+			i,
+			strings.Join(mismatchMsgs[:i], ", "),
+		)
+	}
+
+	if len(unexpectedOrInvalidErrors) == 0 && len(claimMismatches) == 0 {
 		conditions.MarkTrue(apiBinding, apisv1alpha2.PermissionClaimsValid)
 	}
 
@@ -224,6 +299,11 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 		// fullyApplied = (exportedClaims ∩ acceptedClaims) ⊖ applyErrors,
 		// hence s must be in acceptedClaims (and exportedClaims).
 		apiBinding.Status.AppliedPermissionClaims = append(apiBinding.Status.AppliedPermissionClaims, acceptedClaimsMap[s])
+	}
+	for _, s := range sets.List[string](removeErrors) {
+		// the labels of these claims are still (partially) in place: keep
+		// reporting them as applied so the withdrawal is retried.
+		apiBinding.Status.AppliedPermissionClaims = append(apiBinding.Status.AppliedPermissionClaims, appliedClaimsMap[s])
 	}
 
 	if len(allErrs) > 0 {
@@ -242,13 +322,19 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 			errsToDisplay,
 		)
 
-		return fmt.Errorf("%d error(s) applying permission claims for APIBinding %s|%s (showing the first %d): %w",
+		err := fmt.Errorf("%d error(s) applying permission claims for APIBinding %s|%s (showing the first %d): %w",
 			len(allErrs),
 			clusterName,
 			apiBinding.Name,
 			len(errsToDisplay.Errors()),
 			errsToDisplay,
 		)
+		if onlyInformerNotReady(allErrs) {
+			// nothing went wrong, the informers just aren't there yet:
+			// let the controller wait rather than back off.
+			return &informerNotReadyError{err: err}
+		}
+		return err
 	} else {
 		conditions.MarkTrue(apiBinding, apisv1alpha2.PermissionClaimsApplied)
 	}
@@ -257,11 +343,11 @@ func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.API
 }
 
 func setKeyForClaim(claim apisv1alpha2.PermissionClaim) string {
-	return fmt.Sprintf("%s/%s/%s", claim.Resource, claim.Group, claim.IdentityHash)
+	return fmt.Sprintf("%s|%s|%s", claim.Resource, claim.Group, claim.IdentityHash)
 }
 
 func claimFromSetKey(key string) apisv1alpha2.PermissionClaim {
-	parts := strings.SplitN(key, "/", 3)
+	parts := strings.SplitN(key, "|", 3)
 	return apisv1alpha2.PermissionClaim{
 		GroupResource: apisv1alpha2.GroupResource{
 			Group:    parts[1],
@@ -271,8 +357,33 @@ func claimFromSetKey(key string) apisv1alpha2.PermissionClaim {
 	}
 }
 
+// claimedResourceServed reports whether the claimed group/resource is served in
+// the given workspace, based on the synced APIBinding lister rather than on the
+// dynamic informer factory, which may not have discovered the resource yet.
+// Built-in resources (no identity hash) are served everywhere. Any other
+// claimable resource carries an identity hash (enforced by APIExport admission)
+// and is served only through an APIBinding whose bound resources list it.
+func (c *controller) claimedResourceServed(clusterName logicalcluster.Name, claim apisv1alpha2.PermissionClaim) bool {
+	if claim.IdentityHash == "" {
+		return true
+	}
+	bindings, err := c.apiBindingsLister.Cluster(clusterName).List(labels.Everything())
+	if err != nil {
+		// cannot tell, err on the side of waiting
+		return true
+	}
+	for _, binding := range bindings {
+		for _, bound := range binding.Status.BoundResources {
+			if bound.Group == claim.Group && bound.Resource == claim.Resource {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *controller) getInformerForGroupResource(group, resource string) (kcpkubernetesinformers.GenericClusterInformer, schema.GroupVersionResource, error) {
-	informers, _ := c.ddsif.Informers()
+	informers, notSynced := c.ddsif.Informers()
 
 	for gvr := range informers {
 		if gvr.Group == group && gvr.Resource == resource {
@@ -281,7 +392,12 @@ func (c *controller) getInformerForGroupResource(group, resource string) (kcpkub
 			return informer, gvr, err
 		}
 	}
-	return nil, schema.GroupVersionResource{}, fmt.Errorf("unable to find informer for %s.%s", group, resource)
+	for _, gvr := range notSynced {
+		if gvr.Group == group && gvr.Resource == resource {
+			return nil, schema.GroupVersionResource{}, fmt.Errorf("%w for %s.%s: not synced yet", errInformerNotReady, group, resource)
+		}
+	}
+	return nil, schema.GroupVersionResource{}, fmt.Errorf("%w: %w for %s.%s", errInformerAbsent, errInformerNotReady, group, resource)
 }
 
 func (c *controller) patchGenericObject(ctx context.Context, obj metav1.Object, gvr schema.GroupVersionResource, lc logicalcluster.Path) error {
@@ -316,4 +432,66 @@ func detectSelectorChanges(
 		}
 	}
 	return selectorChanges
+}
+
+// claimMismatch represents a mismatch between accepted and exported permission claims.
+type claimMismatch struct {
+	claim            string
+	verbMismatch     bool
+	acceptedVerbs    []string
+	exportedVerbs    []string
+	selectorMismatch bool
+}
+
+// detectClaimMismatches compares accepted claims against exported claims to find
+// verb and selector mismatches. A mismatch occurs when:
+// - Verbs: accepted verbs differ from exported verbs (wildcard "*" is excluded from comparison)
+// - Selector: accepted selector differs from the export's defaultSelector.
+func detectClaimMismatches(
+	expectedClaims sets.Set[string],
+	acceptedClaimsMap map[string]apisv1alpha2.ScopedPermissionClaim,
+	exportedClaimsMap map[string]apisv1alpha2.PermissionClaim,
+	logger klog.Logger,
+) []claimMismatch {
+	var mismatches []claimMismatch
+
+	for key := range expectedClaims {
+		acceptedClaim, hasAccepted := acceptedClaimsMap[key]
+		exportedClaim, hasExported := exportedClaimsMap[key]
+		if !hasAccepted || !hasExported {
+			continue
+		}
+
+		mismatch := claimMismatch{claim: key}
+
+		// Check verb mismatch (ignoring wildcard)
+		acceptedVerbs := sets.New(acceptedClaim.Verbs...)
+		exportedVerbs := sets.New(exportedClaim.Verbs...)
+
+		// If either side has wildcard, consider verbs as matching
+		if !acceptedVerbs.Has("*") && !exportedVerbs.Has("*") {
+			if !acceptedVerbs.Equal(exportedVerbs) {
+				mismatch.verbMismatch = true
+				mismatch.acceptedVerbs = acceptedClaim.Verbs
+				mismatch.exportedVerbs = exportedClaim.Verbs
+			}
+		}
+
+		// Check selector mismatch against defaultSelector
+		if exportedClaim.DefaultSelector != nil {
+			if !reflect.DeepEqual(acceptedClaim.Selector, *exportedClaim.DefaultSelector) {
+				mismatch.selectorMismatch = true
+			}
+		}
+
+		if mismatch.verbMismatch || mismatch.selectorMismatch {
+			logger.V(4).Info("detected claim mismatch",
+				"claim", key,
+				"verbMismatch", mismatch.verbMismatch,
+				"selectorMismatch", mismatch.selectorMismatch)
+			mismatches = append(mismatches, mismatch)
+		}
+	}
+
+	return mismatches
 }

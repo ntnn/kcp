@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,12 +18,15 @@ package permissionclaimlabel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -48,7 +51,72 @@ import (
 
 const (
 	ControllerName = "kcp-permissionclaimlabel"
+
+	// informerRetryDelay is how long a binding waits before it is retried
+	// when a claimed resource has no synced dynamic informer yet.
+	informerRetryDelay = 2 * time.Second
 )
+
+// errInformerNotReady is wrapped by getInformerForGroupResource when no synced
+// dynamic informer exists for a claimed resource. That is normal right after
+// the resource is first bound on a shard: the informer is created from
+// discovery and needs a moment to list.
+var errInformerNotReady = errors.New("unable to find informer")
+
+// errInformerAbsent is wrapped (together with errInformerNotReady) when the
+// dynamic informer factory knows nothing about the claimed resource at all,
+// as opposed to having an informer for it that is not synced yet.
+var errInformerAbsent = errors.New("informer absent")
+
+// informerNotReadyError is returned by reconcile when every failure was a
+// missing informer. It tells the queue to wait on a fixed delay instead of
+// counting a failure: a burst of unrelated updates to the binding (status
+// patches, claim labels) otherwise stacks up per-item exponential backoff
+// within a second and parks the binding for up to the 1000s cap - long after
+// the informer has synced - until something else happens to touch it.
+type informerNotReadyError struct {
+	err error
+}
+
+func (e *informerNotReadyError) Error() string { return e.err.Error() }
+func (e *informerNotReadyError) Unwrap() error { return e.err }
+
+// onlyInformerNotReady reports whether errs is non-empty and every entry is
+// a missing-informer error.
+func onlyInformerNotReady(errs []error) bool {
+	if len(errs) == 0 {
+		return false
+	}
+	for _, err := range errs {
+		if !errors.Is(err, errInformerNotReady) {
+			return false
+		}
+	}
+	return true
+}
+
+// waitingForInformer reports whether err, as returned by process, consists
+// solely of reconcile waiting for dynamic informers - i.e. no real failure
+// (including the status commit) is mixed in.
+func waitingForInformer(err error) bool {
+	if err == nil {
+		return false
+	}
+	if agg, ok := err.(utilerrors.Aggregate); ok {
+		errs := agg.Errors()
+		if len(errs) == 0 {
+			return false
+		}
+		for _, e := range errs {
+			if !waitingForInformer(e) {
+				return false
+			}
+		}
+		return true
+	}
+	var notReady *informerNotReadyError
+	return errors.As(err, &notReady)
+}
 
 // NewController returns a new controller for handling permission claims for an APIBinding.
 // it will own the AppliedPermissionClaims and will own the accepted permission claim condition.
@@ -89,6 +157,33 @@ func NewController(
 		},
 		DeleteFunc: func(obj interface{}) { c.enqueueAPIBinding(obj, logger) },
 	})
+
+	// Claim labels embed the claimed identity hash, normalized to the
+	// export's canonical identity. When an export's identity is rotated or
+	// an alias is registered/retired, every binding claiming its resources
+	// must be re-reconciled so claimed objects are relabeled with the newly
+	// canonical hash.
+	exportIdentityHandler := cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			oldExport, ok := oldObj.(*apisv1alpha2.APIExport)
+			if !ok {
+				return
+			}
+			newExport, ok := newObj.(*apisv1alpha2.APIExport)
+			if !ok {
+				return
+			}
+			if oldExport.Status.IdentityHash == newExport.Status.IdentityHash &&
+				slices.Equal(oldExport.Status.IdentityAliasHashes, newExport.Status.IdentityAliasHashes) {
+				return
+			}
+			for _, resource := range newExport.Spec.Resources {
+				c.enqueueByGroupResource(schema.GroupResource{Group: resource.Group, Resource: resource.Name}, logger)
+			}
+		},
+	}
+	_, _ = apiExportInformer.Informer().AddEventHandler(exportIdentityHandler)
+	_, _ = globalAPIExportInformer.Informer().AddEventHandler(exportIdentityHandler)
 
 	return c, nil
 }
@@ -139,11 +234,67 @@ func (c *controller) Start(ctx context.Context, numThreads int) {
 	logger.Info("starting controller")
 	defer logger.Info("shutting down controller")
 
+	// React to GVRs being added or removed by the dynamic informer factory and
+	// only enqueue bindings whose accepted permission claims reference that
+	// group/resource. This unblocks bindings whose claim was waiting on an
+	// informer that just appeared (e.g. a bound CRD landing on this shard) and
+	// re-runs them when a backing informer goes away.
+	c.ddsif.AddGVRLifecycleHandler(ctx, informer.GVRLifecycleHandlerFuncs{
+		AddedFunc: func(gvr schema.GroupVersionResource) {
+			// Wait for the informer to sync before enqueueing APIBindings that reference it.
+			// This ensures that the informer is ready to list/watch the resources when
+			// the APIBinding is reconciled.
+			go func() {
+				if waitForInformerSynced(ctx, gvr, c.ddsif.Informers) {
+					c.enqueueByGroupResource(gvr.GroupResource(), logger)
+				}
+			}()
+		},
+		RemovedFunc: func(gvr schema.GroupVersionResource) { c.enqueueByGroupResource(gvr.GroupResource(), logger) },
+	})
+
 	for range numThreads {
 		go wait.UntilWithContext(ctx, c.startWorker, time.Second)
 	}
 
 	<-ctx.Done()
+}
+
+// enqueueByGroupResource enqueues every APIBinding that has an accepted permission
+// claim for the given group/resource, across all clusters on this shard.
+func (c *controller) enqueueByGroupResource(gr schema.GroupResource, logger logr.Logger) {
+	bindings, err := indexers.ListAPIBindingsByAcceptedClaimedGroupResource(c.apiBindingsIndexer, gr)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("failed to list APIBindings by claimed group resource %q: %w", gr, err))
+		return
+	}
+	if len(bindings) == 0 {
+		return
+	}
+	logger.V(4).Info("re-enqueueing APIBindings claiming changed GVR", "groupResource", gr.String(), "count", len(bindings))
+	for _, b := range bindings {
+		key, err := kcpcache.DeletionHandlingMetaClusterNamespaceKeyFunc(b)
+		if err != nil {
+			utilruntime.HandleError(err)
+			continue
+		}
+		c.queue.Add(key)
+	}
+}
+
+// waitForInformerSynced blocks until informers reports gvr as synced, and returns
+// true. It returns false if gvr disappears from informers first (the informer was
+// removed before syncing) or ctx is done.
+func waitForInformerSynced[T any](ctx context.Context, gvr schema.GroupVersionResource, informers func() (map[schema.GroupVersionResource]T, []schema.GroupVersionResource)) bool {
+	var synced bool
+	err := wait.PollUntilContextCancel(ctx, 100*time.Millisecond, true, func(context.Context) (bool, error) {
+		syncedInformers, notSynced := informers()
+		if _, synced = syncedInformers[gvr]; synced {
+			return true, nil
+		}
+		return !slices.Contains(notSynced, gvr), nil
+	})
+	return err == nil && synced
 }
 
 func (c *controller) startWorker(ctx context.Context) {
@@ -168,6 +319,12 @@ func (c *controller) processNextWorkItem(ctx context.Context) bool {
 	defer c.queue.Done(key)
 
 	if err := c.process(ctx, key); err != nil {
+		if waitingForInformer(err) {
+			logger.V(2).Info("waiting for the dynamic informer of a claimed resource", "reason", err.Error(), "retryIn", informerRetryDelay)
+			c.queue.Forget(key)
+			c.queue.AddAfter(key, informerRetryDelay)
+			return true
+		}
 		utilruntime.HandleError(fmt.Errorf("%q controller failed to sync %q, err: %w", ControllerName, key, err))
 		c.queue.AddRateLimited(key)
 		return true
@@ -225,6 +382,7 @@ func InstallIndexers(apiExportInformer apisv1alpha2informers.APIExportClusterInf
 	if err := apiBindingInformer.Informer().GetIndexer().AddIndexers(
 		cache.Indexers{
 			indexers.APIBindingByClusterAndAcceptedClaimedGroupResources: indexers.IndexAPIBindingByClusterAndAcceptedClaimedGroupResources,
+			indexers.APIBindingByAcceptedClaimedGroupResource:            indexers.IndexAPIBindingByAcceptedClaimedGroupResource,
 		},
 	); err != nil {
 		panic(err)

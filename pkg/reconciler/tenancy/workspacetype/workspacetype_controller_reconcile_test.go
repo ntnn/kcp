@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@ import (
 )
 
 func TestReconcile(t *testing.T) {
+	t.Parallel()
 	for _, testCase := range []struct {
 		name     string
 		shards   []*corev1alpha1.Shard
@@ -61,6 +62,7 @@ func TestReconcile(t *testing.T) {
 					},
 				},
 				Status: tenancyv1alpha1.WorkspaceTypeStatus{
+					VirtualWorkspaces: []tenancyv1alpha1.VirtualWorkspace{},
 					Conditions: conditionsv1alpha1.Conditions{
 						{
 							Type:   "Ready",
@@ -257,6 +259,7 @@ func TestReconcile(t *testing.T) {
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			testCase.wts = append(testCase.wts, testCase.wt.DeepCopy())
 			c := controller{
 				listShards: func() ([]*corev1alpha1.Shard, error) {

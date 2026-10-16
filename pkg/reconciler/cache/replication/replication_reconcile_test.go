@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@ import (
 )
 
 func TestReconcile(t *testing.T) {
+	t.Parallel()
 	gr := schema.GroupResource{Group: "example.com", Resource: "elephants"}
 	elephant := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -148,6 +149,7 @@ func TestReconcile(t *testing.T) {
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(tt *testing.T) {
+			tt.Parallel()
 			var created *unstructured.Unstructured
 			var updated *unstructured.Unstructured
 			var deletedNamespace, deletedName string
@@ -263,4 +265,81 @@ func WithOriginalResourceVersion(u *unstructured.Unstructured, originalRV, origi
 	u.SetAnnotations(ann)
 
 	return u
+}
+
+func TestSyncCacheOwnedFields(t *testing.T) {
+	t.Parallel()
+
+	const cordonKey = "experimental.core.kcp.io/unschedulable"
+	paths := [][]string{
+		{"metadata", "annotations", cordonKey},
+		{"spec", "resourceLimits"},
+	}
+
+	limits := func(hard string) map[string]any {
+		return map[string]any{"hard": map[string]any{"workspaces": hard}}
+	}
+
+	scenarios := []struct {
+		name        string
+		global      map[string]any
+		local       map[string]any
+		wantChanged bool
+		wantLocal   map[string]any
+	}{
+		{
+			name:        "annotation with a dotted key is applied cache -> local",
+			global:      map[string]any{"metadata": map[string]any{"annotations": map[string]any{cordonKey: "true"}}},
+			local:       map[string]any{"metadata": map[string]any{"annotations": map[string]any{"other": "keep"}}},
+			wantChanged: true,
+			wantLocal:   map[string]any{"metadata": map[string]any{"annotations": map[string]any{cordonKey: "true", "other": "keep"}}},
+		},
+		{
+			name:        "spec subtree is applied cache -> local",
+			global:      map[string]any{"spec": map[string]any{"baseURL": "https://a", "resourceLimits": limits("10")}},
+			local:       map[string]any{"spec": map[string]any{"baseURL": "https://a"}},
+			wantChanged: true,
+			wantLocal:   map[string]any{"spec": map[string]any{"baseURL": "https://a", "resourceLimits": limits("10")}},
+		},
+		{
+			name:        "changed spec subtree is overwritten, shard-owned fields untouched",
+			global:      map[string]any{"spec": map[string]any{"baseURL": "https://stale", "resourceLimits": limits("20")}},
+			local:       map[string]any{"spec": map[string]any{"baseURL": "https://current", "resourceLimits": limits("10")}},
+			wantChanged: true,
+			wantLocal:   map[string]any{"spec": map[string]any{"baseURL": "https://current", "resourceLimits": limits("20")}},
+		},
+		{
+			name:        "absence in the cache copy removes the field locally",
+			global:      map[string]any{"spec": map[string]any{"baseURL": "https://a"}},
+			local:       map[string]any{"spec": map[string]any{"baseURL": "https://a", "resourceLimits": limits("10")}},
+			wantChanged: true,
+			wantLocal:   map[string]any{"spec": map[string]any{"baseURL": "https://a"}},
+		},
+		{
+			name:        "converged values report no change",
+			global:      map[string]any{"spec": map[string]any{"resourceLimits": limits("10")}},
+			local:       map[string]any{"spec": map[string]any{"resourceLimits": limits("10")}},
+			wantChanged: false,
+			wantLocal:   map[string]any{"spec": map[string]any{"resourceLimits": limits("10")}},
+		},
+	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
+			global := &unstructured.Unstructured{Object: scenario.global}
+			local := &unstructured.Unstructured{Object: scenario.local}
+
+			changed, err := syncCacheOwnedFields(global, local, paths)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if changed != scenario.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, scenario.wantChanged)
+			}
+			if diff := cmp.Diff(scenario.wantLocal, local.Object); diff != "" {
+				t.Errorf("unexpected local copy (-want +got):\n%s", diff)
+			}
+		})
+	}
 }

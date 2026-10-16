@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -50,6 +50,11 @@ const (
 
 type Index interface {
 	LookupURL(path logicalcluster.Path) (index.Result, bool)
+	// RecentlyMigrated returns true if the given cluster was recently migrated.
+	RecentlyMigrated(cluster logicalcluster.Name) bool
+	// ClusterContext returns a context derived from the parent that will be
+	// cancelled when the cluster is deleted or migrated.
+	ClusterContext(parent context.Context, cluster logicalcluster.Name) (context.Context, context.CancelFunc)
 }
 
 type ClusterClientGetter func(shard *corev1alpha1.Shard) (kcpclientset.ClusterInterface, error)
@@ -85,30 +90,41 @@ func NewController(
 
 	_, _ = shardInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			shard := obj.(*corev1alpha1.Shard)
-			c.state.UpsertShard(shard.Name, shard.Spec.BaseURL)
-			c.enqueueShard(ctx, shard)
+			c.onShardAdd(ctx, obj.(*corev1alpha1.Shard))
 		},
 		UpdateFunc: func(old, obj interface{}) {
-			shard := obj.(*corev1alpha1.Shard)
-			oldShard := old.(*corev1alpha1.Shard)
-			if oldShard.Spec.BaseURL == shard.Spec.BaseURL {
-				return
-			}
-			c.stopShard(oldShard.Name)
-			c.enqueueShard(ctx, shard)
+			c.onShardUpdate(ctx, old.(*corev1alpha1.Shard), obj.(*corev1alpha1.Shard))
 		},
 		DeleteFunc: func(obj interface{}) {
 			if final, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 				obj = final.Obj
 			}
-			shard := obj.(*corev1alpha1.Shard)
-
-			c.stopShard(shard.Name)
+			c.onShardDelete(obj.(*corev1alpha1.Shard))
 		},
 	})
 
 	return c
+}
+
+func (c *Controller) onShardAdd(ctx context.Context, shard *corev1alpha1.Shard) {
+	c.state.UpsertShard(shard.Name, shard.Spec.BaseURL)
+	c.enqueueShard(ctx, shard)
+}
+
+func (c *Controller) onShardUpdate(ctx context.Context, oldShard, shard *corev1alpha1.Shard) {
+	if oldShard.Spec.BaseURL == shard.Spec.BaseURL {
+		return
+	}
+	// drop all state derived from the old base URL, then re-register the
+	// shard under the new one. Without the upsert the shard's base URL stays
+	// unknown until the front-proxy restarts, and every workspace on it 403s.
+	c.stopShard(oldShard.Name)
+	c.state.UpsertShard(shard.Name, shard.Spec.BaseURL)
+	c.enqueueShard(ctx, shard)
+}
+
+func (c *Controller) onShardDelete(shard *corev1alpha1.Shard) {
+	c.stopShard(shard.Name)
 }
 
 // Controller watches Shards on the root shard, and then starts informers
@@ -293,4 +309,12 @@ func (c *Controller) stopShard(shardName string) {
 
 func (c *Controller) LookupURL(path logicalcluster.Path) (index.Result, bool) {
 	return c.state.LookupURL(path)
+}
+
+func (c *Controller) RecentlyMigrated(cluster logicalcluster.Name) bool {
+	return c.state.RecentlyMigrated(cluster)
+}
+
+func (c *Controller) ClusterContext(parent context.Context, cluster logicalcluster.Name) (context.Context, context.CancelFunc) {
+	return c.state.ClusterContext(parent, cluster)
 }

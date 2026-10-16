@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -37,9 +37,11 @@ import (
 	"github.com/kcp-dev/sdk/apis/third_party/conditions/util/conditions"
 
 	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
+	"github.com/kcp-dev/kcp/pkg/identity"
 )
 
 func TestReconcile(t *testing.T) {
+	t.Parallel()
 	// Save original feature gate value
 	originalFeatureGate := kcpfeatures.DefaultFeatureGate.Enabled(kcpfeatures.EnableDeprecatedAPIExportVirtualWorkspacesUrls)
 
@@ -171,8 +173,9 @@ func TestReconcile(t *testing.T) {
 	}
 
 	t.Run("key membership", func(t *testing.T) {
+		t.Parallel()
 		secret := &corev1.Secret{Data: map[string][]byte{"key": []byte("new-key")}}
-		hash, err := IdentityHash(secret)
+		hash, err := identity.KeyHash(secret)
 		require.NoError(t, err)
 		for _, tt := range []struct {
 			name, id, found, want string
@@ -186,6 +189,7 @@ func TestReconcile(t *testing.T) {
 			{name: "foreign key", id: "stable", hashes: []string{"other-key"}, wantErr: true},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				export := &apisv1alpha2.APIExport{
 					Spec: apisv1alpha2.APIExportSpec{Identity: &apisv1alpha2.Identity{SecretRef: &corev1.SecretReference{Name: "key"}}},
 					Status: apisv1alpha2.APIExportStatus{
@@ -214,6 +218,7 @@ func TestReconcile(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			// Skip virtual workspace URL tests if feature gate is not enabled
 			if tc.wantVirtualWorkspaceURLs && !originalFeatureGate {
 				t.Skip("Skipping test that requires EnableDeprecatedAPIExportVirtualWorkspacesUrls feature gate")

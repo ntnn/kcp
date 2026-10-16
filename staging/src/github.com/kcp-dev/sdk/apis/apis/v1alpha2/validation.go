@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import (
 
 // ValidateAPIBinding validates an APIBinding.
 func ValidateAPIBinding(apiBinding *APIBinding) field.ErrorList {
-	allErrs := field.ErrorList{}
+	allErrs := field.ErrorList{} //nolint:prealloc // prealloc doesn't make sense for this function
 
 	allErrs = append(allErrs, ValidateAPIBindingReference(apiBinding.Spec.Reference, field.NewPath("spec", "reference"))...)
 	allErrs = append(allErrs, ValidateAPIBindingPermissionClaims(apiBinding.Spec.PermissionClaims, field.NewPath("spec", "permissionClaims"))...)

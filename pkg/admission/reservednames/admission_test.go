@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -48,6 +48,7 @@ func createAttr(name string, obj runtime.Object, kind, resource string) admissio
 }
 
 func TestAdmission(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		attr admission.Attributes
 		want error
@@ -72,6 +73,7 @@ func TestAdmission(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			plugin := NewReservedNames()
 			if err := plugin.Admit(context.Background(), tc.attr, nil); err != nil {
 				require.Contains(t, err.Error(), tc.want.Error())

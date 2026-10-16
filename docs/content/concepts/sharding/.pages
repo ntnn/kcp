@@ -1,5 +1,0 @@
-nav:
-    - index.md
-    - shards.md
-    - partitions.md
-    - cache-server.md

@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,11 +20,34 @@ package v1alpha2
 
 // BoundAPIResourceApplyConfiguration represents a declarative configuration of the BoundAPIResource type for use
 // with apply.
+//
+// BoundAPIResource describes a bound GroupVersionResource through an APIResourceSchema of an APIExport..
 type BoundAPIResourceApplyConfiguration struct {
-	Group           *string                                   `json:"group,omitempty"`
-	Resource        *string                                   `json:"resource,omitempty"`
-	Schema          *BoundAPIResourceSchemaApplyConfiguration `json:"schema,omitempty"`
-	StorageVersions []string                                  `json:"storageVersions,omitempty"`
+	// group is the group of the bound API. Empty string for the core API group.
+	Group *string `json:"group,omitempty"`
+	// resource is the resource of the bound API.
+	//
+	// kubebuilder:validation:MinLength=1
+	Resource *string `json:"resource,omitempty"`
+	// Schema references the APIResourceSchema that is bound to this API.
+	Schema *BoundAPIResourceSchemaApplyConfiguration `json:"schema,omitempty"`
+	// storageVersions lists all versions of a resource that were ever persisted. Tracking these
+	// versions allows a migration path for stored versions in etcd. The field is mutable
+	// so a migration controller can finish a migration to another version (ensuring
+	// no old objects are left in storage), and then remove the rest of the
+	// versions from this list.
+	//
+	// Versions may not be removed while they exist in this list.
+	StorageVersions []string `json:"storageVersions,omitempty"`
+	// identityHashes lists every identity hash under which instances of this
+	// resource may exist in storage. It mirrors storageVersions for identity
+	// rotation: the drain target is always the schema's current identityHash;
+	// every other entry is a drain source that the identity migrator empties
+	// and then prunes from this list. Normally it contains exactly the
+	// schema's current identityHash.
+	//
+	// Hashes may not be removed while instances exist under them in storage.
+	IdentityHashes []string `json:"identityHashes,omitempty"`
 }
 
 // BoundAPIResourceApplyConfiguration constructs a declarative configuration of the BoundAPIResource type for use with
@@ -63,6 +86,16 @@ func (b *BoundAPIResourceApplyConfiguration) WithSchema(value *BoundAPIResourceS
 func (b *BoundAPIResourceApplyConfiguration) WithStorageVersions(values ...string) *BoundAPIResourceApplyConfiguration {
 	for i := range values {
 		b.StorageVersions = append(b.StorageVersions, values[i])
+	}
+	return b
+}
+
+// WithIdentityHashes adds the given value to the IdentityHashes field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the IdentityHashes field.
+func (b *BoundAPIResourceApplyConfiguration) WithIdentityHashes(values ...string) *BoundAPIResourceApplyConfiguration {
+	for i := range values {
+		b.IdentityHashes = append(b.IdentityHashes, values[i])
 	}
 	return b
 }

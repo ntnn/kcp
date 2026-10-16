@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,12 +18,16 @@ package lookup
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/endpoints/filters"
 	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
+	"k8s.io/apiserver/pkg/endpoints/request"
 	kubernetesscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
 
@@ -87,6 +91,18 @@ func newClusterResolveHandler(delegate http.Handler, index proxyindex.Index) htt
 			return
 		}
 
+		// If the cluster was recently migrated and the request is not a fresh list or watch
+		// return a 410 to force the client to do a relist.
+		//
+		// This is only required for watches.
+		// Lists with a lower RV will get appropriate objects from the shard.
+		// Lists with a higher RV will get a 504 from the shard.
+		if index.RecentlyMigrated(result.Cluster) && isInProgressWatch(req) {
+			err := apierrors.NewResourceExpired(fmt.Sprintf("logical cluster %q was recently migrated to another shard; watches with an explicit resourceVersion are temporarily denied to force a relist against the new shard", result.Cluster))
+			responsewriters.ErrorNegotiated(err, kubernetesscheme.Codecs, schema.GroupVersion{}, w, req)
+			return
+		}
+
 		shardURL, err := url.Parse(result.URL)
 		if err != nil {
 			responsewriters.InternalError(w, req, err)
@@ -105,17 +121,60 @@ func newClusterResolveHandler(delegate http.Handler, index proxyindex.Index) htt
 		}
 
 		ctx = WithShardURL(ctx, shardURL)
+
+		// Bound watch requests by the per-cluster context to cancel them when the cluster is migrated or deleted.
+		if isWatchRequest(req) {
+			var cancel context.CancelFunc
+			ctx, cancel = index.ClusterContext(ctx, result.Cluster)
+			defer cancel()
+		}
+
 		req = req.WithContext(ctx)
 
 		delegate.ServeHTTP(w, req)
 	}
 }
 
+func isWatchRequest(req *http.Request) bool {
+	if info, ok := request.RequestInfoFrom(req.Context()); ok && info.IsResourceRequest {
+		return info.Verb == "watch"
+	}
+	switch req.URL.Query().Get("watch") {
+	case "true", "1":
+		return true
+	}
+	return false
+}
+
+func isInProgressWatch(req *http.Request) bool {
+	rv := req.URL.Query().Get("resourceVersion")
+	if rv == "" || rv == "0" {
+		return false
+	}
+
+	return isWatchRequest(req)
+}
+
 func newMappingHandler(delegate http.Handler, index proxyindex.Index) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
-		// not every virtual workspace and/or every mapping has a {cluster} in its URL;
-		// also wildcard requests have to be passed without lookup
+		// Not every virtual workspace and/or every mapping has a {cluster} in its URL;
+		// also wildcard requests have to be passed without lookup.
+		//
+		// For /clusters paths, the mux pattern is /clusters/{cluster}/{trail...}, so
+		// req.PathValue("cluster") returns the cluster name directly.
+		//
+		// For /services/... paths, the mux pattern is /services/<name>/{trail...} - there's
+		// no {cluster} placeholder. The entire "clusters/root:orgs:bob/apis/..." is captured
+		// as {trail...}, so req.PathValue("cluster") returns empty. In this case, we need to
+		// parse the cluster from the URL path using extractClusterFromPath.
 		clusterName := req.PathValue("cluster")
+
+		// If no cluster from path pattern, try to extract from URL path.
+		// Virtual workspace URLs often have the pattern: /services/<name>/clusters/<cluster>/...
+		if clusterName == "" {
+			clusterName = extractClusterFromPath(req.URL.Path)
+		}
+
 		if clusterName == "" || clusterName == "*" {
 			delegate.ServeHTTP(w, req)
 			return
@@ -128,6 +187,26 @@ func newMappingHandler(delegate http.Handler, index proxyindex.Index) http.Handl
 
 		delegate.ServeHTTP(w, req)
 	}
+}
+
+// extractClusterFromPath extracts the cluster name from URLs containing /clusters/<cluster>/
+// For example: /services/foo/clusters/root:orgs:bob/apis/... -> root:orgs:bob.
+func extractClusterFromPath(path string) string {
+	const clustersPrefix = "/clusters/"
+	idx := strings.Index(path, clustersPrefix)
+	if idx == -1 {
+		return ""
+	}
+
+	// Get everything after /clusters/
+	rest := path[idx+len(clustersPrefix):]
+
+	// Find the end of the cluster name (next / or end of string)
+	endIdx := strings.Index(rest, "/")
+	if endIdx == -1 {
+		return rest
+	}
+	return rest[:endIdx]
 }
 
 func resolveClusterName(w http.ResponseWriter, req *http.Request, index proxyindex.Index, clusterName string) (*http.Request, *index.Result) {
@@ -143,7 +222,7 @@ func resolveClusterName(w http.ResponseWriter, req *http.Request, index proxyind
 	if !clusterPath.IsValid() {
 		// this includes wildcards
 		logger.WithValues("requestPath", req.URL.Path).V(4).Info("Invalid cluster path")
-		responsewriters.Forbidden(req.Context(), attributes, w, req, kcpauthorization.WorkspaceAccessNotPermittedReason, kubernetesscheme.Codecs)
+		responsewriters.Forbidden(attributes, w, req, kcpauthorization.WorkspaceAccessNotPermittedReason, kubernetesscheme.Codecs)
 		return nil, nil
 	}
 
@@ -154,12 +233,13 @@ func resolveClusterName(w http.ResponseWriter, req *http.Request, index proxyind
 	}
 	if !found {
 		logger.WithValues("clusterPath", clusterPath).V(4).Info("Unknown cluster path")
-		responsewriters.Forbidden(req.Context(), attributes, w, req, kcpauthorization.WorkspaceAccessNotPermittedReason, kubernetesscheme.Codecs)
+		responsewriters.Forbidden(attributes, w, req, kcpauthorization.WorkspaceAccessNotPermittedReason, kubernetesscheme.Codecs)
 		return nil, nil
 	}
 
 	ctx = WithClusterName(ctx, result.Cluster)
 	ctx = WithWorkspaceType(ctx, result.Type)
+	ctx = WithShardName(ctx, result.Shard)
 
 	return req.WithContext(ctx), &result
 }
@@ -168,6 +248,8 @@ type lookupKey int
 
 const (
 	shardContextKey lookupKey = iota
+	shardNameContextKey
+	shardNameHolderContextKey
 	clusterContextKey
 	workspaceTypeContextKey
 )
@@ -182,6 +264,38 @@ func ShardURLFrom(ctx context.Context) *url.URL {
 		return nil
 	}
 	return shardURL
+}
+
+func WithShardName(parent context.Context, shardName string) context.Context {
+	// Also update the holder if one exists, so outer middleware can access the shard name
+	// even though they only have access to the original request's context.
+	if holder, ok := parent.Value(shardNameHolderContextKey).(*ShardNameHolder); ok {
+		holder.Name = shardName
+	}
+	return context.WithValue(parent, shardNameContextKey, shardName)
+}
+
+func ShardNameFrom(ctx context.Context) string {
+	shardName, ok := ctx.Value(shardNameContextKey).(string)
+	if !ok {
+		return ""
+	}
+	return shardName
+}
+
+// ShardNameHolder is a mutable container for the shard name that can be stored
+// in context before the shard is known, then updated later. This allows outer
+// middleware to access the shard name even when inner handlers create new
+// request objects with WithContext().
+type ShardNameHolder struct {
+	Name string
+}
+
+// WithShardNameHolder stores a ShardNameHolder in the context. The holder can
+// be updated later when WithShardName is called.
+func WithShardNameHolder(parent context.Context) (context.Context, *ShardNameHolder) {
+	holder := &ShardNameHolder{}
+	return context.WithValue(parent, shardNameHolderContextKey, holder), holder
 }
 
 func WithClusterName(parent context.Context, cluster logicalcluster.Name) context.Context {

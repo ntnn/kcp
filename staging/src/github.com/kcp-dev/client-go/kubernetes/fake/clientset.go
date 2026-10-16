@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -37,8 +37,6 @@ import (
 	authorizationv1beta1 "k8s.io/client-go/kubernetes/typed/authorization/v1beta1"
 	autoscalingv1 "k8s.io/client-go/kubernetes/typed/autoscaling/v1"
 	autoscalingv2 "k8s.io/client-go/kubernetes/typed/autoscaling/v2"
-	autoscalingv2beta1 "k8s.io/client-go/kubernetes/typed/autoscaling/v2beta1"
-	autoscalingv2beta2 "k8s.io/client-go/kubernetes/typed/autoscaling/v2beta2"
 	batchv1 "k8s.io/client-go/kubernetes/typed/batch/v1"
 	batchv1beta1 "k8s.io/client-go/kubernetes/typed/batch/v1beta1"
 	certificatesv1 "k8s.io/client-go/kubernetes/typed/certificates/v1"
@@ -72,12 +70,12 @@ import (
 	resourcev1beta1 "k8s.io/client-go/kubernetes/typed/resource/v1beta1"
 	resourcev1beta2 "k8s.io/client-go/kubernetes/typed/resource/v1beta2"
 	schedulingv1 "k8s.io/client-go/kubernetes/typed/scheduling/v1"
-	schedulingv1alpha1 "k8s.io/client-go/kubernetes/typed/scheduling/v1alpha1"
+	schedulingv1alpha2 "k8s.io/client-go/kubernetes/typed/scheduling/v1alpha2"
 	schedulingv1beta1 "k8s.io/client-go/kubernetes/typed/scheduling/v1beta1"
 	storagev1 "k8s.io/client-go/kubernetes/typed/storage/v1"
 	storagev1alpha1 "k8s.io/client-go/kubernetes/typed/storage/v1alpha1"
 	storagev1beta1 "k8s.io/client-go/kubernetes/typed/storage/v1beta1"
-	storagemigrationv1alpha1 "k8s.io/client-go/kubernetes/typed/storagemigration/v1alpha1"
+	storagemigrationv1beta1 "k8s.io/client-go/kubernetes/typed/storagemigration/v1beta1"
 
 	kcpclientset "github.com/kcp-dev/client-go/kubernetes"
 	kcpclientscheme "github.com/kcp-dev/client-go/kubernetes/scheme"
@@ -109,10 +107,6 @@ import (
 	kcpfakeautoscalingv1 "github.com/kcp-dev/client-go/kubernetes/typed/autoscaling/v1/fake"
 	kcpautoscalingv2 "github.com/kcp-dev/client-go/kubernetes/typed/autoscaling/v2"
 	kcpfakeautoscalingv2 "github.com/kcp-dev/client-go/kubernetes/typed/autoscaling/v2/fake"
-	kcpautoscalingv2beta1 "github.com/kcp-dev/client-go/kubernetes/typed/autoscaling/v2beta1"
-	kcpfakeautoscalingv2beta1 "github.com/kcp-dev/client-go/kubernetes/typed/autoscaling/v2beta1/fake"
-	kcpautoscalingv2beta2 "github.com/kcp-dev/client-go/kubernetes/typed/autoscaling/v2beta2"
-	kcpfakeautoscalingv2beta2 "github.com/kcp-dev/client-go/kubernetes/typed/autoscaling/v2beta2/fake"
 	kcpbatchv1 "github.com/kcp-dev/client-go/kubernetes/typed/batch/v1"
 	kcpfakebatchv1 "github.com/kcp-dev/client-go/kubernetes/typed/batch/v1/fake"
 	kcpbatchv1beta1 "github.com/kcp-dev/client-go/kubernetes/typed/batch/v1beta1"
@@ -179,8 +173,8 @@ import (
 	kcpfakeresourcev1beta2 "github.com/kcp-dev/client-go/kubernetes/typed/resource/v1beta2/fake"
 	kcpschedulingv1 "github.com/kcp-dev/client-go/kubernetes/typed/scheduling/v1"
 	kcpfakeschedulingv1 "github.com/kcp-dev/client-go/kubernetes/typed/scheduling/v1/fake"
-	kcpschedulingv1alpha1 "github.com/kcp-dev/client-go/kubernetes/typed/scheduling/v1alpha1"
-	kcpfakeschedulingv1alpha1 "github.com/kcp-dev/client-go/kubernetes/typed/scheduling/v1alpha1/fake"
+	kcpschedulingv1alpha2 "github.com/kcp-dev/client-go/kubernetes/typed/scheduling/v1alpha2"
+	kcpfakeschedulingv1alpha2 "github.com/kcp-dev/client-go/kubernetes/typed/scheduling/v1alpha2/fake"
 	kcpschedulingv1beta1 "github.com/kcp-dev/client-go/kubernetes/typed/scheduling/v1beta1"
 	kcpfakeschedulingv1beta1 "github.com/kcp-dev/client-go/kubernetes/typed/scheduling/v1beta1/fake"
 	kcpstoragev1 "github.com/kcp-dev/client-go/kubernetes/typed/storage/v1"
@@ -189,8 +183,8 @@ import (
 	kcpfakestoragev1alpha1 "github.com/kcp-dev/client-go/kubernetes/typed/storage/v1alpha1/fake"
 	kcpstoragev1beta1 "github.com/kcp-dev/client-go/kubernetes/typed/storage/v1beta1"
 	kcpfakestoragev1beta1 "github.com/kcp-dev/client-go/kubernetes/typed/storage/v1beta1/fake"
-	kcpstoragemigrationv1alpha1 "github.com/kcp-dev/client-go/kubernetes/typed/storagemigration/v1alpha1"
-	kcpfakestoragemigrationv1alpha1 "github.com/kcp-dev/client-go/kubernetes/typed/storagemigration/v1alpha1/fake"
+	kcpstoragemigrationv1beta1 "github.com/kcp-dev/client-go/kubernetes/typed/storagemigration/v1beta1"
+	kcpfakestoragemigrationv1beta1 "github.com/kcp-dev/client-go/kubernetes/typed/storagemigration/v1beta1/fake"
 	kcpfakediscovery "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/discovery/fake"
 	kcptesting "github.com/kcp-dev/client-go/third_party/k8s.io/client-go/testing"
 	"github.com/kcp-dev/logicalcluster/v3"
@@ -201,7 +195,7 @@ import (
 // without applying any field management, validations and/or defaults. It shouldn't be considered a replacement
 // for a real clientset and is mostly useful in simple unit tests.
 //
-// DEPRECATED: NewClientset replaces this with support for field management, which significantly improves
+// Deprecated: NewClientset replaces this with support for field management, which significantly improves
 // server side apply testing. NewClientset is only available when apply configurations are generated (e.g.
 // via --with-applyconfig).
 func NewSimpleClientset(objects ...runtime.Object) *ClusterClientset {
@@ -232,6 +226,28 @@ func (c *ClusterClientset) Discovery() discovery.DiscoveryInterface {
 
 func (c *ClusterClientset) Tracker() kcptesting.ObjectTracker {
 	return c.tracker
+}
+
+// IsWatchListSemanticsUnSupported informs the reflector that this client
+// doesn't support WatchList semantics.
+//
+// This is a synthetic method whose sole purpose is to satisfy the optional
+// interface check performed by the reflector.
+// Returning true signals that WatchList can NOT be used.
+// No additional logic is implemented here.
+func (c *ClusterClientset) IsWatchListSemanticsUnSupported() bool {
+	return true
+}
+
+// IsWatchListSemanticsSupported informs the reflector that this client
+// doesn't support WatchList semantics.
+//
+// This is a synthetic method whose sole purpose is to satisfy the optional
+// interface check performed by the reflector.
+// Returning true signals that WatchList can NOT be used.
+// No additional logic is implemented here.
+func (c *Clientset) IsWatchListSemanticsUnSupported() bool {
+	return true
 }
 
 // Cluster scopes this clientset to one cluster.
@@ -315,16 +331,6 @@ func (c *ClusterClientset) AutoscalingV1() kcpautoscalingv1.AutoscalingV1Cluster
 // AutoscalingV2 retrieves the AutoscalingV2ClusterClient
 func (c *ClusterClientset) AutoscalingV2() kcpautoscalingv2.AutoscalingV2ClusterInterface {
 	return &kcpfakeautoscalingv2.AutoscalingV2ClusterClient{Fake: &c.Fake}
-}
-
-// AutoscalingV2beta1 retrieves the AutoscalingV2beta1ClusterClient
-func (c *ClusterClientset) AutoscalingV2beta1() kcpautoscalingv2beta1.AutoscalingV2beta1ClusterInterface {
-	return &kcpfakeautoscalingv2beta1.AutoscalingV2beta1ClusterClient{Fake: &c.Fake}
-}
-
-// AutoscalingV2beta2 retrieves the AutoscalingV2beta2ClusterClient
-func (c *ClusterClientset) AutoscalingV2beta2() kcpautoscalingv2beta2.AutoscalingV2beta2ClusterInterface {
-	return &kcpfakeautoscalingv2beta2.AutoscalingV2beta2ClusterClient{Fake: &c.Fake}
 }
 
 // BatchV1 retrieves the BatchV1ClusterClient
@@ -492,9 +498,9 @@ func (c *ClusterClientset) SchedulingV1() kcpschedulingv1.SchedulingV1ClusterInt
 	return &kcpfakeschedulingv1.SchedulingV1ClusterClient{Fake: &c.Fake}
 }
 
-// SchedulingV1alpha1 retrieves the SchedulingV1alpha1ClusterClient
-func (c *ClusterClientset) SchedulingV1alpha1() kcpschedulingv1alpha1.SchedulingV1alpha1ClusterInterface {
-	return &kcpfakeschedulingv1alpha1.SchedulingV1alpha1ClusterClient{Fake: &c.Fake}
+// SchedulingV1alpha2 retrieves the SchedulingV1alpha2ClusterClient
+func (c *ClusterClientset) SchedulingV1alpha2() kcpschedulingv1alpha2.SchedulingV1alpha2ClusterInterface {
+	return &kcpfakeschedulingv1alpha2.SchedulingV1alpha2ClusterClient{Fake: &c.Fake}
 }
 
 // SchedulingV1beta1 retrieves the SchedulingV1beta1ClusterClient
@@ -517,9 +523,9 @@ func (c *ClusterClientset) StorageV1beta1() kcpstoragev1beta1.StorageV1beta1Clus
 	return &kcpfakestoragev1beta1.StorageV1beta1ClusterClient{Fake: &c.Fake}
 }
 
-// StoragemigrationV1alpha1 retrieves the StoragemigrationV1alpha1ClusterClient
-func (c *ClusterClientset) StoragemigrationV1alpha1() kcpstoragemigrationv1alpha1.StoragemigrationV1alpha1ClusterInterface {
-	return &kcpfakestoragemigrationv1alpha1.StoragemigrationV1alpha1ClusterClient{Fake: &c.Fake}
+// StoragemigrationV1beta1 retrieves the StoragemigrationV1beta1ClusterClient
+func (c *ClusterClientset) StoragemigrationV1beta1() kcpstoragemigrationv1beta1.StoragemigrationV1beta1ClusterInterface {
+	return &kcpfakestoragemigrationv1beta1.StoragemigrationV1beta1ClusterClient{Fake: &c.Fake}
 }
 
 // Clientset implements clientset.Interface. Meant to be embedded into a
@@ -633,16 +639,6 @@ func (c *Clientset) AutoscalingV1() autoscalingv1.AutoscalingV1Interface {
 // AutoscalingV2 retrieves the AutoscalingV2Client
 func (c *Clientset) AutoscalingV2() autoscalingv2.AutoscalingV2Interface {
 	return &kcpfakeautoscalingv2.AutoscalingV2Client{Fake: c.Fake, ClusterPath: c.clusterPath}
-}
-
-// AutoscalingV2beta1 retrieves the AutoscalingV2beta1Client
-func (c *Clientset) AutoscalingV2beta1() autoscalingv2beta1.AutoscalingV2beta1Interface {
-	return &kcpfakeautoscalingv2beta1.AutoscalingV2beta1Client{Fake: c.Fake, ClusterPath: c.clusterPath}
-}
-
-// AutoscalingV2beta2 retrieves the AutoscalingV2beta2Client
-func (c *Clientset) AutoscalingV2beta2() autoscalingv2beta2.AutoscalingV2beta2Interface {
-	return &kcpfakeautoscalingv2beta2.AutoscalingV2beta2Client{Fake: c.Fake, ClusterPath: c.clusterPath}
 }
 
 // BatchV1 retrieves the BatchV1Client
@@ -810,9 +806,9 @@ func (c *Clientset) SchedulingV1() schedulingv1.SchedulingV1Interface {
 	return &kcpfakeschedulingv1.SchedulingV1Client{Fake: c.Fake, ClusterPath: c.clusterPath}
 }
 
-// SchedulingV1alpha1 retrieves the SchedulingV1alpha1Client
-func (c *Clientset) SchedulingV1alpha1() schedulingv1alpha1.SchedulingV1alpha1Interface {
-	return &kcpfakeschedulingv1alpha1.SchedulingV1alpha1Client{Fake: c.Fake, ClusterPath: c.clusterPath}
+// SchedulingV1alpha2 retrieves the SchedulingV1alpha2Client
+func (c *Clientset) SchedulingV1alpha2() schedulingv1alpha2.SchedulingV1alpha2Interface {
+	return &kcpfakeschedulingv1alpha2.SchedulingV1alpha2Client{Fake: c.Fake, ClusterPath: c.clusterPath}
 }
 
 // SchedulingV1beta1 retrieves the SchedulingV1beta1Client
@@ -835,7 +831,7 @@ func (c *Clientset) StorageV1beta1() storagev1beta1.StorageV1beta1Interface {
 	return &kcpfakestoragev1beta1.StorageV1beta1Client{Fake: c.Fake, ClusterPath: c.clusterPath}
 }
 
-// StoragemigrationV1alpha1 retrieves the StoragemigrationV1alpha1Client
-func (c *Clientset) StoragemigrationV1alpha1() storagemigrationv1alpha1.StoragemigrationV1alpha1Interface {
-	return &kcpfakestoragemigrationv1alpha1.StoragemigrationV1alpha1Client{Fake: c.Fake, ClusterPath: c.clusterPath}
+// StoragemigrationV1beta1 retrieves the StoragemigrationV1beta1Client
+func (c *Clientset) StoragemigrationV1beta1() storagemigrationv1beta1.StoragemigrationV1beta1Interface {
+	return &kcpfakestoragemigrationv1beta1.StoragemigrationV1beta1Client{Fake: c.Fake, ClusterPath: c.clusterPath}
 }

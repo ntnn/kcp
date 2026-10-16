@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,15 +21,18 @@ import (
 	"testing"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	authserviceaccount "k8s.io/apiserver/pkg/authentication/serviceaccount"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/endpoints/request"
+	rbacregistryvalidation "k8s.io/kubernetes/pkg/registry/rbac/validation"
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/sdk/apis/core/v1alpha1"
 )
 
 func TestRequiredGroupsAuthorizer(t *testing.T) {
+	t.Parallel()
 	for name, tt := range map[string]struct {
 		requestedWorkspace    string
 		requestingUser        *user.DefaultInfo
@@ -62,17 +65,56 @@ func TestRequiredGroupsAuthorizer(t *testing.T) {
 			wantDecision:       authorizer.DecisionAllow,
 			wantReason:         "delegating due to external logical cluster admin access",
 		},
-		"service account from other cluster is granted access": {
+		"service account from other cluster is denied access to logical cluster with required groups": {
+			requestedWorkspace: "root:ready",
+			requestingUser:     newServiceAccountWithCluster("sa", "anotherws"),
+			wantDecision:       authorizer.DecisionDeny,
+			logicalCluster: &v1alpha1.LogicalCluster{
+				ObjectMeta: v1.ObjectMeta{
+					Annotations: map[string]string{
+						"authorization.kcp.io/required-groups": "special-group",
+					},
+				},
+			},
+			wantReason: "user is not a member of required groups: special-group",
+		},
+		"service account from other cluster is granted access to logical cluster without required groups": {
 			requestedWorkspace: "root:ready",
 			requestingUser:     newServiceAccountWithCluster("sa", "anotherws"),
 			wantDecision:       authorizer.DecisionAllow,
-			wantReason:         "delegating due to service account access to logical cluster",
+			logicalCluster:     &v1alpha1.LogicalCluster{},
+			wantReason:         "delegating due to logical cluster does not require groups",
 		},
 		"service account from same cluster is granted access": {
 			requestedWorkspace: "root:ready",
 			requestingUser:     newServiceAccountWithCluster("sa", "root:ready"),
 			wantDecision:       authorizer.DecisionAllow,
-			wantReason:         "delegating due to service account access to logical cluster",
+			wantReason:         "delegating due to local service account access to logical cluster",
+		},
+		"service account without cluster scope is considered local and granted access": {
+			requestedWorkspace: "root:ready",
+			requestingUser:     newServiceAccountWithCluster("sa", ""),
+			wantDecision:       authorizer.DecisionAllow,
+			wantReason:         "delegating due to local service account access to logical cluster",
+		},
+		"service account from same cluster with token scoped to another cluster is denied access to logical cluster with required groups": {
+			requestedWorkspace: "root:ready",
+			requestingUser: &user.DefaultInfo{
+				Name: "system:serviceaccount:default:sa",
+				Extra: map[string][]string{
+					authserviceaccount.ClusterNameKey:    {"root:ready"},
+					rbacregistryvalidation.ScopeExtraKey: {"cluster:anotherws"},
+				},
+			},
+			wantDecision: authorizer.DecisionDeny,
+			logicalCluster: &v1alpha1.LogicalCluster{
+				ObjectMeta: v1.ObjectMeta{
+					Annotations: map[string]string{
+						"authorization.kcp.io/required-groups": "special-group",
+					},
+				},
+			},
+			wantReason: "user is not a member of required groups: special-group",
 		},
 		"permitted user is granted access to logical cluster without required groups": {
 			requestedWorkspace: "root:ready",
@@ -200,6 +242,7 @@ func TestRequiredGroupsAuthorizer(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			if tt.requestedWorkspace != "" {
 				ctx = request.WithCluster(ctx, request.Cluster{

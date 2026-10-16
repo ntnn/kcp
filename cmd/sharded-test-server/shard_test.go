@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package main
 import "testing"
 
 func TestEmbeddedEtcdClientPort(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		n            int
 		expectedPort int
@@ -58,6 +59,7 @@ func TestEmbeddedEtcdClientPort(t *testing.T) {
 }
 
 func TestEmbeddedEtcdPeerPort(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		n            int
 		expectedPort int

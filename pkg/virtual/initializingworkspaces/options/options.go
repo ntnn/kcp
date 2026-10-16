@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,8 +26,8 @@ import (
 	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/rootapiserver"
 
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/rootapiserver"
 	"github.com/kcp-dev/kcp/pkg/virtual/initializingworkspaces"
 	"github.com/kcp-dev/kcp/pkg/virtual/initializingworkspaces/builder"
 )
@@ -56,7 +56,8 @@ func (o *InitializingWorkspaces) Validate(flagPrefix string) []error {
 func (o *InitializingWorkspaces) NewVirtualWorkspaces(
 	rootPathPrefix string,
 	config *rest.Config,
-	wildcardKcpInformers kcpinformers.SharedInformerFactory,
+	externalLogicalClusterAdminConfig *rest.Config,
+	wildcardKcpInformers, cachedKcpInformers kcpinformers.SharedInformerFactory,
 ) (workspaces []rootapiserver.NamedVirtualWorkspace, err error) {
 	config = rest.AddUserAgent(rest.CopyConfig(config), "initializingworkspaces-virtual-workspace")
 	kubeClusterClient, err := kcpkubernetesclientset.NewForConfig(config)
@@ -68,5 +69,19 @@ func (o *InitializingWorkspaces) NewVirtualWorkspaces(
 		return nil, err
 	}
 
-	return builder.BuildVirtualWorkspace(config, path.Join(rootPathPrefix, initializingworkspaces.VirtualWorkspaceName), dynamicClusterClient, kubeClusterClient, wildcardKcpInformers)
+	// externalLogicalClusterAdminConfig (when set) targets the front-proxy
+	// so SubjectAccessReview calls for the workspacetype's cluster reach the
+	// shard that hosts it instead of the local shard. When unset, the SAR
+	// goes through the local shard's loopback, which only works in
+	// non-sharded deployments or when the workspacetype is co-located.
+	var externalLogicalClusterAdminClient kcpkubernetesclientset.ClusterInterface
+	if externalLogicalClusterAdminConfig != nil {
+		externalCfg := rest.AddUserAgent(rest.CopyConfig(externalLogicalClusterAdminConfig), "initializingworkspaces-virtual-workspace-sar")
+		externalLogicalClusterAdminClient, err = kcpkubernetesclientset.NewForConfig(externalCfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return builder.BuildVirtualWorkspace(config, path.Join(rootPathPrefix, initializingworkspaces.VirtualWorkspaceName), dynamicClusterClient, kubeClusterClient, externalLogicalClusterAdminClient, wildcardKcpInformers, cachedKcpInformers)
 }

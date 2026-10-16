@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -58,8 +58,8 @@ func Bootstrap(ctx context.Context, crdClient apiextensionsclient.Interface, dis
 		{Group: apis.GroupName, Resource: "apiexportendpointslices"},
 		{Group: core.GroupName, Resource: "logicalclusters"},
 		{Group: apis.GroupName, Resource: "apiconversions"},
-		{Group: cache.GroupName, Resource: "cachedresources"},
-		{Group: cache.GroupName, Resource: "cachedresourceendpointslices"},
+		{Group: cache.GroupName, Resource: "clustercachedresources"},
+		{Group: cache.GroupName, Resource: "clustercachedresourceendpointslices"},
 	}
 
 	if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {

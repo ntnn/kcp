@@ -29,7 +29,7 @@ description: >
     1. If your git remote for kcp-dev/kcp is named something other than `upstream`, change `REF` accordingly
     2. If you are creating a release from a release branch, change `main` in `REF` accordingly, or you can
        make `REF` a commit hash.
-       
+
        ```shell
        REF=upstream/main
        TAG=<tag> # e.g. v1.2.3
@@ -114,7 +114,7 @@ release-notes \
   --branch main \
   --start-rev $PREV_TAG \
   --end-rev $TAG \
-  --output CHANGELOG.md 
+  --output CHANGELOG.md
 ```
 
 Don't commit the `CHANGELOG.md` to the repository, just keep it around to update the release on GitHub (next step).
@@ -143,3 +143,13 @@ Documentation for the respective release branch needs to be triggered manually a
    2. In the body, include noteworthy changes
    3. Provide a link to the release in GitHub for the full release notes
 2. Post a message in the [#kcp-users](https://kubernetes.slack.com/archives/C021U8WSAFK) Slack channel
+
+## Related repositories 
+
+Once we release kcp we also need to release the following related repositories:
+
+- [kcp-dev/multicluster-provider](https://github.com/kcp-dev/multicluster-provider) - Needs kcp-dev/apimachinery, kcp-dev/logicalcluster
+- [kcp-dev/api-syncagent](https://github.com/kcp-dev/api-syncagent) - Need multicluster-provider 
+- [kcp-dev/init-agent](https://github.com/kcp-dev/init-agent) - Needs multicluster-provider
+- [kcp-dev/kcp-operator](https://github.com/kcp-dev/kcp-operator) - Standalone operator for kcp, needs kcp-dev/kcp
+- [kcp-dev/helm-charts](https://github.com/kcp-dev/helm-charts) - needs rest of the repos to be released first

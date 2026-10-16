@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,9 +18,7 @@ package initialization
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
-	"math/big"
 	"sort"
 	"strings"
 
@@ -30,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
+	kcpcrypto "github.com/kcp-dev/apimachinery/v2/pkg/util/crypto"
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -163,12 +162,18 @@ func (b *APIBinder) reconcile(ctx context.Context, logicalCluster *corev1alpha1.
 			}
 
 			for _, exportClaim := range apiExport.Spec.PermissionClaims {
+				selector := apisv1alpha2.PermissionClaimSelector{MatchAll: true}
+
+				// Use the default selector from the APIExport if specified
+				if exportClaim.DefaultSelector != nil {
+					selector = *exportClaim.DefaultSelector
+					logger.V(3).Info("using default selector from APIExport", "selector", selector)
+				}
+
 				acceptedClaim := apisv1alpha2.AcceptablePermissionClaim{
 					ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
 						PermissionClaim: exportClaim,
-						Selector: apisv1alpha2.PermissionClaimSelector{
-							MatchAll: true,
-						},
+						Selector:        selector,
 					},
 					State: apisv1alpha2.ClaimAccepted,
 				}
@@ -229,6 +234,11 @@ func (b *APIBinder) reconcile(ctx context.Context, logicalCluster *corev1alpha1.
 
 		if !conditions.IsTrue(binding, apisv1alpha2.InitialBindingCompleted) {
 			incomplete = append(incomplete, binding.Name)
+			continue
+		}
+
+		if hasAcceptedPermissionClaims(binding) && !conditions.IsTrue(binding, apisv1alpha2.PermissionClaimsApplied) {
+			incomplete = append(incomplete, fmt.Sprintf("%s waiting for permission claims to be applied", binding.Name))
 		}
 	}
 
@@ -269,7 +279,7 @@ func generateAPIBindingName(clusterName logicalcluster.Name, exportPath, exportN
 
 	exportNamePrefix := exportName[:maxLen]
 
-	hash := toBase36Sha224(
+	hash := kcpcrypto.Base62Sha224.String(
 		clusterName.String() + "|" + exportPath + "|" + exportName,
 	)
 
@@ -280,12 +290,11 @@ func generateAPIBindingName(clusterName logicalcluster.Name, exportPath, exportN
 	return fmt.Sprintf("%s-%s", exportNamePrefix, hash)
 }
 
-func toBase36(hash [28]byte) string {
-	var i big.Int
-	i.SetBytes(hash[:])
-	return i.Text(62)
-}
-
-func toBase36Sha224(s string) string {
-	return toBase36(sha256.Sum224([]byte(s)))
+func hasAcceptedPermissionClaims(binding *apisv1alpha2.APIBinding) bool {
+	for _, claim := range binding.Spec.PermissionClaims {
+		if claim.State == apisv1alpha2.ClaimAccepted {
+			return true
+		}
+	}
+	return false
 }

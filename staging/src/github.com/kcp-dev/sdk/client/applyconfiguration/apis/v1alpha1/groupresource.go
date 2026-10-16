@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,8 +20,17 @@ package v1alpha1
 
 // GroupResourceApplyConfiguration represents a declarative configuration of the GroupResource type for use
 // with apply.
+//
+// GroupResource identifies a resource.
 type GroupResourceApplyConfiguration struct {
-	Group    *string `json:"group,omitempty"`
+	// group is the name of an API group.
+	// For core groups this is the empty string '""'.
+	Group *string `json:"group,omitempty"`
+	// resource is the name of the resource.
+	// A subresource may be claimed as "resource/subresource",
+	// e.g. "serviceaccounts/token", in the style of RBAC rules.
+	// Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
+	// not provided by an api export.
 	Resource *string `json:"resource,omitempty"`
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -45,23 +45,36 @@ import (
 )
 
 func TestReconcileNew(t *testing.T) {
+	t.Parallel()
 	apiBinding := newBindingBuilder().
 		WithClusterName("org:ws").
 		WithName("my-binding").
 		WithExportReference(logicalcluster.NewPath("org:some-workspace"), "some-export").
 		Build()
 
-	c := &controller{}
+	c := &controller{
+		getAPIExportByPath: func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error) {
+			return nil, apierrors.NewNotFound(apisv1alpha2.SchemeGroupVersion.WithResource("apiexports").GroupResource(), "some-export")
+		},
+	}
 
-	t.Logf("Run only newReconciler because no phase is set")
-	requeue, err := c.reconcile(context.Background(), apiBinding)
+	ctx := context.Background()
+
+	t.Logf("reconcile #1 - fresh binding, no Phase")
+	requeue, err := c.reconcile(ctx, apiBinding)
 	require.NoError(t, err)
+	require.True(t, requeue)
 	require.Equal(t, apisv1alpha2.APIBindingPhaseBinding, apiBinding.Status.Phase)
-	require.False(t, requeue)
-	requireConditionMatches(t, apiBinding, conditions.FalseCondition(conditionsv1alpha1.ReadyCondition, "", "", ""))
+	require.False(t, conditions.Has(apiBinding, conditionsv1alpha1.ReadyCondition))
+
+	t.Logf("reconcile #2 - same object, simulate the requeue")
+	_, err = c.reconcile(ctx, apiBinding)
+	require.NoError(t, err)
+	require.True(t, conditions.Has(apiBinding, conditionsv1alpha1.ReadyCondition))
 }
 
 func TestReconcileBinding(t *testing.T) {
+	t.Parallel()
 	var (
 		unbound = newBindingBuilder().
 			WithCondition(&conditionsv1alpha1.Condition{
@@ -193,6 +206,7 @@ func TestReconcileBinding(t *testing.T) {
 		existingAPIBindings       []*apisv1alpha2.APIBinding
 		logicalCluster            *corev1alpha1.LogicalCluster
 		updateLogicalClusterError error
+		mutateTypeMetaOnUpdate    bool
 
 		// reconcile result
 		wantError   bool
@@ -214,6 +228,12 @@ func TestReconcileBinding(t *testing.T) {
 		// Bound resources
 		wantPhaseBound     bool
 		wantBoundResources []apisv1alpha2.BoundAPIResource
+
+		// LogicalCluster update behavior
+		checkUpdateLogicalClusterCalled bool
+		wantUpdateLogicalClusterCalled  bool
+		wantUpdatedResourceBindings     ResourceBindingsAnnotation
+		wantLogicalClusterTypeMeta      *metav1.TypeMeta
 	}{
 		"Update to nil workspace ref reports invalid APIExport": {
 			apiBinding: binding.DeepCopy().WithoutWorkspaceReference().Build(),
@@ -280,6 +300,37 @@ func TestReconcileBinding(t *testing.T) {
 			apiBinding:                binding.Build(),
 			updateLogicalClusterError: errors.New("foo"),
 			wantError:                 true,
+		},
+		"LogicalCluster update happens when resource bindings change": {
+			logicalCluster:                  withResourceBindings(newLogicalCluster(), ResourceBindingsAnnotation{}),
+			apiBinding:                      binding.Build(),
+			wantCreateCRD:                   true,
+			checkUpdateLogicalClusterCalled: true,
+			wantUpdateLogicalClusterCalled:  true,
+			wantUpdatedResourceBindings: ResourceBindingsAnnotation{
+				"widgets.kcp.io": {Lock: Lock{Name: "my-binding"}},
+			},
+		},
+		"LogicalCluster update does not happen for permission-claims-only APIBinding": {
+			logicalCluster: withResourceBindings(newLogicalCluster(), ResourceBindingsAnnotation{}),
+			apiBinding: binding.DeepCopy().
+				WithExportReference(logicalcluster.NewPath("org:some-workspace"), "permission-claims-only").
+				Build(),
+			mutateTypeMetaOnUpdate:          true,
+			checkUpdateLogicalClusterCalled: true,
+			wantUpdateLogicalClusterCalled:  false,
+			wantReady:                       true,
+			wantPhaseBound:                  true,
+			wantInitialBindingComplete: wantInitialBindingComplete{
+				completed: true,
+			},
+			wantAPIExportValid: wantAPIExportValid{
+				valid: true,
+			},
+			wantLogicalClusterTypeMeta: &metav1.TypeMeta{
+				Kind:       "LogicalCluster",
+				APIVersion: corev1alpha1.SchemeGroupVersion.String(),
+			},
 		},
 		"Resource already bound by other APIBinding": {
 			logicalCluster: withResourceBindings(newLogicalCluster(), ResourceBindingsAnnotation{
@@ -460,6 +511,7 @@ func TestReconcileBinding(t *testing.T) {
 						IdentityHash: "hash1",
 					},
 					StorageVersions: []string{"v0", "v1"},
+					IdentityHashes:  []string{"hash1"},
 				},
 			},
 			wantPhaseBound: true,
@@ -487,6 +539,7 @@ func TestReconcileBinding(t *testing.T) {
 						IdentityHash: "hash1",
 					},
 					StorageVersions: []string{"v0", "v1", "v2"},
+					IdentityHashes:  []string{"hash1"},
 				},
 			},
 			wantPhaseBound: true,
@@ -498,7 +551,9 @@ func TestReconcileBinding(t *testing.T) {
 
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
 			createCRDCalled := false
+			updateLogicalClusterCalled := false
 
 			apiExports := map[string]*apisv1alpha2.APIExport{
 				"some-export": {
@@ -584,6 +639,21 @@ func TestReconcileBinding(t *testing.T) {
 						},
 					},
 				},
+				"permission-claims-only": {
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							logicalcluster.AnnotationKey: "org-some-workspace",
+						},
+						Name: "permission-claims-only",
+					},
+					Spec:   apisv1alpha2.APIExportSpec{},
+					Status: apisv1alpha2.APIExportStatus{IdentityHash: "hash-claims"},
+				},
+			}
+
+			if tc.wantLogicalClusterTypeMeta != nil && tc.logicalCluster != nil {
+				tc.logicalCluster = tc.logicalCluster.DeepCopy()
+				tc.logicalCluster.TypeMeta = *tc.wantLogicalClusterTypeMeta
 			}
 
 			apiResourceSchemas := map[string]*apisv1alpha1.APIResourceSchema{
@@ -657,8 +727,17 @@ func TestReconcileBinding(t *testing.T) {
 					return tc.logicalCluster, nil
 				},
 				updateLogicalCluster: func(ctx context.Context, lc *corev1alpha1.LogicalCluster) error {
+					updateLogicalClusterCalled = true
 					if tc.updateLogicalClusterError != nil {
 						return tc.updateLogicalClusterError
+					}
+					if tc.mutateTypeMetaOnUpdate {
+						lc.TypeMeta = metav1.TypeMeta{}
+					}
+					if tc.wantUpdatedResourceBindings != nil {
+						got, err := GetResourceBindings(lc)
+						require.NoError(t, err)
+						require.Equal(t, tc.wantUpdatedResourceBindings, got)
 					}
 					return nil
 				},
@@ -677,6 +756,13 @@ func TestReconcileBinding(t *testing.T) {
 
 			// CRD creation
 			require.Equal(t, tc.wantCreateCRD, createCRDCalled, "mismatch on CRD creation expectation")
+			if tc.checkUpdateLogicalClusterCalled {
+				require.Equal(t, tc.wantUpdateLogicalClusterCalled, updateLogicalClusterCalled, "mismatch on LogicalCluster update expectation")
+			}
+			if tc.wantLogicalClusterTypeMeta != nil {
+				require.NotNil(t, tc.logicalCluster)
+				require.Equal(t, *tc.wantLogicalClusterTypeMeta, tc.logicalCluster.TypeMeta)
+			}
 
 			// APIExportValid condition
 			if tc.wantAPIExportValid.invalidReference {
@@ -797,11 +883,100 @@ func TestReconcileBinding(t *testing.T) {
 }
 
 func TestCRDFromAPIResourceSchema(t *testing.T) {
+	t.Parallel()
 	tests := map[string]struct {
 		schema  *apisv1alpha1.APIResourceSchema
 		want    *apiextensionsv1.CustomResourceDefinition
 		wantErr bool
 	}{
+		"selectable fields are propagated to the bound CRD": {
+			schema: &apisv1alpha1.APIResourceSchema{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						logicalcluster.AnnotationKey: "my-cluster",
+					},
+					Name: "my-name",
+					UID:  types.UID("my-uuid"),
+				},
+				Spec: apisv1alpha1.APIResourceSchemaSpec{
+					Group: "my-group",
+					Names: apiextensionsv1.CustomResourceDefinitionNames{
+						Plural:   "widgets",
+						Singular: "widget",
+						Kind:     "Widget",
+						ListKind: "WidgetList",
+					},
+					Scope: apiextensionsv1.NamespaceScoped,
+					Versions: []apisv1alpha1.APIResourceVersion{
+						{
+							Name:    "v1",
+							Served:  true,
+							Storage: true,
+							Schema: runtime.RawExtension{
+								Raw: []byte(`
+{
+	"description": "foo",
+	"type": "object"
+}
+								`),
+							},
+							SelectableFields: []apiextensionsv1.SelectableField{
+								{
+									JSONPath: ".spec.color",
+								},
+								{
+									JSONPath: ".spec.size",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: &apiextensionsv1.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "my-uuid",
+					Annotations: map[string]string{
+						logicalcluster.AnnotationKey:            SystemBoundCRDsClusterName.String(),
+						apisv1alpha1.AnnotationBoundCRDKey:      "",
+						apisv1alpha1.AnnotationSchemaClusterKey: "my-cluster",
+						apisv1alpha1.AnnotationSchemaNameKey:    "my-name",
+					},
+				},
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+					Group: "my-group",
+					Names: apiextensionsv1.CustomResourceDefinitionNames{
+						Plural:   "widgets",
+						Singular: "widget",
+						Kind:     "Widget",
+						ListKind: "WidgetList",
+					},
+					Scope: apiextensionsv1.NamespaceScoped,
+					Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+						{
+							Name:    "v1",
+							Served:  true,
+							Storage: true,
+							Schema: &apiextensionsv1.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+									Description: "foo",
+									Type:        "object",
+								},
+							},
+							Subresources: &apiextensionsv1.CustomResourceSubresources{},
+							SelectableFields: []apiextensionsv1.SelectableField{
+								{
+									JSONPath: ".spec.color",
+								},
+								{
+									JSONPath: ".spec.size",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
 		"full schema": {
 			schema: &apisv1alpha1.APIResourceSchema{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1094,7 +1269,8 @@ func TestCRDFromAPIResourceSchema(t *testing.T) {
 	}
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
-			got, err := generateCRD(tc.schema)
+			t.Parallel()
+			got, err := GenerateBoundCRD(tc.schema)
 
 			if tc.wantErr != (err != nil) {
 				t.Fatalf("wantErr: %v, got %v", tc.wantErr, err)

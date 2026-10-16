@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,63 @@ import (
 // RootShard holds a name of the root shard.
 var RootShard = "root"
 
+// ShardUnschedulableAnnotationKey marks a single shard as unschedulable: the
+// workspace scheduler will not place new workspaces on it (cordoning). It
+// only affects the shard whose Shard object carries it. Admins set it
+// through the Admin workspace (kubectl ws use :admin); direct edits of Shard
+// objects are denied by admission.
+const ShardUnschedulableAnnotationKey = "experimental.core.kcp.io/unschedulable"
+
+// ShardRepresentationAnnotationKey marks a Shard object in the root
+// workspace as a read-only representation mirrored from the cache server.
+// Representations are managed by kcp (created, updated and removed to track
+// the authoritative shard-owned objects) and are excluded from replication
+// back to the cache server. Managed by kcp; not meant to be set by users.
+const ShardRepresentationAnnotationKey = "core.kcp.io/shard-representation"
+
+// ShardSchedulable is a condition on the Shard object reflecting the shard's
+// scheduling state, similar to a Kubernetes node: True when new workspaces
+// may be scheduled onto the shard, False with reason ShardReasonCordoned when
+// the shard observed the unschedulable annotation on its authoritative
+// object. It is set by the owning shard itself, so seeing it change in the
+// Admin workspace acknowledges that the shard received and applied the
+// cordon/uncordon signal.
+const ShardSchedulable v1alpha1.ConditionType = "Schedulable"
+
+// ShardReasonCordoned is the reason for ShardSchedulable=False when the
+// owning shard observed the unschedulable annotation on its Shard object.
+const ShardReasonCordoned = "Cordoned"
+
+// ShardResourceLimitsApplied is a condition on the Shard object reporting the
+// scheduling limits the shard is actually enforcing. Limits are written through
+// the Admin workspace and reach the owning shard indirectly, so this condition
+// is the shard's acknowledgement that the round trip completed.
+//
+// The message spells the limits out in a parsable form, so consumers can check
+// them against spec.resourceLimits without a second status field:
+//
+//	soft/hard: <resource>=<soft>/<hard>[, <resource>=<soft>/<hard>...]
+//
+// with "-" for a tier that is not configured, e.g. "soft/hard: workspaces=10/20"
+// or "soft/hard: workspaces=-/20". It is "no limits configured" when none are
+// set. Resources are sorted by name, so the message is stable.
+//
+// It is False with reason ShardReasonInvalidResourceLimits when part of the
+// configuration does not take effect as written; the message then carries the
+// same prefix, followed by "; " and what is wrong.
+const ShardResourceLimitsApplied v1alpha1.ConditionType = "ResourceLimitsApplied"
+
+// ShardReasonInvalidResourceLimits is the reason for
+// ShardResourceLimitsApplied=False when a configured limit does not take effect
+// as written, e.g. a negative value or a soft limit that is not below the hard
+// limit. The limits that are usable stay in force.
+const ShardReasonInvalidResourceLimits = "InvalidResourceLimits"
+
+// ResourceWorkspaces is the number of workspaces (logical clusters) scheduled
+// onto a shard. It can be used as a key in ShardResourceLimits and in
+// ShardStatus.Capacity.
+const ResourceWorkspaces corev1.ResourceName = "workspaces"
+
 // Shard describes a kcp instance on which a number of logical clusters will live
 //
 // +crd
@@ -38,6 +95,8 @@ var RootShard = "root"
 // +kubebuilder:printcolumn:name="Region",type=string,JSONPath=`.metadata.labels['region']`,description="The region this workspace is in"
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.spec.baseURL`,description="Type URL to directly connect to the shard"
 // +kubebuilder:printcolumn:name="External URL",type=string,JSONPath=`.spec.externalURL`,description="The URL exposed in logical clusters created on that shard"
+// +kubebuilder:printcolumn:name="Schedulable",type=string,JSONPath=`.status.conditions[?(@.type=="Schedulable")].status`,description="Shard scheduling status"
+// +kubebuilder:printcolumn:name="Workspaces",type=string,JSONPath=`.status.used.workspaces`,description="The number of workspaces scheduled to this shard"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 type Shard struct {
 	v1.TypeMeta `json:",inline"`
@@ -64,7 +123,7 @@ var _ conditions.Setter = &Shard{}
 
 // ShardSpec holds the desired state of the Shard.
 type ShardSpec struct {
-	// baseURL is the address of the KCP shard for direct connections, e.g. by some
+	// baseURL is the address of the kcp shard for direct connections, e.g. by some
 	// front-proxy doing the fan-out to the shards.
 	//
 	// +required
@@ -102,6 +161,32 @@ type ShardSpec struct {
 	// +kubebuilder:validation:Format=uri
 	// +kubebuilder:validation:MinLength=1
 	VirtualWorkspaceURL string `json:"virtualWorkspaceURL,omitempty"`
+
+	// resourceLimits constrains how many of certain resources this shard will
+	// accept during scheduling.
+	//
+	// +optional
+	ResourceLimits *ShardResourceLimits `json:"resourceLimits,omitempty"`
+}
+
+// ShardResourceLimits holds per-resource scheduling limits for a shard,
+// mirroring the Kubernetes ResourceQuota/ResourceRequirements shape: maps of
+// resource name to quantity.
+type ShardResourceLimits struct {
+	// soft holds per-resource thresholds above which this shard is
+	// deprioritized during scheduling: shards under all their soft limits are
+	// preferred. An absent or non-positive value disables the limit for that
+	// resource.
+	//
+	// +optional
+	Soft corev1.ResourceList `json:"soft,omitempty"`
+
+	// hard holds per-resource thresholds above which this shard refuses new
+	// resources of that kind. An absent or non-positive value disables the
+	// limit for that resource.
+	//
+	// +optional
+	Hard corev1.ResourceList `json:"hard,omitempty"`
 }
 
 // ShardStatus communicates the observed state of the Shard.
@@ -109,6 +194,14 @@ type ShardStatus struct {
 	// Set of integer resources that logical clusters can be scheduled into
 	// +optional
 	Capacity corev1.ResourceList `json:"capacity,omitempty"`
+
+	// used is the observed number of resources of each kind currently on this
+	// shard, e.g. the number of workspaces (logical clusters) scheduled to it.
+	// It mirrors a ResourceQuota's status.used and is compared against
+	// spec.resourceLimits during workspace scheduling.
+	//
+	// +optional
+	Used corev1.ResourceList `json:"used,omitempty"`
 
 	// Current processing state of the Shard.
 	// +optional

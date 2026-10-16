@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The KCP Authors.
+Copyright 2024 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -33,14 +34,17 @@ import (
 )
 
 func TestReconcilePhase(t *testing.T) {
+	t.Parallel()
 	for _, testCase := range []struct {
 		name              string
 		input             *tenancyv1alpha1.Workspace
 		getLogicalCluster func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error)
+		getShard          func(name string) (*corev1alpha1.Shard, error)
 
 		wantPhase     corev1alpha1.LogicalClusterPhaseType
 		wantStatus    reconcileStatus
 		wantCondition conditionsv1alpha1.Condition
+		wantRequeue   bool
 	}{
 		{
 			name: "workspace is scheduling but not yet initialized",
@@ -71,7 +75,65 @@ func TestReconcilePhase(t *testing.T) {
 			wantStatus: reconcileStatusContinue,
 		},
 		{
-			name: "workspace is initializing and logical cluster is not found",
+			name: "workspace is initializing and logical cluster is not found but shard is alive",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						corev1alpha1.LogicalClusterShardAnnotationKey: "shard-1",
+					},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseInitializing,
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return nil, apierrors.NewNotFound(corev1alpha1.Resource("logicalcluster"), "cluster-1")
+			},
+			getShard: func(name string) (*corev1alpha1.Shard, error) {
+				return &corev1alpha1.Shard{ObjectMeta: metav1.ObjectMeta{Name: "shard-1"}}, nil
+			},
+			wantPhase:   corev1alpha1.LogicalClusterPhaseInitializing,
+			wantStatus:  reconcileStatusContinue,
+			wantRequeue: true,
+		},
+		{
+			name: "workspace is initializing and logical cluster is not found and shard is gone",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						corev1alpha1.LogicalClusterShardAnnotationKey: "shard-1",
+					},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseInitializing,
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return nil, apierrors.NewNotFound(corev1alpha1.Resource("logicalcluster"), "cluster-1")
+			},
+			getShard: func(name string) (*corev1alpha1.Shard, error) {
+				return nil, apierrors.NewNotFound(corev1alpha1.Resource("shard"), "shard-1")
+			},
+			wantPhase:  corev1alpha1.LogicalClusterPhaseInitializing,
+			wantStatus: reconcileStatusContinue,
+			wantCondition: conditionsv1alpha1.Condition{
+				Type:     tenancyv1alpha1.WorkspaceInitialized,
+				Status:   corev1.ConditionFalse,
+				Severity: conditionsv1alpha1.ConditionSeverityError,
+				Reason:   tenancyv1alpha1.WorkspaceInitializedWorkspaceDisappeared,
+				Message:  "LogicalCluster cluster-1 not found",
+			},
+		},
+		{
+			name: "workspace is initializing and logical cluster is not found and no shard annotation",
 			input: &tenancyv1alpha1.Workspace{
 				Spec: tenancyv1alpha1.WorkspaceSpec{
 					URL:     "http://example.com",
@@ -86,6 +148,13 @@ func TestReconcilePhase(t *testing.T) {
 			},
 			wantPhase:  corev1alpha1.LogicalClusterPhaseInitializing,
 			wantStatus: reconcileStatusContinue,
+			wantCondition: conditionsv1alpha1.Condition{
+				Type:     tenancyv1alpha1.WorkspaceInitialized,
+				Status:   corev1.ConditionFalse,
+				Severity: conditionsv1alpha1.ConditionSeverityError,
+				Reason:   tenancyv1alpha1.WorkspaceInitializedWorkspaceDisappeared,
+				Message:  "LogicalCluster cluster-1 not found",
+			},
 		},
 		{
 			name: "workspace is initializing and logicalCluster not yet initialized",
@@ -101,14 +170,69 @@ func TestReconcilePhase(t *testing.T) {
 			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
 				return &corev1alpha1.LogicalCluster{
 					Status: corev1alpha1.LogicalClusterStatus{
+						Phase: corev1alpha1.LogicalClusterPhaseInitializing,
 						Initializers: []corev1alpha1.LogicalClusterInitializer{
 							"initializer-1",
 						},
 					},
 				}, nil
 			},
-			wantPhase:  corev1alpha1.LogicalClusterPhaseInitializing,
-			wantStatus: reconcileStatusContinue,
+			wantPhase:   corev1alpha1.LogicalClusterPhaseInitializing,
+			wantStatus:  reconcileStatusContinue,
+			wantRequeue: true,
+		},
+		{
+			// An empty status.initializers only means "none to wait for" once the
+			// LogicalCluster is past Scheduling: admission copies spec.initializers
+			// into status on that transition, so reading it earlier would make the
+			// workspace ready before its default APIBindings exist.
+			name: "workspace is initializing and logicalCluster has not left Scheduling",
+			input: &tenancyv1alpha1.Workspace{
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseInitializing,
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return &corev1alpha1.LogicalCluster{
+					Status: corev1alpha1.LogicalClusterStatus{
+						Phase: corev1alpha1.LogicalClusterPhaseScheduling,
+					},
+				}, nil
+			},
+			wantPhase:   corev1alpha1.LogicalClusterPhaseInitializing,
+			wantStatus:  reconcileStatusContinue,
+			wantRequeue: true,
+			wantCondition: conditionsv1alpha1.Condition{
+				Type:     tenancyv1alpha1.WorkspaceInitialized,
+				Status:   corev1.ConditionFalse,
+				Severity: conditionsv1alpha1.ConditionSeverityInfo,
+				Reason:   tenancyv1alpha1.WorkspaceInitializedInitializerExists,
+				Message:  "LogicalCluster is not initializing yet",
+			},
+		},
+		{
+			// The same window, seen a moment earlier: the LogicalCluster exists but
+			// its own phase reconciler has not given it one yet.
+			name: "workspace is initializing and logicalCluster has no phase yet",
+			input: &tenancyv1alpha1.Workspace{
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseInitializing,
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return &corev1alpha1.LogicalCluster{}, nil
+			},
+			wantPhase:   corev1alpha1.LogicalClusterPhaseInitializing,
+			wantStatus:  reconcileStatusContinue,
+			wantRequeue: true,
 		},
 		{
 			name: "workspace is initializing and logicalCluster initialized",
@@ -124,6 +248,7 @@ func TestReconcilePhase(t *testing.T) {
 			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
 				return &corev1alpha1.LogicalCluster{
 					Status: corev1alpha1.LogicalClusterStatus{
+						Phase:        corev1alpha1.LogicalClusterPhaseInitializing,
 						Initializers: []corev1alpha1.LogicalClusterInitializer{},
 					},
 				}, nil
@@ -190,6 +315,10 @@ func TestReconcilePhase(t *testing.T) {
 					Phase: corev1alpha1.LogicalClusterPhaseUnavailable,
 					Conditions: []conditionsv1alpha1.Condition{
 						{
+							Type:   tenancyv1alpha1.WorkspaceInitialized,
+							Status: corev1.ConditionTrue,
+						},
+						{
 							Type:   tenancyv1alpha1.MountConditionReady,
 							Status: corev1.ConditionTrue,
 						},
@@ -217,6 +346,10 @@ func TestReconcilePhase(t *testing.T) {
 					Phase: corev1alpha1.LogicalClusterPhaseUnavailable,
 					Conditions: []conditionsv1alpha1.Condition{
 						{
+							Type:   tenancyv1alpha1.WorkspaceInitialized,
+							Status: corev1.ConditionTrue,
+						},
+						{
 							Type:   conditionsv1alpha1.ConditionType("UpdateIsNeeded"),
 							Status: corev1.ConditionFalse,
 						},
@@ -233,21 +366,297 @@ func TestReconcilePhase(t *testing.T) {
 			wantPhase:  corev1alpha1.LogicalClusterPhaseReady,
 			wantStatus: reconcileStatusStopAndRequeue,
 		},
+		{
+			name: "workspace was unavailable before it was initialized and is scheduled now - resumes Initializing instead of Ready",
+			input: &tenancyv1alpha1.Workspace{
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseUnavailable,
+					Conditions: []conditionsv1alpha1.Condition{
+						{
+							Type:   tenancyv1alpha1.WorkspaceScheduled,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantPhase:  corev1alpha1.LogicalClusterPhaseInitializing,
+			wantStatus: reconcileStatusStopAndRequeue,
+		},
+		{
+			name: "workspace was unavailable before it was scheduled and no condition blocks it anymore - resumes Scheduling instead of Ready",
+			input: &tenancyv1alpha1.Workspace{
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseUnavailable,
+				},
+			},
+			wantPhase:  corev1alpha1.LogicalClusterPhaseScheduling,
+			wantStatus: reconcileStatusStopAndRequeue,
+		},
+		{
+			name: "mounted workspace is unavailable and mount is ready again - Ready",
+			input: &tenancyv1alpha1.Workspace{
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL: "http://example.com",
+					Mount: &tenancyv1alpha1.Mount{
+						Reference: tenancyv1alpha1.ObjectReference{
+							APIVersion: "proxy.example.com/v1alpha1",
+							Kind:       "KubeCluster",
+							Name:       "cluster-1",
+						},
+					},
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseUnavailable,
+					Conditions: []conditionsv1alpha1.Condition{
+						{
+							Type:   tenancyv1alpha1.MountConditionReady,
+							Status: corev1.ConditionTrue,
+						},
+					},
+				},
+			},
+			wantPhase:  corev1alpha1.LogicalClusterPhaseReady,
+			wantStatus: reconcileStatusStopAndRequeue,
+		},
+		{
+			name: "workspace is unavailable due to disappeared logical cluster and shard is alive - recovers when LC reappears",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						corev1alpha1.LogicalClusterShardAnnotationKey: "shard-1",
+					},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseUnavailable,
+					Conditions: []conditionsv1alpha1.Condition{
+						{
+							Type:     tenancyv1alpha1.WorkspaceInitialized,
+							Status:   corev1.ConditionFalse,
+							Severity: conditionsv1alpha1.ConditionSeverityError,
+							Reason:   tenancyv1alpha1.WorkspaceInitializedWorkspaceDisappeared,
+							Message:  "LogicalCluster cluster-1 not found",
+						},
+					},
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return &corev1alpha1.LogicalCluster{
+					Status: corev1alpha1.LogicalClusterStatus{
+						Initializers: []corev1alpha1.LogicalClusterInitializer{},
+					},
+				}, nil
+			},
+			getShard: func(name string) (*corev1alpha1.Shard, error) {
+				return &corev1alpha1.Shard{ObjectMeta: metav1.ObjectMeta{Name: "shard-1"}}, nil
+			},
+			wantPhase:  corev1alpha1.LogicalClusterPhaseReady,
+			wantStatus: reconcileStatusStopAndRequeue,
+			wantCondition: conditionsv1alpha1.Condition{
+				Type:   tenancyv1alpha1.WorkspaceInitialized,
+				Status: corev1.ConditionTrue,
+			},
+			wantRequeue: true,
+		},
+		{
+			name: "workspace is unavailable due to disappeared logical cluster and shard is alive - requeues when LC still not found",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						corev1alpha1.LogicalClusterShardAnnotationKey: "shard-1",
+					},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseUnavailable,
+					Conditions: []conditionsv1alpha1.Condition{
+						{
+							Type:     tenancyv1alpha1.WorkspaceInitialized,
+							Status:   corev1.ConditionFalse,
+							Severity: conditionsv1alpha1.ConditionSeverityError,
+							Reason:   tenancyv1alpha1.WorkspaceInitializedWorkspaceDisappeared,
+							Message:  "LogicalCluster cluster-1 not found",
+						},
+					},
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return nil, apierrors.NewNotFound(corev1alpha1.Resource("logicalcluster"), "cluster-1")
+			},
+			getShard: func(name string) (*corev1alpha1.Shard, error) {
+				return &corev1alpha1.Shard{ObjectMeta: metav1.ObjectMeta{Name: "shard-1"}}, nil
+			},
+			wantPhase:  corev1alpha1.LogicalClusterPhaseUnavailable,
+			wantStatus: reconcileStatusStopAndRequeue,
+		},
+		{
+			name: "workspace is unavailable due to disappeared logical cluster and shard is gone - no recovery",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						corev1alpha1.LogicalClusterShardAnnotationKey: "shard-1",
+					},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseUnavailable,
+					Conditions: []conditionsv1alpha1.Condition{
+						{
+							Type:     tenancyv1alpha1.WorkspaceInitialized,
+							Status:   corev1.ConditionFalse,
+							Severity: conditionsv1alpha1.ConditionSeverityError,
+							Reason:   tenancyv1alpha1.WorkspaceInitializedWorkspaceDisappeared,
+							Message:  "LogicalCluster cluster-1 not found",
+						},
+					},
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return nil, apierrors.NewNotFound(corev1alpha1.Resource("logicalcluster"), "cluster-1")
+			},
+			getShard: func(name string) (*corev1alpha1.Shard, error) {
+				return nil, apierrors.NewNotFound(corev1alpha1.Resource("shard"), "shard-1")
+			},
+			wantPhase:  corev1alpha1.LogicalClusterPhaseUnavailable,
+			wantStatus: reconcileStatusContinue,
+		},
+		{
+			name: "workspace ready and being deleted, LogicalCluster has terminators - phase becomes Terminating",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{Time: time.Now()},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseReady,
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return &corev1alpha1.LogicalCluster{
+					Status: corev1alpha1.LogicalClusterStatus{
+						Terminators: []corev1alpha1.LogicalClusterTerminator{"terminator-1"},
+					},
+				}, nil
+			},
+			wantPhase:   corev1alpha1.LogicalClusterPhaseTerminating,
+			wantStatus:  reconcileStatusContinue,
+			wantRequeue: true,
+		},
+		{
+			name: "workspace ready and being deleted, LogicalCluster has no terminators - phase becomes Deleting",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{Time: time.Now()},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseReady,
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return &corev1alpha1.LogicalCluster{
+					Status: corev1alpha1.LogicalClusterStatus{
+						Terminators: []corev1alpha1.LogicalClusterTerminator{},
+					},
+				}, nil
+			},
+			wantPhase:   corev1alpha1.LogicalClusterPhaseDeleting,
+			wantStatus:  reconcileStatusContinue,
+			wantRequeue: true,
+		},
+		{
+			name: "workspace terminating, LogicalCluster terminators cleared - transitions to Deleting",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{Time: time.Now()},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase:       corev1alpha1.LogicalClusterPhaseTerminating,
+					Terminators: []corev1alpha1.LogicalClusterTerminator{"terminator-1"},
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return &corev1alpha1.LogicalCluster{
+					Status: corev1alpha1.LogicalClusterStatus{
+						Terminators: []corev1alpha1.LogicalClusterTerminator{},
+					},
+				}, nil
+			},
+			wantPhase:   corev1alpha1.LogicalClusterPhaseDeleting,
+			wantStatus:  reconcileStatusContinue,
+			wantRequeue: true,
+		},
+		{
+			name: "workspace being deleted, LogicalCluster is gone - WorkspaceContentDeleted set",
+			input: &tenancyv1alpha1.Workspace{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{Time: time.Now()},
+				},
+				Spec: tenancyv1alpha1.WorkspaceSpec{
+					URL:     "http://example.com",
+					Cluster: "cluster-1",
+				},
+				Status: tenancyv1alpha1.WorkspaceStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseDeleting,
+				},
+			},
+			getLogicalCluster: func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error) {
+				return nil, apierrors.NewNotFound(corev1alpha1.Resource("logicalcluster"), "cluster-1")
+			},
+			wantPhase:  corev1alpha1.LogicalClusterPhaseDeleting,
+			wantStatus: reconcileStatusContinue,
+			wantCondition: conditionsv1alpha1.Condition{
+				Type:   tenancyv1alpha1.WorkspaceContentDeleted,
+				Status: corev1.ConditionTrue,
+			},
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			requeued := false
 			reconciler := phaseReconciler{
 				getLogicalCluster: testCase.getLogicalCluster,
-				requeueAfter:      func(workspace *tenancyv1alpha1.Workspace, after time.Duration) {},
+				getShard:          testCase.getShard,
+				requeueAfter: func(workspace *tenancyv1alpha1.Workspace, after time.Duration) {
+					requeued = true
+				},
 			}
 			status, err := reconciler.reconcile(context.Background(), testCase.input)
 
 			require.NoError(t, err)
 			require.Equal(t, testCase.wantStatus, status)
 			require.Equal(t, testCase.wantPhase, testCase.input.Status.Phase)
+			require.Equal(t, testCase.wantRequeue, requeued, "unexpected requeue state")
 
 			for _, condition := range testCase.input.Status.Conditions {
 				if condition.Type == testCase.wantCondition.Type {
-					require.Equal(t, testCase.wantCondition, condition)
+					require.Equal(t, testCase.wantCondition.Status, condition.Status)
+					require.Equal(t, testCase.wantCondition.Severity, condition.Severity)
+					require.Equal(t, testCase.wantCondition.Reason, condition.Reason)
+					require.Equal(t, testCase.wantCondition.Message, condition.Message)
 				}
 			}
 		})

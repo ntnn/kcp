@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.4
 
-# Copyright 2022 The KCP Authors.
+# Copyright 2022 The kcp Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # Build the binary
-FROM --platform=${BUILDPLATFORM} docker.io/golang:1.24.11 AS builder
+FROM --platform=${BUILDPLATFORM} docker.io/golang:1.26.4 AS builder
 WORKDIR /workspace
 
 # Install dependencies.
@@ -38,6 +38,8 @@ COPY staging/src/github.com/kcp-dev/code-generator/go.mod staging/src/github.com
 COPY staging/src/github.com/kcp-dev/code-generator/go.sum staging/src/github.com/kcp-dev/code-generator/go.sum
 COPY staging/src/github.com/kcp-dev/sdk/go.mod staging/src/github.com/kcp-dev/sdk/go.mod
 COPY staging/src/github.com/kcp-dev/sdk/go.sum staging/src/github.com/kcp-dev/sdk/go.sum
+COPY staging/src/github.com/kcp-dev/virtual-workspace-framework/go.mod staging/src/github.com/kcp-dev/virtual-workspace-framework/go.mod
+COPY staging/src/github.com/kcp-dev/virtual-workspace-framework/go.sum staging/src/github.com/kcp-dev/virtual-workspace-framework/go.sum
 USER 0
 
 # Install kubectl.
@@ -56,7 +58,7 @@ ARG TARGETARCH
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    make OS=${TARGETOS} ARCH=${TARGETARCH}
+    make OS=${TARGETOS} ARCH=${TARGETARCH} EXTRA_LDFLAGS="-s -w"
 
 # distroless doesn't have coreutils, so we need to create a directory
 # for kcp here and copy it over. Any directory would do.

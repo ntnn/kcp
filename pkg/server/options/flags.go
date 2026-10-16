@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -114,6 +114,7 @@ var (
 		"tls-min-version",                  // Minimum TLS version supported. Possible values: VersionTLS10, VersionTLS11, VersionTLS12, VersionTLS13
 		"tls-private-key-file",             // File containing the default x509 private key matching --tls-cert-file.
 		"tls-sni-cert-key",                 // A pair of x509 certificate and private key file paths, optionally suffixed with a list of domain patterns which are fully qualified domain names, possibly with prefixed wildcard segments. The domain patterns also allow IP addresses, but IPs should only be used if the apiserver has visibility to the IP address requested by a client. If no domain patterns are provided, the names of the certificate are extracted. Non-wildcard matches trump over wildcard matches, explicit domain patterns trump over extracted names. For multiple key/certificate pairs, use the --tls-sni-cert-key multiple times. Examples: "example.crt,example.key" or "foo.crt,foo.key:*.foo.com,foo.com".
+		"tls-curve-preferences",            // Comma-separated list of numeric Go crypto/tls CurveID values, as the allowed key exchange mechanisms for the server. The supported values depend on the Go version used. See https://pkg.go.dev/crypto/tls#CurveID for values supported for each Go version. The order of the list is ignored, and key exchange mechanisms are chosen by Go from this list using an internal preference order. If        omitted, the default Go curves will be used.
 
 		// generic flags
 		"cors-allowed-origins",                    // List of allowed origins for CORS, comma separated.  An allowed origin can be a regular expression to support subdomain matching. If this list is empty CORS will not be enabled.
@@ -122,7 +123,6 @@ var (
 		"shutdown-delay-duration",                 // Time to delay the termination. During that time the server keeps serving requests normally. The endpoints /healthz and /livez will return success, but /readyz immediately returns failure. Graceful termination starts after this delay has elapsed. This can be used to allow load balancer to stop sending traffic to this server.
 		"shutdown-send-retry-after",               // If true the HTTP Server will continue listening until all non long running request(s) in flight have been drained, during this window all incoming requests will be rejected with a status code 429 and a 'Retry-After' response header, in addition 'Connection: close' response header is set in order to tear down the TCP connection when idle.
 		"strict-transport-security-directives",    // List of directives for HSTS, comma separated. If this list is empty, then HSTS directives will not be added. Example: 'max-age=31536000,includeSubDomains,preload'
-		"external-hostname",                       // The hostname to use when generating externalized URLs for this master (e.g. Swagger API Docs or OpenID Discovery).
 		"shutdown-watch-termination-grace-period", // his option, if set, represents the maximum amount of grace period the apiserver will wait for active watch request(s) to drain during the graceful server shutdown window.
 		"emulated-version",                        // The versions different components emulate their capabilities (APIs, features, ...) of.
 		"storage-initialization-timeout",          // Maximum amount of time to wait for storage initialization before declaring apiserver ready. Defaults to 1m.
@@ -176,8 +176,10 @@ var (
 		"feature-gates",                  // A set of key=value pairs that describe feature gates for alpha/experimental features. Options are:
 		"max-mutating-requests-inflight", // This and --max-requests-inflight are summed to determine the server's total concurrency limit (which must be positive) if --enable-priority-and-fairness is true. Otherwise, this flag limits the maximum number of mutating requests in flight, or a zero value disables the limit completely.
 		"max-requests-inflight",          // This and --max-mutating-requests-inflight are summed to determine the server's total concurrency limit (which must be positive) if --enable-priority-and-fairness is true. Otherwise, this flag limits the maximum number of non-mutating requests in flight, or a zero value disables the limit completely.
+		"min-compatibility-version",      // The min version of control plane components the server should be compatible with.
 		"min-request-timeout",            // An optional field indicating the minimum number of seconds a handler must keep a request open before timing it out. Currently only honored by the watch request handler, which picks a randomized value above this number as the connection timeout, to spread out load.
 		"request-timeout",                // An optional field indicating the duration a handler must keep a request open before timing it out. This is the default request timeout for requests but may be overridden by flags such as --min-request-timeout for specific types of requests.
+		"external-hostname",              // The hostname to use when generating externalized URLs for this master (e.g. Swagger API Docs or OpenID Discovery).
 
 		// etcd flags
 		"default-watch-cache-size",  // Default watch cache size. If zero, watch cache will be disabled for resources that do not have a default watch size set.

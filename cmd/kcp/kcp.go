@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -42,24 +43,28 @@ import (
 	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
 	"github.com/kcp-dev/kcp/pkg/server"
 
-	_ "k8s.io/component-base/logs/json/register"
+	_ "github.com/kcp-dev/kcp/pkg/logging/json/register"
 )
 
 func main() {
 	cmd := &cobra.Command{
 		Use:   "kcp",
-		Short: "Kube for Control Plane (KCP)",
+		Short: "Kubernetes-like Control Planes (kcp)",
 		Long: help.Doc(`
-			KCP is the easiest way to manage Kubernetes applications against one or
-			more clusters, by giving you a personal control plane that schedules your
-			workloads onto one or many clusters, and making it simple to pick up and
-			move. It supports advanced use cases such as spreading your apps across
-			clusters for resiliency, scheduling batch workloads onto clusters with
-			free capacity, and enabling collaboration for individual teams without
-			having access to the underlying clusters.
+			kcp is a Kubernetes-like control plane focusing on
 
-			To get started, launch a new cluster with 'kcp start', which will
-			initialize your personal control plane and write an admin kubeconfig file
+			* being a control plane for many independent, isolated "clusters"
+			  known as workspaces,
+			* enabling API service providers to offer APIs centrally
+			  using multi-tenant operators and
+			* easy API consumption for users in their workspaces.
+
+			kcp can be a building block for SaaS service providers who need a
+			massively multi-tenant platform to offer services to a large number of
+			fully isolated tenants using Kubernetes-native APIs.
+
+			To get started, launch a new instance with 'kcp start', which will
+			initialize your personal shard and write an admin kubeconfig file
 			to disk.
 		`),
 		SilenceUsage:  true,
@@ -139,9 +144,13 @@ func main() {
 				return err
 			}
 
-			// the etcd server must be up before NewServer because storage decorators access it right away
+			// the etcd server must be up before NewServer because storage decorators access it right away.
+			// Use a separate context for etcd so it outlives the apiserver during graceful shutdown.
+			// This prevents CRD watch cache lazy initialization from blocking on a dead etcd.
+			etcdCtx, etcdCancel := context.WithCancel(context.Background())
+			defer etcdCancel()
 			if completedConfig.EmbeddedEtcd.Config != nil {
-				if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(ctx); err != nil {
+				if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(etcdCtx); err != nil {
 					return err
 				}
 			}

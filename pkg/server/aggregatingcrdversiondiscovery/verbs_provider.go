@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -44,8 +44,8 @@ type resourceVerbsProvider interface {
 type storageAwareResourceVerbsProviderFactory struct {
 	*virtualStorageClientOptions
 
-	getAPIExportByPath                     func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error)
-	getAPIExportsByVirtualResourceIdentity func(vrIdentity string) ([]*apisv1alpha2.APIExport, error)
+	getAPIExportByPath                        func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error)
+	getAPIExportsByVirtualResourceFingerprint func(fingerprint string) ([]*apisv1alpha2.APIExport, error)
 }
 
 func (f *storageAwareResourceVerbsProviderFactory) newResourceVerbsProvider(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition, requestedVersion string) (resourceVerbsProvider, error) {
@@ -61,31 +61,27 @@ func (f *storageAwareResourceVerbsProviderFactory) newResourceVerbsProvider(ctx 
 	if strings.HasPrefix(crd.Annotations[apisv1alpha1.AnnotationSchemaStorageKey], boundCRDVirtualStorageAnnotationPrefix) {
 		// Resources with virtual storage need the ResourceSchemaStorageVirtual from their parent APIExport.
 
-		vrIdentity := strings.TrimPrefix(crd.Annotations[apisv1alpha1.AnnotationSchemaStorageKey], boundCRDVirtualStorageAnnotationPrefix)
-		apiExportIdentity := crd.Annotations[apisv1alpha1.AnnotationAPIIdentityKey]
-
-		apiExports, err := f.getAPIExportsByVirtualResourceIdentity(vrIdentity)
+		fingerprint := strings.TrimPrefix(crd.Annotations[apisv1alpha1.AnnotationSchemaStorageKey], boundCRDVirtualStorageAnnotationPrefix)
+		apiExports, err := f.getAPIExportsByVirtualResourceFingerprint(fingerprint)
 		if err != nil {
 			return nil, err
 		}
-		var apiExport *apisv1alpha2.APIExport
-		for _, ae := range apiExports {
-			if ae.Status.IdentityHash == apiExportIdentity {
-				apiExport = ae
-				break
-			}
+		if len(apiExports) == 0 {
+			return nil, fmt.Errorf("no matching APIExport for virtual resource fingerprint %q", fingerprint)
 		}
-		if apiExport == nil {
-			return nil, fmt.Errorf("no matching APIExport for identity %s and virtual resource identity %s", apiExportIdentity, vrIdentity)
+		// A fingerprint carries the owning APIExport's logical cluster and name, so it
+		// identifies exactly one APIExport. More than one match means the index is
+		// keyed by something weaker than we think, and picking either one would serve
+		// another workspace's virtual workspace URL under this one's discovery.
+		if len(apiExports) > 1 {
+			return nil, fmt.Errorf("virtual resource fingerprint %q matches %d APIExports, expected exactly one", fingerprint, len(apiExports))
 		}
 
-		gvr := schema.GroupVersionResource{
+		return newVirtualStorageVerbsProvider(ctx, schema.GroupVersionResource{
 			Group:    crd.Spec.Group,
 			Version:  requestedVersion,
 			Resource: crd.Status.AcceptedNames.Plural,
-		}
-
-		return newVirtualStorageVerbsProvider(ctx, gvr, vrIdentity, apiExport, f.virtualStorageClientOptions)
+		}, apiExports[0], f.virtualStorageClientOptions)
 	}
 
 	// We don't support any non-CRD storages other than virtual.

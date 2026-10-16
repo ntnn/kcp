@@ -1,6 +1,6 @@
 /*
 Copyright 2015 The Kubernetes Authors.
-Modifications Copyright 2025 The KCP Authors.
+Modifications Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,18 +19,21 @@ package reflector
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	clientgofeaturegate "k8s.io/client-go/features"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/clock"
 )
 
 // Config contains all the settings for one of these low-level controllers.
-// KCP modification: Added KeyFunction field for cluster-aware key generation.
+// kcp modification: Added KeyFunction field for cluster-aware key generation.
 type Config struct {
 	// The queue for your objects - has to be a DeltaFIFO due to
 	// assumptions in the implementation. Your Process() function
@@ -42,6 +45,17 @@ type Config struct {
 
 	// Process can process a popped Deltas.
 	Process cache.ProcessFunc
+
+	// ProcessBatch can process a batch of popped Deltas, which should return `TransactionError` if not all items
+	// in the batch were successfully processed.
+	//
+	// For batch processing to be used:
+	// * ProcessBatch must be non-nil
+	// * Queue must implement QueueWithBatch
+	// * The client InOrderInformersBatchProcess feature gate must be enabled
+	//
+	// If any of those are false, Process is used and no batch processing is done.
+	ProcessBatch cache.ProcessBatchFunc
 
 	// ObjectType is an example object of the type this controller is
 	// expected to handle.
@@ -75,7 +89,7 @@ type Config struct {
 	// WatchListPageSize is the requested chunk size of initial and relist watch lists.
 	WatchListPageSize int64
 
-	// KCP modification: KeyFunction is the function used to generate keys for objects
+	// kcp modification: KeyFunction is the function used to generate keys for objects
 	// in the reflector's temporary store during WatchList operations.
 	// This is critical for multi-cluster setups where objects from different clusters
 	// may have the same namespace/name but different cluster names.
@@ -91,7 +105,7 @@ type controller struct {
 }
 
 // New makes a new Controller from the given Config.
-// KCP modification: This controller uses our forked Reflector with cluster-aware key function support.
+// kcp modification: This controller uses our forked Reflector with cluster-aware key function support.
 // Returns cache.Controller so it can be used as a drop-in replacement.
 func New(c *Config) cache.Controller {
 	ctlr := &controller{
@@ -113,18 +127,20 @@ func (c *controller) RunWithContext(ctx context.Context) {
 		<-ctx.Done()
 		c.config.Queue.Close()
 	}()
+	logger := klog.FromContext(ctx)
 
-	// KCP modification: Use our forked NewReflectorWithOptions with KeyFunction support
+	// kcp modification: Use our forked NewReflectorWithOptions with KeyFunction support
 	r := NewReflectorWithOptions(
 		c.config.ListerWatcher,
 		c.config.ObjectType,
 		c.config.Queue,
 		ReflectorOptions{
+			Logger:          &logger,
 			ResyncPeriod:    c.config.FullResyncPeriod,
 			MinWatchTimeout: c.config.MinWatchTimeout,
 			TypeDescription: c.config.ObjectDescription,
 			Clock:           c.clock,
-			KeyFunction:     c.config.KeyFunction, // KCP modification: pass the key function
+			KeyFunction:     c.config.KeyFunction, // kcp modification: pass the key function
 		},
 	)
 	r.ShouldResync = c.config.ShouldResync
@@ -156,38 +172,18 @@ func (c *controller) RunWithContext(ctx context.Context) {
 	wg.Wait()
 }
 
-// processLoop drains the work queue.
-// TODO: Consider doing the processing in parallel. This will require a little thought
-// to make sure that we don't end up processing the same object multiple times
-// concurrently.
-func (c *controller) processLoop(ctx context.Context) {
-	for {
-		obj, err := c.config.Queue.Pop(cache.PopProcessFunc(c.config.Process))
-		if err != nil {
-			if err == cache.ErrFIFOClosed {
-				return
-			}
-			if c.config.ShouldResync != nil && c.config.ShouldResync() {
-				// If ShouldResync returned true, the queue item couldn't be processed
-				// and we should retry. We could be more clever here and only retry
-				// if the error was specific to this item.
-			}
-			utilruntime.HandleErrorWithContext(ctx, err, "Failed to process object from queue")
-		}
-		if obj == nil {
-			return
-		}
-	}
-}
-
-// HasSynced returns true if the source informer has synced.
+// Returns true once this controller has completed an initial resource listing
 func (c *controller) HasSynced() bool {
 	return c.config.Queue.HasSynced()
 }
 
-// LastSyncResourceVersion is the resource version observed when last synced with the underlying
-// store. The value returned is not synchronized with access to the underlying store and is not
-// thread-safe.
+// HasSyncedChecker enables waiting for syncing without polling.
+// The returned DoneChecker can be passed to [WaitFor].
+// It delegates to the Config's Queue.
+func (c *controller) HasSyncedChecker() cache.DoneChecker {
+	return c.config.Queue.HasSyncedChecker()
+}
+
 func (c *controller) LastSyncResourceVersion() string {
 	c.reflectorMutex.RLock()
 	defer c.reflectorMutex.RUnlock()
@@ -195,4 +191,49 @@ func (c *controller) LastSyncResourceVersion() string {
 		return ""
 	}
 	return c.reflector.LastSyncResourceVersion()
+}
+
+// ForceRelist causes the underlying reflector to perform a full relist
+// on the next list/watch cycle.
+//
+// The relist forces all informers to be consistent with the objects as
+// they are stored in etcd.
+func (c *controller) ForceRelist() {
+	c.reflectorMutex.RLock()
+	defer c.reflectorMutex.RUnlock()
+	if c.reflector == nil {
+		return
+	}
+	c.reflector.ForceRelist()
+}
+
+// processLoop drains the work queue.
+// TODO: Consider doing the processing in parallel. This will require a little thought
+// to make sure that we don't end up processing the same object multiple times
+// concurrently.
+func (c *controller) processLoop(ctx context.Context) {
+	useBatchProcess := false
+	batchQueue, ok := c.config.Queue.(cache.QueueWithBatch)
+	if ok && c.config.ProcessBatch != nil && clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.InOrderInformersBatchProcess) {
+		useBatchProcess = true
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			var err error
+			if useBatchProcess {
+				err = batchQueue.PopBatch(c.config.ProcessBatch, cache.PopProcessFunc(c.config.Process))
+			} else {
+				// otherwise fallback to non-batch process behavior
+				_, err = c.config.Pop(cache.PopProcessFunc(c.config.Process))
+			}
+			if err != nil {
+				if errors.Is(err, cache.ErrFIFOClosed) {
+					return
+				}
+			}
+		}
+	}
 }

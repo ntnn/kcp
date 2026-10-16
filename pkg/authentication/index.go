@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,12 +18,15 @@ package authentication
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
-	"sync"
+	"net/http"
+	"strings"
+	"time"
 
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
-	authenticatorunion "k8s.io/apiserver/pkg/authentication/request/union"
 	"k8s.io/klog/v2"
 	kubeauthenticator "k8s.io/kubernetes/pkg/kubeapiserver/authenticator"
 
@@ -32,23 +35,17 @@ import (
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 )
 
+// authenticatorSetupTimeout is duration to wait for an authenticator to
+// be initialized, means it finished the discovery of its issuers and is
+// ready to validate requests.
+//
+// 10s is the time upstream waits in the updateAuthenticationConfig when
+// an authenticator is updated.
+const authenticatorSetupTimeout = 10 * time.Second
+
 // AuthenticatorIndex implements a mapping from workspace type to authenticator.Request.
 type AuthenticatorIndex interface {
 	Lookup(wsType logicalcluster.Path) (authenticator.Request, bool)
-}
-
-// state keeps track of authenticators for each workspace type.
-type state struct {
-	lock sync.RWMutex
-	// This component's job is to hand the application's long-lived context to new,
-	// ad-hoc started goroutines, so it must store the context here. The context
-	// available for a reconciliation will be cancelled too early and is not suitable
-	// for authenticators.
-	//nolint:containedctx
-	lifecycleCtx                context.Context
-	baseAudiences               authenticator.Audiences
-	workspaceTypeAuthenticators map[string]map[logicalcluster.Path][]authenticatorKey
-	authConfigAuthenticators    map[string]map[authenticatorKey]authenticatorState
 }
 
 type authenticatorKey struct {
@@ -61,51 +58,8 @@ type authenticatorState struct {
 	authenticator authenticator.Request
 }
 
-func NewIndex(lifecycleCtx context.Context, baseAudiences authenticator.Audiences) *state {
-	return &state{
-		lifecycleCtx:                lifecycleCtx,
-		workspaceTypeAuthenticators: map[string]map[logicalcluster.Path][]authenticatorKey{},
-		authConfigAuthenticators:    map[string]map[authenticatorKey]authenticatorState{},
-		baseAudiences:               baseAudiences,
-	}
-}
-
-func (c *state) UpsertWorkspaceType(shard string, wst *tenancyv1alpha1.WorkspaceType) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	clusterName := logicalcluster.From(wst)
-
-	authenticators := []authenticatorKey{}
-	for _, authConfig := range wst.Spec.AuthenticationConfigurations {
-		authenticators = append(authenticators, authenticatorKey{
-			cluster: clusterName,
-			name:    authConfig.Name,
-		})
-	}
-
-	wstKey := getWorkspaceTypeKey(wst)
-
-	if c.workspaceTypeAuthenticators[shard] == nil {
-		c.workspaceTypeAuthenticators[shard] = map[logicalcluster.Path][]authenticatorKey{}
-	}
-	c.workspaceTypeAuthenticators[shard][wstKey] = authenticators
-}
-
 func getWorkspaceTypeKey(wst *tenancyv1alpha1.WorkspaceType) logicalcluster.Path {
 	return logicalcluster.NewPath(wst.Annotations[core.LogicalClusterPathAnnotationKey]).Join(wst.Name)
-}
-
-func (c *state) DeleteWorkspaceType(shard string, wst *tenancyv1alpha1.WorkspaceType) {
-	wstKey := getWorkspaceTypeKey(wst)
-
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	delete(c.workspaceTypeAuthenticators[shard], wstKey)
-	if len(c.workspaceTypeAuthenticators[shard]) == 0 {
-		delete(c.workspaceTypeAuthenticators, shard)
-	}
 }
 
 var (
@@ -113,51 +67,8 @@ var (
 	errCauseDelete      = errors.New("authentication configuration has been deleted")
 	errCauseDeleteShard = errors.New("shard has been deleted")
 	errCauseEmpty       = errors.New("no valid authentication methods configured")
+	errCauseEvict       = errors.New("cache entry evicted")
 )
-
-func (c *state) UpsertWorkspaceAuthenticationConfiguration(shard string, authConfig *tenancyv1alpha1.WorkspaceAuthenticationConfiguration) {
-	mapKey := getAuthConfigKey(authConfig)
-
-	// Stop and delete the old authenticator; do not lock for the entire duration of this function
-	// because initializing the authenticator later might be comparatively slow.
-	c.lock.Lock()
-	c.stopAuthenticator(shard, mapKey, errCauseUpsert)
-	c.lock.Unlock()
-
-	// build new authenticator
-	kubeAuthConfig := kubeauthenticator.Config{
-		AuthenticationConfig: convertAuthenticationConfiguration(authConfig),
-		APIAudiences:         c.baseAudiences,
-	}
-
-	ctx, cancel := context.WithCancelCause(c.lifecycleCtx)
-
-	authn, _, _, _, err := kubeAuthConfig.New(ctx)
-	if err != nil {
-		logger := klog.FromContext(ctx).WithValues("controller", controllerName)
-		logger.Error(err, "Failed to start workspace authenticator.")
-
-		cancel(fmt.Errorf("authenticator failed to start: %w", err))
-		return
-	}
-
-	// nil is returned whenever no valid individual auth method is configured.
-	if authn == nil {
-		cancel(errCauseEmpty)
-		return
-	}
-
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	if c.authConfigAuthenticators[shard] == nil {
-		c.authConfigAuthenticators[shard] = map[authenticatorKey]authenticatorState{}
-	}
-	c.authConfigAuthenticators[shard][mapKey] = authenticatorState{
-		cancel:        cancel,
-		authenticator: authn,
-	}
-}
 
 func getAuthConfigKey(authConfig *tenancyv1alpha1.WorkspaceAuthenticationConfiguration) authenticatorKey {
 	return authenticatorKey{
@@ -166,86 +77,88 @@ func getAuthConfigKey(authConfig *tenancyv1alpha1.WorkspaceAuthenticationConfigu
 	}
 }
 
-func (c *state) stopAuthenticator(shard string, key authenticatorKey, cause error) {
-	authenticator, ok := c.authConfigAuthenticators[shard][key]
-	if ok {
-		authenticator.cancel(cause)
-		delete(c.authConfigAuthenticators[shard], key)
-		if len(c.authConfigAuthenticators[shard]) == 0 {
-			delete(c.authConfigAuthenticators, shard)
-		}
+// buildAuthenticator builds a JWT authenticator from the provided WAC.
+//
+// The returned authenticator is not necessarily initialized yet; the upstream
+// JWT authenticator performs OIDC discovery asynchronously. Callers on the
+// request hot path (lazy index) should waitForAuthenticatorInit before serving
+// requests. Callers driven by informer events (eager index) intentionally do
+// not wait, so that a slow discovery does not block the informer event handler
+// or silently drop the authenticator on timeout.
+func buildAuthenticator(
+	lifecycleCtx context.Context,
+	baseAudiences authenticator.Audiences,
+	wac *tenancyv1alpha1.WorkspaceAuthenticationConfiguration,
+) (authenticatorState, error) {
+	kubeAuthConfig := kubeauthenticator.Config{
+		AuthenticationConfig: convertAuthenticationConfiguration(wac),
+		APIAudiences:         baseAudiences,
 	}
+
+	ctx, cancel := context.WithCancelCause(lifecycleCtx)
+	logger := klog.FromContext(ctx).WithValues("controller", controllerName)
+
+	authn, _, _, _, err := kubeAuthConfig.New(ctx)
+	if err != nil {
+		logger.Error(err, "Failed to start workspace authenticator.")
+		cancel(fmt.Errorf("authenticator failed to start: %w", err))
+		return authenticatorState{}, err
+	}
+
+	// nil is returned whenever no valid individual auth method is configured.
+	if authn == nil {
+		cancel(errCauseEmpty)
+		return authenticatorState{}, errCauseEmpty
+	}
+
+	return authenticatorState{cancel: cancel, authenticator: authn}, nil
 }
 
-func (c *state) DeleteWorkspaceAuthenticationConfiguration(shard string, authConfig *tenancyv1alpha1.WorkspaceAuthenticationConfiguration) {
-	mapKey := getAuthConfigKey(authConfig)
+// waitForAuthenticatorInit blocks until the authenticator's underlying JWT
+// verifier has been initialized (i.e. OIDC discovery has completed), or until
+// authenticatorSetupTimeout elapses.
+//
+// The authenticators do have a healthcheck, however this healthcheck is not
+// exposed and it is not easy to expose without intrusive changes.
+//
+// An alternative would've been to use the update function returned by
+// kubeAuthConfig.New which _does_ wait until the authenticator's healthcheck
+// are ready, however that would create each authenticator twice and just
+// discard the first iteration.
+//
+// Instead the authenticator is validated by continually authenticating a
+// dummy token created with the first issuer until the error is no longer
+// "not initialized".
+func waitForAuthenticatorInit(ctx context.Context, authn authenticator.Request, wac *tenancyv1alpha1.WorkspaceAuthenticationConfiguration) error {
+	if len(wac.Spec.JWT) == 0 {
+		return nil
+	}
 
-	// Stop and delete the old authenticator
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	c.stopAuthenticator(shard, mapKey, errCauseDelete)
+	dummyToken := dummyTokenForIssuer(wac.Spec.JWT[0].Issuer.URL)
+	return wait.PollUntilContextTimeout(ctx, time.Second, authenticatorSetupTimeout, true, func(ctx context.Context) (bool, error) {
+		dummyReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", http.NoBody)
+		dummyReq.Header.Set("Authorization", "Bearer "+dummyToken)
+		_, _, err := authn.AuthenticateRequest(dummyReq)
+		return err == nil || !strings.Contains(err.Error(), "not initialized"), nil
+	})
 }
 
-func (c *state) DeleteShard(shardName string) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	// stop all authenticators on this shard
-	for key := range c.authConfigAuthenticators[shardName] {
-		c.stopAuthenticator(shardName, key, errCauseDeleteShard)
-	}
-
-	delete(c.workspaceTypeAuthenticators, shardName)
-	delete(c.authConfigAuthenticators, shardName)
+func dummyTokenForIssuer(issuer string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"iss":%q}`, issuer)))
+	return header + "." + payload + "."
 }
 
-func (c *state) Lookup(wsType logicalcluster.Path) (authenticator.Request, bool) {
-	var (
-		shard             string
-		authenticatorKeys []authenticatorKey
-	)
-
-	c.lock.RLock()
-	defer c.lock.RUnlock()
-
-	for shardKey, authenticatorsMap := range c.workspaceTypeAuthenticators {
-		var found bool
-		authenticatorKeys, found = authenticatorsMap[wsType]
-		if found {
-			shard = shardKey
-			break
-		}
-	}
-
-	if len(authenticatorKeys) == 0 {
-		return nil, false
-	}
-
-	var authenticators []authenticator.Request
-	for _, key := range authenticatorKeys {
-		authenticator, ok := c.authConfigAuthenticators[shard][key]
-		if ok {
-			authenticators = append(authenticators, authenticator.authenticator)
-		}
-	}
-
-	if len(authenticators) == 0 {
-		return nil, false
-	}
-
-	authenticator := authenticatorunion.New(authenticators...)
-
-	// ensure that per-workspace auth cannot be used to become a system: user/group
-	authenticator = ForbidSystemUsernames(authenticator)
+// wrapWithSecurityFilters wraps an authenticator with security filters
+// that prevent workspace-local auth from escalating to system-level access.
+func wrapWithSecurityFilters(authn authenticator.Request) authenticator.Request {
+	authn = ForbidSystemUsernames(authn)
 	groupFiltered := &GroupFilter{
-		Authenticator:     authenticator,
+		Authenticator:     authn,
 		DropGroupPrefixes: []string{"system:"},
 	}
-	extraFiltered := &ExtraFilter{
+	return &ExtraFilter{
 		Authenticator:        groupFiltered,
 		DropExtraKeyContains: []string{"kcp.io"},
 	}
-
-	return extraFiltered, true
 }

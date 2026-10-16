@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,8 +20,15 @@ package v1alpha1
 
 // APIBindingSpecApplyConfiguration represents a declarative configuration of the APIBindingSpec type for use
 // with apply.
+//
+// APIBindingSpec records the APIs and implementations that are to be bound.
 type APIBindingSpecApplyConfiguration struct {
-	Reference        *BindingReferenceApplyConfiguration           `json:"reference,omitempty"`
+	// reference uniquely identifies an API to bind to.
+	Reference *BindingReferenceApplyConfiguration `json:"reference,omitempty"`
+	// permissionClaims records decisions about permission claims requested by the API service provider.
+	// Individual claims can be accepted or rejected. If accepted, the API service provider gets the
+	// requested access to the specified resources in this workspace. Access is granted per
+	// GroupResource, identity, and other properties.
 	PermissionClaims []AcceptablePermissionClaimApplyConfiguration `json:"permissionClaims,omitempty"`
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ import (
 	shard "github.com/kcp-dev/kcp/cmd/test-server/kcp"
 )
 
-func newShard(ctx context.Context, n int, args []string, standaloneVW bool, servingCA *crypto.CA, hostIP string, logDirPath, workDirPath, cacheServerConfigPath string, clientCA *crypto.CA) (*shard.Shard, error) {
+func newShard(ctx context.Context, n int, args []string, standaloneVW bool, servingCA *crypto.CA, hostIP string, logDirPath, workDirPath, cacheServerConfigPath string, clientCA *crypto.CA, externalEtcdServers string) (*shard.Shard, error) {
 	logger := klog.FromContext(ctx).WithValues("shard", n)
 	kcpDir := filepath.Join(workDirPath, ".kcp")
 	shardDir := filepath.Join(workDirPath, fmt.Sprintf(".kcp-%d", n))
@@ -74,14 +74,31 @@ func newShard(ctx context.Context, n int, args []string, standaloneVW bool, serv
 		auditFilePath = filepath.Join(logDirPath, fmt.Sprintf("audit-%d.log", n))
 	}
 
+	shardName := "root"
 	if n > 0 {
+		shardName = fmt.Sprintf("shard-%d", n)
+	}
+
+	args = append(args, "--shard-name="+shardName)
+
+	if externalEtcdServers == "" {
 		args = append(args,
-			fmt.Sprintf("--shard-name=shard-%d", n),
-			fmt.Sprintf("--root-shard-kubeconfig-file=%s", filepath.Join(workDirPath, ".kcp-0", "admin.kubeconfig")),
 			fmt.Sprintf("--embedded-etcd-client-port=%d", embeddedEtcdClientPort(n)),
 			fmt.Sprintf("--embedded-etcd-peer-port=%d", embeddedEtcdPeerPort(n)),
 		)
+	} else {
+		args = append(args,
+			fmt.Sprintf("--etcd-servers=%s", externalEtcdServers),
+			fmt.Sprintf("--etcd-prefix=/shard/%s", shardName),
+		)
 	}
+
+	if n > 0 {
+		args = append(args,
+			fmt.Sprintf("--root-shard-kubeconfig-file=%s", filepath.Join(workDirPath, ".kcp-0", "admin.kubeconfig")),
+		)
+	}
+
 	args = append(args,
 		/*fmt.Sprintf("--cluster-workspace-shard-name=kcp-%d", n),*/
 		fmt.Sprintf("--root-directory=%s", filepath.Join(workDirPath, fmt.Sprintf(".kcp-%d", n))),
@@ -90,13 +107,17 @@ func newShard(ctx context.Context, n int, args []string, standaloneVW bool, serv
 		"--requestheader-username-headers=X-Remote-User",
 		"--requestheader-group-headers=X-Remote-Group",
 		"--requestheader-extra-headers-prefix=X-Remote-Extra-",
+		"--requestheader-allowed-names=kcp-front-proxy",
 		fmt.Sprintf("--service-account-key-file=%s", filepath.Join(kcpDir, "service-account.crt")),
 		fmt.Sprintf("--service-account-private-key-file=%s", filepath.Join(kcpDir, "service-account.key")),
 		fmt.Sprintf("--service-account-signing-key-file=%s", filepath.Join(kcpDir, "service-account.key")),
-		// TODO(sttts): remove this flag as soon as we have service account token lookup configured.
-		"--service-account-lookup=false",
 		"--audit-log-path", auditFilePath,
 		fmt.Sprintf("--shard-external-url=https://%s:%d", hostIP, 6443),
+	)
+	if n < len(regions) {
+		args = append(args, fmt.Sprintf("--shard-labels=region=%s,shared=true", regions[n]))
+	}
+	args = append(args,
 		fmt.Sprintf("--tls-cert-file=%s", filepath.Join(shardDir, "apiserver.crt")),
 		fmt.Sprintf("--tls-private-key-file=%s", filepath.Join(shardDir, "apiserver.key")),
 		fmt.Sprintf("--secure-port=%d", 6444+n),
@@ -105,7 +126,9 @@ func newShard(ctx context.Context, n int, args []string, standaloneVW bool, serv
 		fmt.Sprintf("--shard-client-cert-file=%s", shardClientCert),
 		fmt.Sprintf("--shard-client-key-file=%s", shardClientCertKey),
 		fmt.Sprintf("--shard-virtual-workspace-ca-file=%s", filepath.Join(kcpDir, "serving-ca.crt")),
-		"--service-account-lookup=false",
+		fmt.Sprintf("--mount-proxy-client-cert-file=%s", filepath.Join(kcpDir, "mounts-proxy.crt")),
+		fmt.Sprintf("--mount-proxy-client-key-file=%s", filepath.Join(kcpDir, "mounts-proxy.key")),
+		fmt.Sprintf("--mount-proxy-server-ca-file=%s", filepath.Join(kcpDir, "serving-ca.crt")),
 	)
 	if len(cacheServerConfigPath) > 0 {
 		args = append(args, fmt.Sprintf("--cache-kubeconfig=%s", cacheServerConfigPath))

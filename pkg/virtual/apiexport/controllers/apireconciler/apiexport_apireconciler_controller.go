@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -41,12 +41,13 @@ import (
 	apisv1alpha2informers "github.com/kcp-dev/sdk/client/informers/externalversions/apis/v1alpha2"
 	apisv1alpha1listers "github.com/kcp-dev/sdk/client/listers/apis/v1alpha1"
 	apisv1alpha2listers "github.com/kcp-dev/sdk/client/listers/apis/v1alpha2"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apidefinition"
+	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
 
 	"github.com/kcp-dev/kcp/pkg/indexers"
 	"github.com/kcp-dev/kcp/pkg/logging"
 	"github.com/kcp-dev/kcp/pkg/reconciler/events"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/apidefinition"
-	dynamiccontext "github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/context"
+	"github.com/kcp-dev/kcp/pkg/tombstone"
 )
 
 const (
@@ -107,7 +108,7 @@ func NewAPIReconciler(
 			c.enqueueAPIExport(obj.(*apisv1alpha2.APIExport), logger)
 		},
 		DeleteFunc: func(obj interface{}) {
-			c.enqueueAPIExport(obj.(*apisv1alpha2.APIExport), logger)
+			c.enqueueAPIExport(tombstone.Obj[*apisv1alpha2.APIExport](obj), logger)
 		},
 	})
 
@@ -116,7 +117,7 @@ func NewAPIReconciler(
 			c.enqueueAPIResourceSchema(obj.(*apisv1alpha1.APIResourceSchema), logger)
 		},
 		DeleteFunc: func(obj interface{}) {
-			c.enqueueAPIResourceSchema(obj.(*apisv1alpha1.APIResourceSchema), logger)
+			c.enqueueAPIResourceSchema(tombstone.Obj[*apisv1alpha1.APIResourceSchema](obj), logger)
 		},
 	}))
 

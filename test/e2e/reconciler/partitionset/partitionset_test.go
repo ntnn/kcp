@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/kcp-dev/sdk/apis/core"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -44,8 +45,11 @@ import (
 
 func TestPartitionSet(t *testing.T) {
 	t.Parallel()
+
+	// need a context that is still usable in Cleanup() functions
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
+
 	server := kcptesting.SharedKcpServer(t)
 
 	// Create organization and workspace.
@@ -89,7 +93,7 @@ func TestPartitionSet(t *testing.T) {
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "expected valid partitionSet")
 	partitions, err = partitionClient.Cluster(partitionClusterPath).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err, "error retrieving partitions")
-	require.Equal(t, 0, len(partitions.Items), "no partition expected, got: %d", len(partitions.Items))
+	require.Empty(t, partitions.Items, "no partition expected, got: %d", len(partitions.Items))
 
 	// Newly added shards are annotated to avoid side effects on other e2e tests.
 	t.Logf("Creating a shard matching the partitionSet")
@@ -107,14 +111,18 @@ func TestPartitionSet(t *testing.T) {
 			BaseURL: "https://base.kcp.test.dev",
 		},
 	}
-	shardClient := kcpClusterClient.CoreV1alpha1().Shards()
+	// Shard objects are admission-protected against non-system writes; use a
+	// privileged (system:masters) client for the synthetic test shards.
+	shardSystemClient, err := kcpclientset.NewForConfig(server.RootShardSystemMasterBaseConfig(t))
+	require.NoError(t, err, "failed to construct privileged kcp client for server")
+	shardClient := shardSystemClient.CoreV1alpha1().Shards()
 	shard1a, err = shardClient.Cluster(core.RootCluster.Path()).Create(ctx, shard1a, metav1.CreateOptions{})
 	require.NoError(t, err, "error creating shard")
 	// Necessary for multiple runs.
-	defer func() {
+	t.Cleanup(func() {
 		err = shardClient.Cluster(core.RootCluster.Path()).Delete(ctx, shard1a.Name, metav1.DeleteOptions{})
 		require.NoError(t, err, "error deleting shard")
-	}()
+	})
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
 		partitionSet, err = partitionSetClient.Cluster(partitionClusterPath).Get(ctx, partitionSet.Name, metav1.GetOptions{})
 		require.NoError(t, err, "error retrieving partitionSet")
@@ -151,10 +159,10 @@ func TestPartitionSet(t *testing.T) {
 	shard2, err = shardClient.Cluster(core.RootCluster.Path()).Create(ctx, shard2, metav1.CreateOptions{})
 	// Necessary for multiple runs.
 	require.NoError(t, err, "error creating shard")
-	defer func() {
+	t.Cleanup(func() {
 		err = shardClient.Cluster(core.RootCluster.Path()).Delete(ctx, shard2.Name, metav1.DeleteOptions{})
 		require.NoError(t, err, "error deleting shard")
-	}()
+	})
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
 		partitionSet, err = partitionSetClient.Cluster(partitionClusterPath).Get(ctx, partitionSet.Name, metav1.GetOptions{})
 		require.NoError(t, err, "error retrieving partitionSet")
@@ -177,10 +185,19 @@ func TestPartitionSet(t *testing.T) {
 			reflect.DeepEqual(partitions.Items[1].Spec.Selector.MatchLabels, map[string]string{"partition-test-region": "partition-test-region-1"})), "selectors not as expected")
 
 	t.Logf("Moving the second shard to the same region as the first one")
-	shard2.Labels = map[string]string{
-		"partition-test-region": "partition-test-region-1",
-	}
-	_, err = shardClient.Cluster(core.RootCluster.Path()).Update(ctx, shard2, metav1.UpdateOptions{})
+	// The shard controller updates the Shard status after creation, so re-fetch
+	// before updating instead of reusing the object returned by Create.
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		shard, err := shardClient.Cluster(core.RootCluster.Path()).Get(ctx, shard2.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		shard.Labels = map[string]string{
+			"partition-test-region": "partition-test-region-1",
+		}
+		_, err = shardClient.Cluster(core.RootCluster.Path()).Update(ctx, shard, metav1.UpdateOptions{})
+		return err
+	})
 	require.NoError(t, err, "error updating shard")
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
 		partitionSet, err = partitionSetClient.Cluster(partitionClusterPath).Get(ctx, partitionSet.Name, metav1.GetOptions{})
@@ -216,10 +233,10 @@ func TestPartitionSet(t *testing.T) {
 	}
 	shard3, err = shardClient.Cluster(core.RootCluster.Path()).Create(ctx, shard3, metav1.CreateOptions{})
 	require.NoError(t, err, "error creating shard")
-	defer func() {
+	t.Cleanup(func() {
 		err = shardClient.Cluster(core.RootCluster.Path()).Delete(ctx, shard3.Name, metav1.DeleteOptions{})
 		require.NoError(t, err, "error deleting shard")
-	}()
+	})
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
 		partitionSet, err = partitionSetClient.Cluster(partitionClusterPath).Get(ctx, partitionSet.Name, metav1.GetOptions{})
 		require.NoError(t, err, "error retrieving partitionSet")
@@ -238,11 +255,18 @@ func TestPartitionSet(t *testing.T) {
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "expected 2 partitions")
 
 	t.Logf("Excluding the shard of the third region")
-	shard3.Labels = map[string]string{
-		"partition-test-region": "partition-test-region-3",
-		"excluded":              "true",
-	}
-	_, err = shardClient.Cluster(core.RootCluster.Path()).Update(ctx, shard3, metav1.UpdateOptions{})
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		shard, err := shardClient.Cluster(core.RootCluster.Path()).Get(ctx, shard3.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		shard.Labels = map[string]string{
+			"partition-test-region": "partition-test-region-3",
+			"excluded":              "true",
+		}
+		_, err = shardClient.Cluster(core.RootCluster.Path()).Update(ctx, shard, metav1.UpdateOptions{})
+		return err
+	})
 	require.NoError(t, err, "error updating shard")
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
 		partitionSet, err = partitionSetClient.Cluster(partitionClusterPath).Get(ctx, partitionSet.Name, metav1.GetOptions{})
@@ -264,8 +288,11 @@ func TestPartitionSet(t *testing.T) {
 
 func TestPartitionSetAdmission(t *testing.T) {
 	t.Parallel()
+
+	// need a context that is still usable in Cleanup() functions
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
+
 	server := kcptesting.SharedKcpServer(t)
 
 	// Create organization and workspace.
@@ -278,7 +305,11 @@ func TestPartitionSetAdmission(t *testing.T) {
 	require.NoError(t, err, "failed to construct kcp cluster client for server")
 	partitionSetClient := kcpClusterClient.TopologyV1alpha1().PartitionSets()
 	partitionClient := kcpClusterClient.TopologyV1alpha1().Partitions()
-	shardClient := kcpClusterClient.CoreV1alpha1().Shards()
+	// Shard objects are admission-protected against non-system writes; use a
+	// privileged (system:masters) client for the synthetic test shards.
+	shardSystemClient, err := kcpclientset.NewForConfig(server.RootShardSystemMasterBaseConfig(t))
+	require.NoError(t, err, "failed to construct privileged kcp client for server")
+	shardClient := shardSystemClient.CoreV1alpha1().Shards()
 
 	errorPartitionSet := &topologyv1alpha1.PartitionSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -380,10 +411,10 @@ func TestPartitionSetAdmission(t *testing.T) {
 	}
 	shard, err := shardClient.Cluster(core.RootCluster.Path()).Create(ctx, admissionShard, metav1.CreateOptions{})
 	require.NoError(t, err, "error creating shard")
-	defer func() {
+	t.Cleanup(func() {
 		err = shardClient.Cluster(core.RootCluster.Path()).Delete(ctx, shard.Name, metav1.DeleteOptions{})
 		require.NoError(t, err, "error deleting shard")
-	}()
+	})
 	var partitions *topologyv1alpha1.PartitionList
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
 		partitions, err = partitionClient.Cluster(partitionClusterPath).List(ctx, metav1.ListOptions{})
@@ -395,6 +426,6 @@ func TestPartitionSetAdmission(t *testing.T) {
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "expected 1 partition")
 	expectedName := partitionSet.Name + "-" + strings.Join(labelValues, "-")
 	expectedName = expectedName[:validation.DNS1123LabelMaxLength-5]
-	require.EqualValues(t, expectedName, partitions.Items[0].Name[:len(partitions.Items[0].Name)-5],
+	require.Equal(t, expectedName, partitions.Items[0].Name[:len(partitions.Items[0].Name)-5],
 		"partition name not as expected, got: %s", partitions.Items[0].Name)
 }

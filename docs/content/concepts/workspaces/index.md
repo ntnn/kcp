@@ -23,10 +23,14 @@ Workspaces are represented to the user via the `Workspace` kind, e.g.
 kind: Workspace
 apiVersion: tenancy.kcp.io/v1alpha1
 spec:
-  type: Universal
-status:
-  url: https://kcp.example.com/clusters/myapp
+  type:
+    name: universal
+    path: root
+  URL: https://kcp.example.com/clusters/myapp
 ```
+
+The `type` is a reference to a `WorkspaceType`, by lower-cased `name`, and
+optionally the `path` of the workspace that owns it.
 
 There are different [types of workspaces](./workspace-types.md), and workspaces are arranged
 in a tree.  Each type of workspace may restrict the types of its
@@ -36,4 +40,25 @@ the child and the child allows the parent.
 
 ## Pages
 
-{% include "partials/section-overview.html" %}
+### [Workspace Types](workspace-types.md)
+What are workspaces and how to use them.
+
+### [WorkspaceType Best Practices](workspace-types-best-practices.md)
+Guidance on how to design, deploy, and consume WorkspaceTypes safely.
+
+### [System Workspaces](system-workspaces.md)
+System workspaces are shard-local logical clusters with special meaning to kcp internals.
+
+### [Virtual Workspaces](virtual-workspaces.md)
+What are virtual workspaces and how do they work?
+
+### [Workspace Initialization](workspace-initialization.md)
+
+### [Workspace Termination](workspace-termination.md)
+
+### [Workspace Mounts](mounts.md)
+What are workspace mounts and how do they work?
+
+### [Total Object Count Limit](object-count-limit.md)
+Enforce a hard limit on the total number of objects in a workspace.
+

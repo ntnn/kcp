@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -172,7 +172,7 @@ func validateOverhangingResourceSchemas(_ context.Context, _ admission.Attribute
 	// converted to v1alpha2.
 	if _, ok := ae.Annotations[apisv1alpha2.ResourceSchemasAnnotation]; ok {
 		// validate if we can decode overhanging resource schemas. If not, we will fail.
-		var overhanging []apisv1alpha2.ResourceSchema
+		var overhanging []apisv1alpha2.ResourceSchema //nolint:prealloc
 		if err := json.Unmarshal([]byte(ae.Annotations[apisv1alpha2.ResourceSchemasAnnotation]), &overhanging); err != nil {
 			return field.Invalid(field.NewPath("metadata").Child("annotations").Key(apisv1alpha2.ResourceSchemasAnnotation), ae.Annotations[apisv1alpha2.ResourceSchemasAnnotation], "failed to decode overhanging resource schemas")
 		}

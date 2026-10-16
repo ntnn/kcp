@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package builder
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -26,7 +27,6 @@ import (
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	"k8s.io/apiextensions-apiserver/pkg/registry/customresource"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/validation/path"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -40,9 +40,8 @@ import (
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/tenancy/initialization"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
-
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/apiserver"
-	registry "github.com/kcp-dev/kcp/pkg/virtual/framework/forwardingregistry"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apiserver"
+	registry "github.com/kcp-dev/virtual-workspace-framework/pkg/forwardingregistry"
 )
 
 func initializingWorkspaceRequirements(initializer corev1alpha1.LogicalClusterInitializer) (labels.Requirements, error) {
@@ -107,13 +106,17 @@ func delegatingLogicalClusterReadOnlyRestStorage(
 			statusSpec = &apiextensions.CustomResourceSubresourceStatus{}
 		}
 
+		_, scaleEnabled := subresourcesSchemaValidator["scale"]
 		var scaleSpec *apiextensions.CustomResourceSubresourceScale
+		if scaleEnabled {
+			scaleSpec = &apiextensions.CustomResourceSubresourceScale{}
+		}
 
 		strategy := customresource.NewStrategy(
 			typer,
 			namespaceScoped,
 			kind,
-			path.ValidatePathSegmentName,
+			registry.ValidatePathSegmentName,
 			schemaValidator,
 			statusSchemaValidate,
 			structuralSchema,
@@ -122,7 +125,7 @@ func delegatingLogicalClusterReadOnlyRestStorage(
 			[]apiextensionsv1.SelectableField{},
 		)
 
-		storage, statusStorage := registry.NewStorage(
+		storage, statusStorage, scaleStorage := registry.NewStorage(
 			ctx,
 			resource,
 			"",
@@ -164,6 +167,31 @@ func delegatingLogicalClusterReadOnlyRestStorage(
 				TableConvertorFunc:      statusStorage.TableConvertorFunc,
 				CategoriesProviderFunc:  statusStorage.CategoriesProviderFunc,
 				ResetFieldsStrategyFunc: statusStorage.ResetFieldsStrategyFunc,
+			}
+		}
+
+		if scaleEnabled {
+			subresourceStorages["scale"] = &struct {
+				registry.FactoryFunc
+				registry.DestroyerFunc
+
+				registry.GetterFunc
+				registry.UpdaterFunc
+				// patch is implicit as we have get + update
+
+				registry.TableConvertorFunc
+				registry.CategoriesProviderFunc
+				registry.ResetFieldsStrategyFunc
+			}{
+				FactoryFunc:   scaleStorage.FactoryFunc,
+				DestroyerFunc: scaleStorage.DestroyerFunc,
+
+				GetterFunc:  scaleStorage.GetterFunc,
+				UpdaterFunc: scaleStorage.UpdaterFunc,
+
+				TableConvertorFunc:      scaleStorage.TableConvertorFunc,
+				CategoriesProviderFunc:  scaleStorage.CategoriesProviderFunc,
+				ResetFieldsStrategyFunc: scaleStorage.ResetFieldsStrategyFunc,
 			}
 		}
 
@@ -218,11 +246,14 @@ func withUpdateValidation(initializer corev1alpha1.LogicalClusterInitializer) re
 						fmt.Sprintf("only removing the %q initializer is supported", initializer),
 					)},
 				)
-				if len(previous)-len(current) != 1 {
-					return invalidUpdateErr
-				}
-				for _, item := range current {
-					if item == string(initializer) {
+				// Allow updates that don't touch initializers (e.g. condition-only status
+				// updates while bindings are still pending). Otherwise require exactly one
+				// initializer removed and it must be the one this VW is scoped to.
+				if len(previous) != len(current) {
+					if len(previous)-len(current) != 1 {
+						return invalidUpdateErr
+					}
+					if slices.Contains(current, string(initializer)) {
 						return invalidUpdateErr
 					}
 				}

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ func CRDToAPIResourceSchema(crd *apiextensionsv1.CustomResourceDefinition, prefi
 	name := prefix + "." + crd.Name
 
 	if msgs := validation.IsDNS1123Subdomain(name); len(msgs) > 0 {
-		var errs []error
+		errs := make([]error, 0, len(msgs))
 
 		for _, msg := range msgs {
 			errs = append(errs, field.Invalid(field.NewPath("metadata", "name"), name, msg))
@@ -94,6 +94,7 @@ func CRDToAPIResourceSchema(crd *apiextensionsv1.CustomResourceDefinition, prefi
 			Deprecated:               crdVersion.Deprecated,
 			DeprecationWarning:       crdVersion.DeprecationWarning,
 			AdditionalPrinterColumns: crdVersion.AdditionalPrinterColumns,
+			SelectableFields:         crdVersion.SelectableFields,
 		}
 
 		if crdVersion.Schema != nil && crdVersion.Schema.OpenAPIV3Schema != nil {

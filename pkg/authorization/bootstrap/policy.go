@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package bootstrap
 
 import (
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiextensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	rbacv1helpers "k8s.io/kubernetes/pkg/apis/rbac/v1"
@@ -27,6 +28,7 @@ import (
 	"github.com/kcp-dev/sdk/apis/apis"
 	"github.com/kcp-dev/sdk/apis/cache"
 	"github.com/kcp-dev/sdk/apis/core"
+	"github.com/kcp-dev/sdk/apis/migration"
 	"github.com/kcp-dev/sdk/apis/tenancy"
 )
 
@@ -47,6 +49,25 @@ const (
 	SystemExternalLogicalClusterAdmin = "system:kcp:external-logical-cluster-admin"
 	// SystemKcpWorkspaceAccessGroup is a group that gives a user system:authenticated access to a workspace.
 	SystemKcpWorkspaceAccessGroup = "system:kcp:workspace:access"
+	// SystemKcpMetricsReader is a ClusterRole that grants read access to the
+	// shard-wide /metrics endpoint. A kcp-admin binds it inside :root to an
+	// identity (User, Group, or ServiceAccount) used by prometheus or similar
+	// scrapers. The binding is replicated to every shard via the cache server,
+	// so a single :root binding authorizes scraping on all shards.
+	SystemKcpMetricsReader = "system:kcp:metrics-reader"
+	// SystemKcpInitializerGroupPrefix is the group prefix used by the initializing virtual workspace's
+	// content proxy to mark a request as already authorized against the WorkspaceType's
+	// initializerPermissions. Concrete groups are formed as
+	//   system:kcp:initializer:<initializer-name>
+	// where <initializer-name> is the fully qualified initializer identifier produced by
+	// initialization.InitializerForType (e.g. "root:org:tenant"). Clients cannot self-assert
+	// these groups: the front-proxy strips them via --authentication-drop-groups before the
+	// request ever reaches a shard, so seeing one inside the workspace content authorizer is
+	// a trustworthy signal that a VW proxy has already evaluated the request.
+	SystemKcpInitializerGroupPrefix = "system:kcp:initializer:"
+	// SystemKcpTerminatorGroupPrefix is the group prefix used by the terminating virtual
+	// workspace's content proxy. See SystemKcpInitializerGroupPrefix for semantics.
+	SystemKcpTerminatorGroupPrefix = "system:kcp:terminator:"
 )
 
 const (
@@ -93,14 +114,25 @@ func clusterRoles() []rbacv1.ClusterRole {
 			ObjectMeta: metav1.ObjectMeta{Name: SystemExternalLogicalClusterAdmin},
 			Rules: []rbacv1.PolicyRule{
 				rbacv1helpers.NewRule("delete", "update", "get").Groups(core.GroupName).Resources("logicalclusters", "logicalclusters/status").RuleOrDie(),
-				rbacv1helpers.NewRule("delete", "update", "get").Groups(tenancy.GroupName).Resources("workspaces").RuleOrDie(),
+				rbacv1helpers.NewRule("delete", "update", "patch", "get").Groups(tenancy.GroupName).Resources("workspaces").RuleOrDie(),
+				rbacv1helpers.NewRule("get").Groups("").Resources("serviceaccounts", "secrets").RuleOrDie(),
 				rbacv1helpers.NewRule("access").URLs("/").RuleOrDie(),
+				// Allow the in-process initializing/terminating virtual workspaces to delegate
+				// authorization checks against the workspacetype's cluster via SubjectAccessReview.
+				// The VW resolves access for the requesting user, not the SAR caller itself.
+				rbacv1helpers.NewRule("create").Groups("authorization.k8s.io").Resources("subjectaccessreviews").RuleOrDie(),
 			},
 		},
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: SystemKcpWorkspaceAccessGroup},
 			Rules: []rbacv1.PolicyRule{
 				rbacv1helpers.NewRule("access").URLs("/").RuleOrDie(),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: SystemKcpMetricsReader},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule("get").URLs("/metrics").RuleOrDie(),
 			},
 		},
 		{
@@ -113,8 +145,45 @@ func clusterRoles() []rbacv1.ClusterRole {
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: SystemExternalLogicalClusterAdmin},
 			Rules: []rbacv1.PolicyRule{
-				rbacv1helpers.NewRule("update", "patch", "get").Groups(cache.GroupName).Resources("cachedresourceendpointslices/status").RuleOrDie(),
-				rbacv1helpers.NewRule("get", "list", "watch").Groups(cache.GroupName).Resources("cachedresourceendpointslices").RuleOrDie(),
+				rbacv1helpers.NewRule("update", "patch", "get").Groups(cache.GroupName).Resources("clustercachedresourceendpointslices/status").RuleOrDie(),
+				rbacv1helpers.NewRule("get", "list", "watch").Groups(cache.GroupName).Resources("clustercachedresourceendpointslices").RuleOrDie(),
+			},
+		},
+		{
+			// Allow shards to retrieve WACs from other shards for per-workspace authentication.
+			ObjectMeta: metav1.ObjectMeta{Name: SystemExternalLogicalClusterAdmin},
+			Rules: []rbacv1.PolicyRule{
+				rbacv1helpers.NewRule("get").Groups(tenancy.GroupName).Resources("workspaceauthenticationconfigurations").RuleOrDie(),
+			},
+		},
+		{
+			// logical cluster migration
+			ObjectMeta: metav1.ObjectMeta{Name: SystemExternalLogicalClusterAdmin},
+			Rules: []rbacv1.PolicyRule{
+				// pull data from origin to destination shard during migration
+				rbacv1helpers.NewRule("create").Groups(migration.GroupName).Resources("logicalclusterdumps").RuleOrDie(),
+				// allows shards to update LogicalClusterMigrations wherever it is placed
+				rbacv1helpers.NewRule("get", "update", "patch").Groups(migration.GroupName).Resources("logicalclustermigrations", "logicalclustermigrations/status").RuleOrDie(),
+				// Allow restoring bounds CRDs.
+				rbacv1helpers.NewRule("list").Groups(apis.GroupName).Resources("apibindings").RuleOrDie(),
+				rbacv1helpers.NewRule("get").Groups(apis.GroupName).Resources("apiexports").RuleOrDie(),
+				rbacv1helpers.NewRule("get").Groups(apis.GroupName).Resources("apiresourceschemas").RuleOrDie(),
+				rbacv1helpers.NewRule("get", "create").Groups(apiextensions.GroupName).Resources("customresourcedefinitions").RuleOrDie(),
+			},
+		},
+		{
+			// apiexport identity rotation
+			ObjectMeta: metav1.ObjectMeta{Name: SystemExternalLogicalClusterAdmin},
+			Rules: []rbacv1.PolicyRule{
+				// the rotation controller flips the rotated export's identity
+				// secret ref, hash and alias, and maintains the
+				// active-rotation annotation; the export may live on another
+				// shard than the rotation object.
+				rbacv1helpers.NewRule("get", "update", "patch").Groups(apis.GroupName).Resources("apiexports", "apiexports/status").RuleOrDie(),
+				// per-shard identity migrators report drain progress into the
+				// rotation object's status via server-side apply, wherever the
+				// rotation lives.
+				rbacv1helpers.NewRule("get", "update", "patch").Groups(migration.GroupName).Resources("apiexportidentityrotations", "apiexportidentityrotations/status").RuleOrDie(),
 			},
 		},
 	}

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,10 +25,13 @@ import (
 
 	kcpkubernetesinformers "github.com/kcp-dev/client-go/informers"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/rootapiserver"
 
+	adminoptions "github.com/kcp-dev/kcp/pkg/virtual/admin/options"
 	apiexportoptions "github.com/kcp-dev/kcp/pkg/virtual/apiexport/options"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/rootapiserver"
+	apiresourceschemaoptions "github.com/kcp-dev/kcp/pkg/virtual/apiresourceschema/options"
 	initializingworkspacesoptions "github.com/kcp-dev/kcp/pkg/virtual/initializingworkspaces/options"
+	migratingworkspacesoptions "github.com/kcp-dev/kcp/pkg/virtual/migratingworkspaces/options"
 	replicationoptions "github.com/kcp-dev/kcp/pkg/virtual/replication/options"
 	terminatingworkspaceoptions "github.com/kcp-dev/kcp/pkg/virtual/terminatingworkspaces/options"
 )
@@ -37,23 +40,29 @@ const virtualWorkspacesFlagPrefix = "virtual-workspaces-"
 
 type Options struct {
 	APIExport              *apiexportoptions.APIExport
+	APIResourceSchema      *apiresourceschemaoptions.APIResourceSchema
 	InitializingWorkspaces *initializingworkspacesoptions.InitializingWorkspaces
+	MigratingWorkspaces    *migratingworkspacesoptions.MigratingWorkspaces
 	TerminatingWorkspaces  *terminatingworkspaceoptions.TerminatingWorkspaces
 }
 
 func NewOptions() *Options {
 	return &Options{
 		APIExport:              apiexportoptions.New(),
+		APIResourceSchema:      apiresourceschemaoptions.New(),
 		InitializingWorkspaces: initializingworkspacesoptions.New(),
+		MigratingWorkspaces:    migratingworkspacesoptions.New(),
 		TerminatingWorkspaces:  terminatingworkspaceoptions.New(),
 	}
 }
 
 func (o *Options) Validate() []error {
-	var errs []error
+	var errs []error //nolint:prealloc
 
 	errs = append(errs, o.APIExport.Validate(virtualWorkspacesFlagPrefix)...)
+	errs = append(errs, o.APIResourceSchema.Validate(virtualWorkspacesFlagPrefix)...)
 	errs = append(errs, o.InitializingWorkspaces.Validate(virtualWorkspacesFlagPrefix)...)
+	errs = append(errs, o.MigratingWorkspaces.Validate(virtualWorkspacesFlagPrefix)...)
 	errs = append(errs, o.TerminatingWorkspaces.Validate(virtualWorkspacesFlagPrefix)...)
 
 	return errs
@@ -61,13 +70,24 @@ func (o *Options) Validate() []error {
 
 func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	o.InitializingWorkspaces.AddFlags(fs, virtualWorkspacesFlagPrefix)
+	o.MigratingWorkspaces.AddFlags(fs, virtualWorkspacesFlagPrefix)
 	o.TerminatingWorkspaces.AddFlags(fs, virtualWorkspacesFlagPrefix)
+	o.APIExport.AddFlags(fs, virtualWorkspacesFlagPrefix)
+	o.APIResourceSchema.AddFlags(fs, virtualWorkspacesFlagPrefix)
 }
 
+// NewVirtualWorkspaces builds the configured virtual workspaces.
+//
+// externalLogicalClusterAdminConfig is an optional client config that points
+// at the front-proxy and is used by VWs that need to reach clusters hosted on
+// other shards (e.g. for SubjectAccessReview against the workspacetype's
+// cluster). When nil, all VW operations go through config (the local shard
+// loopback), which is correct for non-sharded deployments.
 func (o *Options) NewVirtualWorkspaces(
 	config *rest.Config,
+	cacheConfig *rest.Config,
+	externalLogicalClusterAdminConfig *rest.Config,
 	rootPathPrefix string,
-	shardExternalURL func() string,
 	wildcardKubeInformers kcpkubernetesinformers.SharedInformerFactory,
 	wildcardKcpInformers, cachedKcpInformers kcpinformers.SharedInformerFactory,
 ) ([]rootapiserver.NamedVirtualWorkspace, error) {
@@ -76,7 +96,12 @@ func (o *Options) NewVirtualWorkspaces(
 		return nil, err
 	}
 
-	initializingworkspaces, err := o.InitializingWorkspaces.NewVirtualWorkspaces(rootPathPrefix, config, wildcardKcpInformers)
+	apiresourceschemas, err := o.APIResourceSchema.NewVirtualWorkspaces(rootPathPrefix, config, cachedKcpInformers, wildcardKcpInformers)
+	if err != nil {
+		return nil, err
+	}
+
+	initializingworkspaces, err := o.InitializingWorkspaces.NewVirtualWorkspaces(rootPathPrefix, config, externalLogicalClusterAdminConfig, wildcardKcpInformers, cachedKcpInformers)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +109,7 @@ func (o *Options) NewVirtualWorkspaces(
 	replications, err := replicationoptions.New().NewReplication(
 		rootPathPrefix,
 		config,
+		cacheConfig,
 		wildcardKcpInformers,
 		cachedKcpInformers,
 	)
@@ -91,12 +117,26 @@ func (o *Options) NewVirtualWorkspaces(
 		return nil, err
 	}
 
-	terminatingworkspaces, err := o.TerminatingWorkspaces.NewVirtualWorkspaces(rootPathPrefix, config, wildcardKcpInformers)
+	adminVW, err := adminoptions.New().NewAdmin(
+		rootPathPrefix,
+		config,
+		cacheConfig,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	all, err := Merge(apiexports, initializingworkspaces, replications, terminatingworkspaces)
+	terminatingworkspaces, err := o.TerminatingWorkspaces.NewVirtualWorkspaces(rootPathPrefix, config, externalLogicalClusterAdminConfig, wildcardKcpInformers, cachedKcpInformers)
+	if err != nil {
+		return nil, err
+	}
+
+	migratingworkspaces, err := o.MigratingWorkspaces.NewVirtualWorkspaces(rootPathPrefix, config)
+	if err != nil {
+		return nil, err
+	}
+
+	all, err := Merge(apiexports, apiresourceschemas, initializingworkspaces, replications, adminVW, terminatingworkspaces, migratingworkspaces)
 	if err != nil {
 		return nil, err
 	}

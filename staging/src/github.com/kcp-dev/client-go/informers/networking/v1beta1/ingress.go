@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ func NewIngressClusterInformer(client kcpkubernetes.ClusterInterface, resyncPeri
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredIngressClusterInformer(client kcpkubernetes.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions kcpinternalinterfaces.TweakListOptionsFunc) kcpcache.ScopeableSharedIndexInformer {
 	return kcpinformers.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
@@ -77,7 +77,7 @@ func NewFilteredIngressClusterInformer(client kcpkubernetes.ClusterInterface, re
 				}
 				return client.NetworkingV1beta1().Ingresses().Watch(context.Background(), options)
 			},
-		},
+		}, client),
 		&apinetworkingv1beta1.Ingress{},
 		resyncPeriod,
 		indexers,

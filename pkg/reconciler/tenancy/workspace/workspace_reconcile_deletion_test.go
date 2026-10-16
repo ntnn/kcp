@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -57,8 +57,8 @@ func (f *fakeDeletionReconciler) deleteLogicalCluster() func(ctx context.Context
 	}
 }
 
-func (f *fakeDeletionReconciler) getShardByHash() func(hash string) (*corev1alpha1.Shard, error) {
-	return func(hash string) (*corev1alpha1.Shard, error) {
+func (f *fakeDeletionReconciler) getShard() func(name string) (*corev1alpha1.Shard, error) {
+	return func(name string) (*corev1alpha1.Shard, error) {
 		// for now we can work with a fixed shard
 		s := &corev1alpha1.Shard{}
 		return s, nil
@@ -72,6 +72,7 @@ func (f *fakeDeletionReconciler) kcpLogicalClusterAdminClientFor() func(shard *c
 }
 
 func TestReconcile(t *testing.T) {
+	t.Parallel()
 	tt := []struct {
 		name               string
 		expStatus          reconcileStatus
@@ -178,12 +179,13 @@ func TestReconcile(t *testing.T) {
 
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			fdr := fakeDeletionReconciler{
 				clusters: tc.logicalclusters,
 			}
 			fdr.deletionReconciler.getLogicalCluster = fdr.getLogicalCluster()
 			fdr.deletionReconciler.deleteLogicalCluster = fdr.deleteLogicalCluster()
-			fdr.deletionReconciler.getShardByHash = fdr.getShardByHash()
+			fdr.deletionReconciler.getShard = fdr.getShard()
 			fdr.deletionReconciler.kcpLogicalClusterAdminClientFor = fdr.kcpLogicalClusterAdminClientFor()
 
 			status, err := fdr.deletionReconciler.reconcile(ctx, tc.workspace)

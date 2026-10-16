@@ -1,4 +1,4 @@
-# Copyright 2021 The KCP Authors.
+# Copyright 2021 The kcp Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -51,14 +51,10 @@ YAML_PATCH_BIN := yaml-patch
 YAML_PATCH := $(TOOLS_DIR)/$(YAML_PATCH_BIN)-$(YAML_PATCH_VER)
 export YAML_PATCH # so hack scripts can use it
 
-GOLANGCI_LINT_VER := 2.6.0
+GOLANGCI_LINT_VER := 2.14.0
 GOLANGCI_LINT_BIN := golangci-lint
 GOLANGCI_LINT := $(TOOLS_GOBIN_DIR)/$(GOLANGCI_LINT_BIN)-$(GOLANGCI_LINT_VER)
 GOLANGCI_LINT_FLAGS ?=
-
-HTTEST_VER := 0.3.4
-HTTEST_BIN := httest
-export HTTEST := $(TOOLS_GOBIN_DIR)/$(HTTEST_BIN)-$(HTTEST_VER)
 
 GOTESTSUM_VER := 1.12.3
 GOTESTSUM_BIN := gotestsum
@@ -73,6 +69,10 @@ KCP_APIGEN_BIN := apigen
 KCP_APIGEN_GEN := $(TOOLS_DIR)/$(KCP_APIGEN_BIN)
 export KCP_APIGEN_GEN # so hack scripts can use it
 
+PROMETHEUS_VER := 3.11.0
+PROMETHEUS_BIN := prometheus
+PROMETHEUS := $(abspath $(TOOLS_DIR))/$(PROMETHEUS_BIN)-$(PROMETHEUS_VER)
+
 ARCH := $(shell go env GOARCH)
 OS := $(shell go env GOOS)
 
@@ -82,6 +82,7 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD || echo 'local')
 GIT_DIRTY := $(shell git diff --quiet && echo 'clean' || echo 'dirty')
 GIT_VERSION := $(shell go mod edit -json | jq '.Require[] | select(.Path == "k8s.io/kubernetes") | .Version' --raw-output)+kcp-$(shell git describe --tags --match='v*' --abbrev=14 "$(GIT_COMMIT)^{commit}" 2>/dev/null || echo v0.0.0-$(GIT_COMMIT))
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+EXTRA_LDFLAGS ?=
 LDFLAGS := \
 	-X k8s.io/client-go/pkg/version.gitCommit=${GIT_COMMIT} \
 	-X k8s.io/client-go/pkg/version.gitTreeState=${GIT_DIRTY} \
@@ -96,7 +97,8 @@ LDFLAGS := \
 	-X k8s.io/component-base/version.gitMajor=${KUBE_MAJOR_VERSION} \
 	-X k8s.io/component-base/version.gitMinor=${KUBE_MINOR_VERSION} \
 	-X k8s.io/component-base/version.buildDate=${BUILD_DATE} \
-	-extldflags '-static'
+	-extldflags '-static' \
+	${EXTRA_LDFLAGS}
 all: build
 .PHONY: all
 
@@ -116,9 +118,9 @@ build: require-jq require-go require-git verify-go-versions ## Build the project
     done
 .PHONY: build
 
-.PHONY: build-all
-build-all:
-	GOOS=$(OS) GOARCH=$(ARCH) $(MAKE) build WHAT='./cmd/...'
+.PHONY: build-e2e
+build-e2e:
+	@$(MAKE) build WHAT='./cmd/... ./staging/src/github.com/kcp-dev/cli/cmd/...'
 
 install: WHAT ?= ./cmd/... ./staging/src/github.com/kcp-dev/cli/cmd/... ./staging/src/github.com/kcp-dev/sdk/cmd/...
 install: require-jq require-go require-git verify-go-versions ## Install the project
@@ -140,11 +142,14 @@ golangci-lint-version:
 	@echo $(GOLANGCI_LINT_VER)
 .PHONY: golangci-lint-version
 
-$(HTTEST):
+.PHONY: prometheus
+prometheus: $(PROMETHEUS)
+
+$(PROMETHEUS):
 	@hack/uget.sh \
-		https://codeberg.org/xrstf/httest/releases/download/v{VERSION}/httest_{VERSION}_{GOOS}_{GOARCH}.tar.gz \
-		${HTTEST_BIN} \
-		${HTTEST_VER}
+		https://github.com/prometheus/prometheus/releases/download/v{VERSION}/prometheus-{VERSION}.{GOOS}-{GOARCH}.tar.gz \
+		${PROMETHEUS_BIN} \
+		${PROMETHEUS_VER}
 
 $(LOGCHECK):
 	@GO_MODULE=true hack/uget.sh \
@@ -186,30 +191,26 @@ generate-api-docs: ## Generate api docs
 	git clean -fdX docs/content/reference/crd
 	docs/generators/crd-ref/run-crd-ref-gen.sh
 
-VENVDIR=$(abspath docs/venv)
-REQUIREMENTS_TXT=docs/requirements.txt
+UV ?= uv
 
 .PHONY: local-docs
-local-docs: venv ## Run mkdocs serve
-	. $(VENV)/activate; \
-	VENV=$(VENV) cd docs && mkdocs serve
+local-docs: ## Run zensical serve
+	cd docs && $(UV) run zensical serve
 
 .PHONY: serve-docs
-serve-docs: venv ## Serve docs
-	. $(VENV)/activate; \
-	VENV=$(VENV) REMOTE=$(REMOTE) BRANCH=$(BRANCH) docs/scripts/serve-docs.sh
+serve-docs: ## Serve docs
+	cd docs && REMOTE=$(REMOTE) BRANCH=$(BRANCH) $(UV) run scripts/serve-docs.sh
 
 .PHONY: deploy-docs
-deploy-docs: venv ## Deploy docs
-	. $(VENV)/activate; \
-	REMOTE=$(REMOTE) BRANCH=$(BRANCH) docs/scripts/deploy-docs.sh
+deploy-docs: ## Deploy docs
+	cd docs && REMOTE=$(REMOTE) BRANCH=$(BRANCH) $(UV) run scripts/deploy-docs.sh
 
 vendor: ## Vendor the dependencies
 	go mod tidy
 	go mod vendor
 .PHONY: vendor
 
-tools: $(GOLANGCI_LINT) $(HTTEST) $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) $(YAML_PATCH) $(GOTESTSUM) ## Install tools
+tools: $(GOLANGCI_LINT) $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) $(YAML_PATCH) $(GOTESTSUM) ## Install tools
 .PHONY: tools
 
 $(CONTROLLER_GEN):
@@ -287,7 +288,7 @@ BOILERPLATE_KUBERNETES_FILES := $(abspath ./hack/boilerplate/boilerplate_kuberne
 
 .PHONY: verify-boilerplate
 verify-boilerplate: ## Verify boilerplate
-	hack/verify_boilerplate.py --boilerplate-dir=hack/boilerplate --skip hack/uget.sh --skip docs/venv --skip pkg/network/dialer --skip-files-list $(BOILERPLATE_MODIFIED_FILES) --skip-files-list $(BOILERPLATE_KUBERNETES_FILES)
+	hack/verify_boilerplate.py --boilerplate-dir=hack/boilerplate --skip hack/uget.sh --skip docs/.venv --skip pkg/network/dialer --skip-files-list $(BOILERPLATE_MODIFIED_FILES) --skip-files-list $(BOILERPLATE_KUBERNETES_FILES)
 	hack/verify_boilerplate.py --boilerplate-dir=hack/boilerplate/boilerplate_modified --filenames-list $(BOILERPLATE_MODIFIED_FILES)
 	hack/verify_boilerplate.py --boilerplate-dir=hack/boilerplate/boilerplate_kubernetes --filenames-list $(BOILERPLATE_KUBERNETES_FILES)
 
@@ -316,17 +317,24 @@ ifdef SUITES
 SUITES_ARG = --suites $(SUITES)
 COMPLETE_SUITES_ARG = -args $(SUITES_ARG)
 endif
-TEST_FEATURE_GATES ?= WorkspaceMounts=true,CacheAPIs=true,WorkspaceAuthentication=true
+TEST_FEATURE_GATES ?= WorkspaceMounts=true,CacheAPIs=true,WorkspaceAuthentication=true,LogicalClusterMigration=true,APIExportIdentityRotation=true
 PROXY_FEATURE_GATES ?= $(TEST_FEATURE_GATES)
+# Per-file log verbosity (klog --vmodule) for the kcp shards started by the e2e
+# targets, on top of the default --v=2. Patterns match source file base names
+# without the .go suffix. The garbage collector only logs some of its retry
+# errors (e.g. REST mapping failures) at V(5), which makes GC flakes hard to
+# debug otherwise. Set E2E_SHARD_VMODULE= to turn this off.
+E2E_SHARD_VMODULE ?= garbagecollector=5
+E2E_SHARD_VMODULE_ARG = $(if $(E2E_SHARD_VMODULE),--vmodule=$(E2E_SHARD_VMODULE))
+E2E_SHARDED_VMODULE_ARG = $(if $(E2E_SHARD_VMODULE),--shard-vmodule=$(E2E_SHARD_VMODULE))
 
 .PHONY: test-e2e
 ifdef USE_GOTESTSUM
 test-e2e: $(GOTESTSUM)
 endif
-test-e2e: $(HTTEST)
 test-e2e: TEST_ARGS ?=
 test-e2e: WHAT ?= ./test/e2e...
-test-e2e: build-all ## Run e2e tests
+test-e2e: build-e2e ## Run e2e tests
 	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true NO_GORUN=1 GOOS=$(OS) GOARCH=$(ARCH) \
 		$(GO_TEST) -race $(COUNT_ARG) $(PARALLELISM_ARG) $(WHAT) $(TEST_ARGS) $(COMPLETE_SUITES_ARG)
 
@@ -335,7 +343,6 @@ test-e2e: build-all ## Run e2e tests
 ifdef USE_GOTESTSUM
 test-e2e-shared-minimal: $(GOTESTSUM)
 endif
-test-e2e-shared-minimal: $(HTTEST)
 test-e2e-shared-minimal: TEST_ARGS ?=
 test-e2e-shared-minimal: WHAT ?= ./test/e2e...
 test-e2e-shared-minimal: WORK_DIR ?= $(PWD)
@@ -344,11 +351,11 @@ test-e2e-shared-minimal: LOG_DIR ?= $(ARTIFACT_DIR)/kcp
 else
 test-e2e-shared-minimal: LOG_DIR ?= $(WORK_DIR)/.kcp
 endif
-test-e2e-shared-minimal: build-all
+test-e2e-shared-minimal: build-e2e
 	mkdir -p "$(LOG_DIR)" "$(WORK_DIR)/.kcp"
 	rm -f "$(WORK_DIR)/.kcp/ready-to-test"
 	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true NO_GORUN=1 \
-		./bin/test-server --quiet --work-dir-path="$(WORK_DIR)" --log-dir-path="$(LOG_DIR)" $(TEST_SERVER_ARGS) -- --feature-gates=$(TEST_FEATURE_GATES) 2>&1 & PID=$$! && echo "PID $$PID" && \
+		./bin/test-server --quiet --work-dir-path="$(WORK_DIR)" --log-dir-path="$(LOG_DIR)" $(TEST_SERVER_ARGS) -- --feature-gates=$(TEST_FEATURE_GATES) $(E2E_SHARD_VMODULE_ARG) 2>&1 & PID=$$! && echo "PID $$PID" && \
 	trap 'kill -TERM $$PID && wait $$PID' TERM INT EXIT && \
 	while [ ! -f "$(WORK_DIR)/.kcp/ready-to-test" ]; do sleep 1; done && \
 	echo 'Starting test(s)' && \
@@ -361,7 +368,6 @@ test-e2e-shared-minimal: build-all
 ifdef USE_GOTESTSUM
 test-e2e-sharded-minimal: $(GOTESTSUM)
 endif
-test-e2e-sharded-minimal: $(HTTEST)
 test-e2e-sharded-minimal: TEST_ARGS ?=
 test-e2e-sharded-minimal: WHAT ?= ./test/e2e...
 test-e2e-sharded-minimal: WORK_DIR ?= $(PWD)
@@ -371,10 +377,70 @@ test-e2e-sharded-minimal: LOG_DIR ?= $(ARTIFACT_DIR)/kcp
 else
 test-e2e-sharded-minimal: LOG_DIR ?= $(WORK_DIR)/.kcp
 endif
-test-e2e-sharded-minimal: build-all
+test-e2e-sharded-minimal: build-e2e
 	mkdir -p "$(LOG_DIR)" "$(WORK_DIR)/.kcp"
 	rm -f "$(WORK_DIR)/.kcp/ready-to-test"
-	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true NO_GORUN=1 ./bin/sharded-test-server --quiet --v=2 --log-dir-path="$(LOG_DIR)" --work-dir-path="$(WORK_DIR)" --shard-run-virtual-workspaces=false --shard-feature-gates=$(TEST_FEATURE_GATES) --proxy-feature-gates=$(PROXY_FEATURE_GATES) $(TEST_SERVER_ARGS) --number-of-shards=$(SHARDS) 2>&1 & PID=$$!; echo "PID $$PID" && \
+	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true NO_GORUN=1 ./bin/sharded-test-server --quiet --v=2 --log-dir-path="$(LOG_DIR)" --work-dir-path="$(WORK_DIR)" --shard-run-virtual-workspaces=false --shard-feature-gates=$(TEST_FEATURE_GATES) --proxy-feature-gates=$(PROXY_FEATURE_GATES) $(E2E_SHARDED_VMODULE_ARG) $(TEST_SERVER_ARGS) --number-of-shards=$(SHARDS) 2>&1 & PID=$$!; echo "PID $$PID" && \
+	trap 'kill -TERM $$PID && wait $$PID' TERM INT EXIT && \
+	while [ ! -f "$(WORK_DIR)/.kcp/ready-to-test" ]; do sleep 1; done && \
+	echo 'Starting test(s)' && \
+	NO_GORUN=1 GOOS=$(OS) GOARCH=$(ARCH) $(GO_TEST) -race $(COUNT_ARG) $(PARALLELISM_ARG) $(WHAT) $(TEST_ARGS) \
+		-args --kcp-kubeconfig=$(WORK_DIR)/.kcp/admin.kubeconfig --shard-kubeconfigs=root=$(WORK_DIR)/.kcp-0/admin.kubeconfig$(shell if [ $(SHARDS) -gt 1 ]; then seq 1 $$[$(SHARDS) - 1]; fi | while read n; do echo -n ",shard-$$n=$(WORK_DIR)/.kcp-$$n/admin.kubeconfig"; done) \
+		$(SUITES_ARG) \
+	$(if $(value WAIT),|| { echo "Terminated with $$?"; wait "$$PID"; },)
+
+# Runs the controller-runtime test module (test/controller-runtime, a separate Go
+# module so sigs.k8s.io/controller-runtime stays out of the root go.mod) against a
+# freshly brought-up 2-shard server. Mirrors test-e2e-sharded-minimal; only the
+# final `go test` differs (it runs inside the submodule). WORK_DIR is absolute
+# ($(PWD)), so the kubeconfig paths remain valid after cd-ing into the module.
+.PHONY: test-e2e-sharded-controller-runtime
+ifdef USE_GOTESTSUM
+test-e2e-sharded-controller-runtime: $(GOTESTSUM)
+endif
+test-e2e-sharded-controller-runtime: TEST_ARGS ?=
+test-e2e-sharded-controller-runtime: WORK_DIR ?= $(PWD)
+test-e2e-sharded-controller-runtime: SHARDS ?= 2
+ifdef ARTIFACT_DIR
+test-e2e-sharded-controller-runtime: LOG_DIR ?= $(ARTIFACT_DIR)/kcp
+else
+test-e2e-sharded-controller-runtime: LOG_DIR ?= $(WORK_DIR)/.kcp
+endif
+test-e2e-sharded-controller-runtime: build-e2e
+	mkdir -p "$(LOG_DIR)" "$(WORK_DIR)/.kcp"
+	rm -f "$(WORK_DIR)/.kcp/ready-to-test"
+	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true NO_GORUN=1 ./bin/sharded-test-server --quiet --v=2 --log-dir-path="$(LOG_DIR)" --work-dir-path="$(WORK_DIR)" --shard-run-virtual-workspaces=false --shard-feature-gates=$(TEST_FEATURE_GATES) --proxy-feature-gates=$(PROXY_FEATURE_GATES) $(E2E_SHARDED_VMODULE_ARG) $(TEST_SERVER_ARGS) --number-of-shards=$(SHARDS) 2>&1 & PID=$$!; echo "PID $$PID" && \
+	trap 'kill -TERM $$PID && wait $$PID' TERM INT EXIT && \
+	while [ ! -f "$(WORK_DIR)/.kcp/ready-to-test" ]; do sleep 1; done && \
+	echo 'Starting test(s)' && \
+	cd $(ROOT_DIR)/test/controller-runtime && NO_GORUN=1 GOOS=$(OS) GOARCH=$(ARCH) $(GO_TEST) -race $(COUNT_ARG) $(PARALLELISM_ARG) ./... $(TEST_ARGS) \
+		-args --kcp-kubeconfig=$(WORK_DIR)/.kcp/admin.kubeconfig --shard-kubeconfigs=root=$(WORK_DIR)/.kcp-0/admin.kubeconfig$(shell if [ $(SHARDS) -gt 1 ]; then seq 1 $$[$(SHARDS) - 1]; fi | while read n; do echo -n ",shard-$$n=$(WORK_DIR)/.kcp-$$n/admin.kubeconfig"; done) \
+		$(SUITES_ARG) \
+	$(if $(value WAIT),|| { echo "Terminated with $$?"; wait "$$PID"; },)
+
+# Same as test-e2e-sharded-minimal, but each shard runs its own embedded virtual
+# workspace server (--shard-run-virtual-workspaces=true) instead of a single
+# standalone VW server in front of all shards. This matches deployments where the
+# APIExport virtual workspaces are served per-shard, and exercises cross-shard
+# behaviour (e.g. permission-claimed resources whose objects live on a different
+# shard than the consuming APIExport).
+.PHONY: test-e2e-sharded-embedded-vw
+ifdef USE_GOTESTSUM
+test-e2e-sharded-embedded-vw: $(GOTESTSUM)
+endif
+test-e2e-sharded-embedded-vw: TEST_ARGS ?=
+test-e2e-sharded-embedded-vw: WHAT ?= ./test/e2e...
+test-e2e-sharded-embedded-vw: WORK_DIR ?= $(PWD)
+test-e2e-sharded-embedded-vw: SHARDS ?= 2
+ifdef ARTIFACT_DIR
+test-e2e-sharded-embedded-vw: LOG_DIR ?= $(ARTIFACT_DIR)/kcp
+else
+test-e2e-sharded-embedded-vw: LOG_DIR ?= $(WORK_DIR)/.kcp
+endif
+test-e2e-sharded-embedded-vw: build-e2e
+	mkdir -p "$(LOG_DIR)" "$(WORK_DIR)/.kcp"
+	rm -f "$(WORK_DIR)/.kcp/ready-to-test"
+	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true NO_GORUN=1 ./bin/sharded-test-server --quiet --v=2 --log-dir-path="$(LOG_DIR)" --work-dir-path="$(WORK_DIR)" --shard-run-virtual-workspaces=true --shard-feature-gates=$(TEST_FEATURE_GATES) --proxy-feature-gates=$(PROXY_FEATURE_GATES) $(E2E_SHARDED_VMODULE_ARG) $(TEST_SERVER_ARGS) --number-of-shards=$(SHARDS) 2>&1 & PID=$$!; echo "PID $$PID" && \
 	trap 'kill -TERM $$PID && wait $$PID' TERM INT EXIT && \
 	while [ ! -f "$(WORK_DIR)/.kcp/ready-to-test" ]; do sleep 1; done && \
 	echo 'Starting test(s)' && \
@@ -385,17 +451,37 @@ test-e2e-sharded-minimal: build-all
 
 # This is just easy target to run 2 shard test server locally until manually killed.
 # You can target test to it by running:
-# go test ./test/e2e/apibinding/... --kcp-kubeconfig=$(pwd)/.kcp/admin.kubeconfig --shard-kubeconfigs=root=$(pwd)/.kcp-0/admin.kubeconfig -run=^TestAPIBinding$
+# go test ./test/e2e/apibinding/... --kcp-kubeconfig=$(pwd)/.kcp/admin.kubeconfig --shard-kubeconfigs=root=$(pwd)/.kcp-0/admin.kubeconfig --shard-kubeconfigs=shard-1=$(pwd)/.kcp-1/admin.kubeconfig -run=^TestAPIBinding$
 test-run-sharded-server: WORK_DIR ?= $(PWD)
 test-run-sharded-server: LOG_DIR ?= $(WORK_DIR)/.kcp
 test-run-sharded-server:
 	mkdir -p "$(LOG_DIR)" "$(WORK_DIR)/.kcp"
 	rm -f "$(WORK_DIR)/.kcp/ready-to-test"
-	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true NO_GORUN=1 ./bin/sharded-test-server --quiet --v=2 --log-dir-path="$(LOG_DIR)" --work-dir-path="$(WORK_DIR)" --shard-run-virtual-workspaces=false --shard-feature-gates=$(TEST_FEATURE_GATES) --proxy-feature-gates=$(PROXY_FEATURE_GATES) $(TEST_SERVER_ARGS) --number-of-shards=2 2>&1 & PID=$$!; echo "PID $$PID" && \
+	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true NO_GORUN=1 ./bin/sharded-test-server --quiet --v=2 --log-dir-path="$(LOG_DIR)" --work-dir-path="$(WORK_DIR)" --shard-run-virtual-workspaces=false --shard-feature-gates=$(TEST_FEATURE_GATES) --proxy-feature-gates=$(PROXY_FEATURE_GATES) $(E2E_SHARDED_VMODULE_ARG) $(TEST_SERVER_ARGS) --number-of-shards=2 2>&1 & PID=$$!; echo "PID $$PID" && \
 	trap 'kill -TERM $$PID && wait $$PID' TERM INT EXIT && \
 	while [ ! -f "$(WORK_DIR)/.kcp/ready-to-test" ]; do sleep 1; done && \
 	echo 'Server started' && \
 	wait $$PID
+
+# Verifies the upgrade path: starts the previous kcp release, seeds it with
+# data, restarts the same root directory with the current tree's binary and
+# asserts the data survived and the server is functional. Set
+# UPGRADE_FROM_VERSION to test a specific release (default: latest), and
+# KCP_UPGRADE_E2E_PACKAGES to additionally run e2e packages against the
+# upgraded server, e.g. KCP_UPGRADE_E2E_PACKAGES="./test/e2e/apibinding/...".
+.PHONY: test-upgrade
+ifdef USE_GOTESTSUM
+test-upgrade: $(GOTESTSUM)
+endif
+test-upgrade: TEST_ARGS ?=
+test-upgrade: UPGRADE_FROM_VERSION ?= latest
+test-upgrade: WHAT ?= ./test/upgrade/...
+test-upgrade: build ## Run upgrade tests (previous release -> current tree)
+	hack/download-kcp-release.sh $(UPGRADE_FROM_VERSION) bin/upgrade-from
+	UNSAFE_E2E_HACK_DISABLE_ETCD_FSYNC=true \
+	KCP_UPGRADE_FROM_BINARY=$(ROOT_DIR)/bin/upgrade-from/current/kcp \
+	KCP_UPGRADE_TO_BINARY=$(ROOT_DIR)/bin/kcp \
+		$(GO_TEST) -race $(COUNT_ARG) $(WHAT) -timeout 30m $(TEST_ARGS)
 
 .PHONY: test
 ifdef USE_GOTESTSUM
@@ -406,9 +492,9 @@ test: WHAT ?= ./...
 test: ## Run tests
 	$(GO_TEST) -race $(COUNT_ARG) -coverprofile=coverage.txt -covermode=atomic $(TEST_ARGS) $$(go list "$(WHAT)" | grep -v -e 'test/e2e' -e 'test/integration')
 	for MOD in $$(git ls-files '**/go.mod' | sed 's,/go.mod,,'); do \
-		if [ "$$MOD" != "." ]; then \
+		if [ "$$MOD" != "." ] && [ "$$MOD" != "test/controller-runtime" ]; then \
 			echo "Testing $$MOD module..."; \
-			(cd $$MOD && $(GO_TEST) -race $(COUNT_ARG) -coverprofile=coverage.txt -covermode=atomic $(TEST_ARGS) $(WHAT)); \
+			(cd $$MOD && $(GO_TEST) -race $(COUNT_ARG) -coverprofile=coverage.txt -covermode=atomic $(TEST_ARGS) $$(go list "$(WHAT)" | grep -v 'test/load/testing')); \
 		fi; \
 	done
 
@@ -440,6 +526,9 @@ modules: ## Run go mod tidy to ensure modules are up to date
 verify-modules: modules  ## Verify go modules are up to date
 	hack/verify-go-modules.sh
 
+.PHONY: verify
+verify: verify-boilerplate verify-codegen verify-imports verify-go-versions verify-modules verify-k8s-deps ## Run all verify checks
+
 .PHONY: clean
 clean: clean-workdir ## Clean all
 	rm -fr $(TOOLS_DIR)
@@ -454,11 +543,15 @@ clean-workdir: ## Clean workdir
 download-e2e-logs: ## Download e2e logs from a given URL
 	OUT=$(OUT) URL=$(URL) hack/download-e2e-logs.sh
 
+.PHONY: tilt-kind-up
 tilt-kind-up:
 	./contrib/tilt/kind.sh
+
+.PHONY: tilt-kind-up-static
+tilt-kind-up-static:
+	./contrib/tilt/kind-static.sh
 
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
-include Makefile.venv

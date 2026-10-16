@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,8 +29,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/kcp-dev/sdk/cmd/help"
+	"github.com/kcp-dev/virtual-workspace-framework/crdpuller"
 
-	"github.com/kcp-dev/kcp/pkg/crdpuller"
+	"github.com/kcp-dev/kcp/pkg/server/scheme"
 )
 
 func main() {
@@ -77,7 +78,7 @@ func main() {
 			if err != nil {
 				return err
 			}
-			crds, err := puller.PullCRDs(context.TODO(), resourcesToSync...)
+			crds, err := puller.PullCRDs(context.TODO(), scheme.Scheme, resourcesToSync...)
 			if err != nil {
 				return err
 			}

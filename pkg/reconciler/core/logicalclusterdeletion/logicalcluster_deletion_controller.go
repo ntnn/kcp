@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -249,6 +249,14 @@ func (c *Controller) process(ctx context.Context, key string) error {
 	ctx = klog.NewContext(ctx, logger)
 
 	if logicalCluster.DeletionTimestamp.IsZero() {
+		return nil
+	}
+
+	// If the LC is currently being migrated, skip reconciliation. The
+	// migration controller handles etcd cleanup directly for migrating
+	// clusters via its Aborting phase.
+	if logicalCluster.Annotations["internal.kcp.io/migrating"] != "" {
+		logger.V(4).Info("logical cluster is migrating, skipping deletion reconciliation")
 		return nil
 	}
 

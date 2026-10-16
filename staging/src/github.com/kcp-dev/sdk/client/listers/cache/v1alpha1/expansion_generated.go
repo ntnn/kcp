@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,26 +18,18 @@ limitations under the License.
 
 package v1alpha1
 
-// CachedObjectClusterListerExpansion allows custom methods to be added to
-// CachedObjectClusterLister.
-type CachedObjectClusterListerExpansion interface{}
+// ClusterCachedResourceClusterListerExpansion allows custom methods to be added to
+// ClusterCachedResourceClusterLister.
+type ClusterCachedResourceClusterListerExpansion interface{}
 
-// CachedObjectListerExpansion allows custom methods to be added to
-// CachedObjectLister.
-type CachedObjectListerExpansion interface{}
+// ClusterCachedResourceListerExpansion allows custom methods to be added to
+// ClusterCachedResourceLister.
+type ClusterCachedResourceListerExpansion interface{}
 
-// CachedResourceClusterListerExpansion allows custom methods to be added to
-// CachedResourceClusterLister.
-type CachedResourceClusterListerExpansion interface{}
+// ClusterCachedResourceEndpointSliceClusterListerExpansion allows custom methods to be added to
+// ClusterCachedResourceEndpointSliceClusterLister.
+type ClusterCachedResourceEndpointSliceClusterListerExpansion interface{}
 
-// CachedResourceListerExpansion allows custom methods to be added to
-// CachedResourceLister.
-type CachedResourceListerExpansion interface{}
-
-// CachedResourceEndpointSliceClusterListerExpansion allows custom methods to be added to
-// CachedResourceEndpointSliceClusterLister.
-type CachedResourceEndpointSliceClusterListerExpansion interface{}
-
-// CachedResourceEndpointSliceListerExpansion allows custom methods to be added to
-// CachedResourceEndpointSliceLister.
-type CachedResourceEndpointSliceListerExpansion interface{}
+// ClusterCachedResourceEndpointSliceListerExpansion allows custom methods to be added to
+// ClusterCachedResourceEndpointSliceLister.
+type ClusterCachedResourceEndpointSliceListerExpansion interface{}

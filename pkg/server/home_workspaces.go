@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ func init() {
 	_ = tenancyv1alpha1.AddToScheme(homeWorkspaceScheme)
 }
 
-// WithHomeWorkspaces implements an HTTP handler, in the KCP server, which:
+// WithHomeWorkspaces implements an HTTP handler, in the kcp server, which:
 //
 //   - supports a special 'kubectl get workspace ~' request which returns either
 //     the old bucket-style workspace if it exists (= a LogicalCluster can be found)
@@ -206,11 +206,11 @@ func (h *homeWorkspaceHandler) ServeHTTP(rw http.ResponseWriter, req *http.Reque
 		decision, _, err := h.authz.Authorize(ctx, attr)
 		if err != nil {
 			logger.WithValues("cluster", homeClusterName, "user", effectiveUser.GetName()).Error(err, "error authorizing request")
-			responsewriters.Forbidden(ctx, attr, rw, req, authorization.WorkspaceAccessNotPermittedReason, homeWorkspaceCodecs)
+			responsewriters.Forbidden(attr, rw, req, authorization.WorkspaceAccessNotPermittedReason, homeWorkspaceCodecs)
 			return
 		}
 		if decision != authorizer.DecisionAllow {
-			responsewriters.Forbidden(ctx, attr, rw, req, authorization.WorkspaceAccessNotPermittedReason, homeWorkspaceCodecs)
+			responsewriters.Forbidden(attr, rw, req, authorization.WorkspaceAccessNotPermittedReason, homeWorkspaceCodecs)
 			return
 		}
 
@@ -228,6 +228,9 @@ func (h *homeWorkspaceHandler) ServeHTTP(rw http.ResponseWriter, req *http.Reque
 					tenancyv1alpha1.LogicalClusterTypeAnnotationKey:         "root:home",
 					core.LogicalClusterPathAnnotationKey:                    fmt.Sprintf("user:%s", effectiveUser.GetName()),
 				},
+			},
+			Spec: corev1alpha1.LogicalClusterSpec{
+				CreatedBy: workspace.CreatedByFromUserInfo(effectiveUser),
 			},
 		}
 		logicalCluster.Spec.Initializers, err = reconcilerworkspace.LogicalClustersInitializers(h.transitiveTypeResolver, h.getWorkspaceType, core.RootCluster.Path(), "home")

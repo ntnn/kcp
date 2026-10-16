@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,10 +23,11 @@ import (
 
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/context"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
 )
 
 func TestDigestUrl(t *testing.T) {
+	t.Parallel()
 	rootPathPrefix := "/services/replication/"
 	testCases := []struct {
 		urlPath             string
@@ -36,28 +37,28 @@ func TestDigestUrl(t *testing.T) {
 		expectedLogicalPath string
 	}{
 		{
-			urlPath:             "/services/replication/my-cluster/my-cachedresource/clusters/my-cluster/apis",
+			urlPath:             "/services/replication/my-cluster/my-clustercachedresource/clusters/my-cluster/apis",
 			expectedAccept:      true,
-			expectedKey:         "my-cluster/my-cachedresource",
+			expectedKey:         "my-cluster/my-clustercachedresource",
 			expectedCluster:     genericapirequest.Cluster{Name: "my-cluster", Wildcard: false},
-			expectedLogicalPath: "/services/replication/my-cluster/my-cachedresource/clusters/my-cluster",
+			expectedLogicalPath: "/services/replication/my-cluster/my-clustercachedresource/clusters/my-cluster",
 		},
 		{
-			urlPath:             "/services/replication/my-cluster/my-cachedresource/clusters/my-cluster",
+			urlPath:             "/services/replication/my-cluster/my-clustercachedresource/clusters/my-cluster",
 			expectedAccept:      true,
-			expectedKey:         "my-cluster/my-cachedresource",
+			expectedKey:         "my-cluster/my-clustercachedresource",
 			expectedCluster:     genericapirequest.Cluster{Name: "my-cluster", Wildcard: false},
-			expectedLogicalPath: "/services/replication/my-cluster/my-cachedresource/clusters/my-cluster",
+			expectedLogicalPath: "/services/replication/my-cluster/my-clustercachedresource/clusters/my-cluster",
 		},
 		{
-			urlPath:             "/services/replication/my-cluster/my-cachedresource/clusters/other-cluster",
+			urlPath:             "/services/replication/my-cluster/my-clustercachedresource/clusters/other-cluster",
 			expectedAccept:      true,
-			expectedKey:         "my-cluster/my-cachedresource",
+			expectedKey:         "my-cluster/my-clustercachedresource",
 			expectedCluster:     genericapirequest.Cluster{Name: "other-cluster", Wildcard: false},
-			expectedLogicalPath: "/services/replication/my-cluster/my-cachedresource/clusters/other-cluster",
+			expectedLogicalPath: "/services/replication/my-cluster/my-clustercachedresource/clusters/other-cluster",
 		},
 		{
-			urlPath:             "/services/replication/my-cluster/my-cachedresource/clusters",
+			urlPath:             "/services/replication/my-cluster/my-clustercachedresource/clusters",
 			expectedAccept:      false,
 			expectedKey:         "",
 			expectedCluster:     genericapirequest.Cluster{},
@@ -67,6 +68,7 @@ func TestDigestUrl(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.urlPath, func(t *testing.T) {
+			t.Parallel()
 			clusterName, key, logicalPath, accepted := digestURL(tc.urlPath, rootPathPrefix)
 			require.Equal(t, tc.expectedAccept, accepted, "Accepted should match expected value")
 			require.Equal(t, tc.expectedKey, key, "Key should match expected value")

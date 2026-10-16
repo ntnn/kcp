@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package validatingadmissionpolicy
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 
@@ -30,11 +31,9 @@ import (
 	"k8s.io/apiserver/pkg/admission/plugin/policy/validating"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
-	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
@@ -47,8 +46,10 @@ import (
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 	corev1alpha1informers "github.com/kcp-dev/sdk/client/informers/externalversions/core/v1alpha1"
 
+	"github.com/kcp-dev/kcp/pkg/admission/clusterannotation"
 	"github.com/kcp-dev/kcp/pkg/admission/initializers"
 	"github.com/kcp-dev/kcp/pkg/admission/kubequota"
+	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
 )
 
 const PluginName = "KCPValidatingAdmissionPolicy"
@@ -87,6 +88,8 @@ type KubeValidatingAdmissionPolicy struct {
 
 	getAPIBindings func(clusterName logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error)
 
+	dynamicRESTMapper *dynamicrestmapper.DynamicRESTMapper
+
 	delegatesLock sync.RWMutex
 	delegates     map[delegateKey]*stoppableValidatingAdmissionPolicy
 
@@ -99,6 +102,7 @@ var _ = initializers.WantsKubeInformers(&KubeValidatingAdmissionPolicy{})
 var _ = initializers.WantsKcpInformers(&KubeValidatingAdmissionPolicy{})
 var _ = initializers.WantsServerShutdownChannel(&KubeValidatingAdmissionPolicy{})
 var _ = initializers.WantsDynamicClusterClient(&KubeValidatingAdmissionPolicy{})
+var _ = initializers.WantsDynamicRESTMapper(&KubeValidatingAdmissionPolicy{})
 var _ = initializer.WantsAuthorizer(&KubeValidatingAdmissionPolicy{})
 var _ = admission.InitializationValidator(&KubeValidatingAdmissionPolicy{})
 
@@ -150,6 +154,10 @@ func (k *KubeValidatingAdmissionPolicy) SetDynamicClusterClient(c kcpdynamic.Clu
 	k.dynamicClusterClient = c
 }
 
+func (k *KubeValidatingAdmissionPolicy) SetDynamicRESTMapper(dynRESTMapper *dynamicrestmapper.DynamicRESTMapper) {
+	k.dynamicRESTMapper = dynRESTMapper
+}
+
 func (k *KubeValidatingAdmissionPolicy) SetAuthorizer(authz authorizer.Authorizer) {
 	k.authorizer = authz
 }
@@ -177,6 +185,10 @@ func (k *KubeValidatingAdmissionPolicy) Validate(ctx context.Context, a admissio
 	delegate, err := k.getOrCreateDelegate(sourceCluster, cluster.Name)
 	if err != nil {
 		return err
+	}
+
+	if undo := clusterannotation.Stamp(a, cluster.Name); undo != nil {
+		defer undo()
 	}
 
 	return delegate.Validate(ctx, a, o)
@@ -234,7 +246,10 @@ func (k *KubeValidatingAdmissionPolicy) getOrCreateDelegate(policyClusterName, t
 		}
 	}()
 
-	plugin := validating.NewPlugin(nil)
+	plugin, err := validating.NewPlugin(nil)
+	if err != nil {
+		return nil, err
+	}
 
 	delegate = &stoppableValidatingAdmissionPolicy{
 		Plugin: plugin,
@@ -256,10 +271,7 @@ func (k *KubeValidatingAdmissionPolicy) getOrCreateDelegate(policyClusterName, t
 	plugin.SetNamespaceInformer(k.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(targetClusterName))
 	plugin.SetExternalKubeClientSet(k.kubeClusterClient.Cluster(policyClusterName.Path()))
 
-	// TODO(ncdc): this is super inefficient to do per workspace
-	discoveryClient := memory.NewMemCacheClient(k.kubeClusterClient.Cluster(policyClusterName.Path()).Discovery())
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
-	plugin.SetRESTMapper(restMapper)
+	plugin.SetRESTMapper(k.dynamicRESTMapper.ForCluster(policyClusterName))
 
 	plugin.SetDynamicClient(k.dynamicClusterClient.Cluster(policyClusterName.Path()))
 	plugin.SetDrainedNotification(ctx.Done())
@@ -272,7 +284,7 @@ func (k *KubeValidatingAdmissionPolicy) getOrCreateDelegate(policyClusterName, t
 			validating.NewValidatingAdmissionPolicyAccessor,
 			validating.NewValidatingAdmissionPolicyBindingAccessor,
 			validating.CompilePolicy,
-			nil,
+			&deferredInformerFactory{},
 			dynamicClient,
 			restMapper,
 			cn,
@@ -314,4 +326,16 @@ func (k *KubeValidatingAdmissionPolicy) logicalClusterDeleted(clusterName logica
 type stoppableValidatingAdmissionPolicy struct {
 	*validating.Plugin
 	stop func()
+}
+
+// deferredInformerFactory is a helper object to minimize changes in our upstream kubernetes fork.
+// By returning an error on ForResource, we trigger a fallback to dynamic informers in the generic policy source.
+// We need dynamic informer creation to correctly scope the informer based on the target cluster, which can either
+// be the policy cluster or the cluster where the APIExport resides.
+type deferredInformerFactory struct {
+	informers.SharedInformerFactory
+}
+
+func (d *deferredInformerFactory) ForResource(resource schema.GroupVersionResource) (informers.GenericInformer, error) {
+	return nil, fmt.Errorf("deferring creation to dynamic informer. This is expected")
 }

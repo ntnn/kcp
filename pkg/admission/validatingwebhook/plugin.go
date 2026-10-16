@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import (
 	"io"
 	"sync"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -42,6 +41,7 @@ import (
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
+	"github.com/kcp-dev/kcp/pkg/admission/clusterannotation"
 	kcpinitializers "github.com/kcp-dev/kcp/pkg/admission/initializers"
 )
 
@@ -122,22 +122,14 @@ func (p *Plugin) Validate(ctx context.Context, attr admission.Attributes, o admi
 
 	plugin.SetExternalKubeClientSet(p.kubeClusterClient.Cluster(clusterName.Path()))
 	plugin.SetNamespaceInformer(p.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(clusterName))
-	plugin.SetHookSource(hookSource)
-	plugin.SetReadyFuncFromKCP(p.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(clusterName))
+	plugin.SetAPISource(hookSource)
 
 	if err := plugin.ValidateInitialization(); err != nil {
 		return fmt.Errorf("error validating ValidatingAdmissionWebhook initialization: %w", err)
 	}
 
-	// Add cluster annotation on create
-	if attr.GetOperation() == admission.Create {
-		u, ok := attr.GetObject().(metav1.Object)
-		if !ok {
-			return fmt.Errorf("unexpected type %T", attr.GetObject())
-		}
-		if undo := SetClusterAnnotation(u, clusterName); undo != nil {
-			defer undo()
-		}
+	if undo := clusterannotation.Stamp(attr, clusterName); undo != nil {
+		defer undo()
 	}
 
 	return plugin.Validate(ctx, attr, o)
@@ -238,31 +230,6 @@ func (p *Plugin) SetKcpInformers(local, global kcpinformers.SharedInformerFactor
 			},
 		},
 	)
-}
-
-// SetClusterAnnotation sets the cluster annotation on the given object to the given clusterName,
-// returning an undo function that can be used to revert the change.
-func SetClusterAnnotation(obj metav1.Object, clusterName logicalcluster.Name) func() {
-	undoFn := func() {
-		anns := obj.GetAnnotations()
-		delete(anns, logicalcluster.AnnotationKey)
-		obj.SetAnnotations(anns)
-	}
-
-	anns := obj.GetAnnotations()
-	if anns == nil {
-		obj.SetAnnotations(map[string]string{logicalcluster.AnnotationKey: clusterName.String()})
-		return undoFn
-	}
-
-	old, ok := anns[logicalcluster.AnnotationKey]
-	if ok && old == clusterName.String() {
-		return nil
-	}
-
-	anns[logicalcluster.AnnotationKey] = clusterName.String()
-	obj.SetAnnotations(anns)
-	return undoFn
 }
 
 func (p *Plugin) SetServerShutdownChannel(ch <-chan struct{}) {

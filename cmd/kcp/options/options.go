@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -85,7 +85,7 @@ func (o *Options) Complete(ctx context.Context) (*CompletedOptions, error) {
 }
 
 func (o *CompletedOptions) Validate() []error {
-	errs := []error{}
+	errs := []error{} //nolint:prealloc
 
 	errs = append(errs, o.Generic.Validate()...)
 	errs = append(errs, o.Server.Validate()...)

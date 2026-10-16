@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
@@ -35,6 +36,7 @@ import (
 )
 
 func TestMutateResourceRemainingStatus(t *testing.T) {
+	t.Parallel()
 	now := metav1.Now()
 	apibinding := &apisv1alpha2.APIBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -105,6 +107,7 @@ func TestMutateResourceRemainingStatus(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			controller := &Controller{}
 			apibindingCopy, err := controller.mutateResourceRemainingStatus(tt.resourceRemaining, apibinding.DeepCopy())
 
@@ -130,6 +133,7 @@ func TestMutateResourceRemainingStatus(t *testing.T) {
 }
 
 func TestAPIBindingTerminating(t *testing.T) {
+	t.Parallel()
 	now := metav1.Now()
 	apibinding := &apisv1alpha2.APIBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -163,6 +167,7 @@ func TestAPIBindingTerminating(t *testing.T) {
 			expectedResourceRemaining: gvrDeletionMetadataTotal{
 				gvrToNumRemaining:        map[schema.GroupVersionResource]int{},
 				finalizersToNumRemaining: map[string]int{},
+				gvrsWaitingForSuccessor:  sets.New[schema.GroupVersionResource](),
 			},
 		},
 		{
@@ -177,6 +182,7 @@ func TestAPIBindingTerminating(t *testing.T) {
 					{Group: "", Version: "v1", Resource: "pods"}:            1,
 				},
 				finalizersToNumRemaining: map[string]int{},
+				gvrsWaitingForSuccessor:  sets.New[schema.GroupVersionResource](),
 			},
 		},
 		{
@@ -193,13 +199,18 @@ func TestAPIBindingTerminating(t *testing.T) {
 				finalizersToNumRemaining: map[string]int{
 					"test.kcp.io/finalizer": 2,
 				},
+				gvrsWaitingForSuccessor: sets.New[schema.GroupVersionResource](),
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			controller := &Controller{
+				listAPIBindings: func(cluster logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error) {
+					return nil, nil
+				},
 				listResources: func(ctx context.Context, cluster logicalcluster.Path, gvr schema.GroupVersionResource) (*metav1.PartialObjectMetadataList, error) {
 					if tt.existingObjects == nil {
 						return &metav1.PartialObjectMetadataList{Items: []metav1.PartialObjectMetadata{}}, nil

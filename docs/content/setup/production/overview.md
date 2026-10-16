@@ -19,7 +19,7 @@ The main API endpoint for clients to access kcp. This is the main entry point fo
 
   1. **Workspace scheduling**: When a new workspace is scheduled, the shard contacts the front-proxy to randomly pick a shard for the new workspace
 
-  2. **Endpoint updates**: When an `APIExportEndpointSlice` or `CachedResourceEndpointSlice` URL is updated, the update happens via the front-proxy
+  2. **Endpoint updates**: When an `APIExportEndpointSlice` or `ClusterCachedResourceEndpointSlice` URL is updated, the update happens via the front-proxy
 
 **Configuration:**
 - Set `--externalHostname` or `spec.external.hostname` in front-proxy or shard configurations
@@ -44,7 +44,7 @@ kcp supports running virtual workspaces outside shards, but the recommended appr
 After deployment, you can verify the configuration by checking shard objects:
 
 ```bash
-kubectl get shards 
+kubectl get shards
 ```
 
 Output example:
@@ -128,7 +128,7 @@ if shard.Spec.VirtualWorkspaceURL == "" {
 - **Edge encryption**: CloudFlare integration
 - **Certificate management**: Mixed (edge + internal)
 
-In this scenario we have two front-proxy. One secured by CloudFlare, but working only with OIDC auth, and another internal front-proxy 
+In this scenario we have two front-proxy. One secured by CloudFlare, but working only with OIDC auth, and another internal front-proxy
 secured by an internal CA for internal clients.
 
 ![](dual-proxy.svg)

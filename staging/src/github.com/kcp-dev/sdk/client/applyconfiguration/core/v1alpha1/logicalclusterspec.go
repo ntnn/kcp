@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,11 +24,28 @@ import (
 
 // LogicalClusterSpecApplyConfiguration represents a declarative configuration of the LogicalClusterSpec type for use
 // with apply.
+//
+// LogicalClusterSpec is the specification of the LogicalCluster resource.
 type LogicalClusterSpecApplyConfiguration struct {
-	DirectlyDeletable *bool                                    `json:"directlyDeletable,omitempty"`
-	Owner             *LogicalClusterOwnerApplyConfiguration   `json:"owner,omitempty"`
-	Initializers      []corev1alpha1.LogicalClusterInitializer `json:"initializers,omitempty"`
-	Terminators       []corev1alpha1.LogicalClusterTerminator  `json:"terminators,omitempty"`
+	// DirectlyDeletable indicates that this logical cluster can be directly deleted by the user
+	// from within by deleting the LogicalCluster object.
+	DirectlyDeletable *bool `json:"directlyDeletable,omitempty"`
+	// owner is a reference to a resource controlling the life-cycle of this logical cluster.
+	// On deletion of the LogicalCluster, the finalizer core.kcp.io/logicalcluster is
+	// removed from the owner.
+	//
+	// When this object is deleted, but the owner is not deleted, the owner is deleted
+	// too.
+	Owner *LogicalClusterOwnerApplyConfiguration `json:"owner,omitempty"`
+	// createdBy is the user who owns this logical cluster. This is the user who
+	// created the workspace.
+	CreatedBy *OwnerUserInfoApplyConfiguration `json:"createdBy,omitempty"`
+	// initializers are set on creation by the system and copied to status when
+	// initialization starts.
+	Initializers []corev1alpha1.LogicalClusterInitializer `json:"initializers,omitempty"`
+	// Terminators are set on creation by the system and copied to status when
+	// termination starts.
+	Terminators []corev1alpha1.LogicalClusterTerminator `json:"terminators,omitempty"`
 }
 
 // LogicalClusterSpecApplyConfiguration constructs a declarative configuration of the LogicalClusterSpec type for use with
@@ -50,6 +67,14 @@ func (b *LogicalClusterSpecApplyConfiguration) WithDirectlyDeletable(value bool)
 // If called multiple times, the Owner field is set to the value of the last call.
 func (b *LogicalClusterSpecApplyConfiguration) WithOwner(value *LogicalClusterOwnerApplyConfiguration) *LogicalClusterSpecApplyConfiguration {
 	b.Owner = value
+	return b
+}
+
+// WithCreatedBy sets the CreatedBy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the CreatedBy field is set to the value of the last call.
+func (b *LogicalClusterSpecApplyConfiguration) WithCreatedBy(value *OwnerUserInfoApplyConfiguration) *LogicalClusterSpecApplyConfiguration {
+	b.CreatedBy = value
 	return b
 }
 

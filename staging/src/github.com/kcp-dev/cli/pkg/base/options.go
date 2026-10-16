@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,10 +28,17 @@ type Options struct {
 	// OptOutOfDefaultKubectlFlags indicates that the standard kubectl/kubeconfig-related flags should not be bound
 	// by default.
 	OptOutOfDefaultKubectlFlags bool
+	// OptOutOfWorkspaceFlag indicates that the --workspace/-w flag should not be bound.
+	OptOutOfWorkspaceFlag bool
+	// OptOutOfWorkspaceFlagShorthand indicates that --workspace should be bound without its "-w"
+	// shorthand, freeing "-w" for a command-specific flag.
+	OptOutOfWorkspaceFlagShorthand bool
 	// Kubeconfig specifies kubeconfig file(s).
 	Kubeconfig string
 	// KubectlOverrides stores the extra client connection fields, such as context, user, etc.
 	KubectlOverrides *clientcmd.ConfigOverrides
+	// Workspace is an optional workspace path to target, overriding the current workspace in the kubeconfig.
+	Workspace string
 
 	genericclioptions.IOStreams
 
@@ -54,18 +61,21 @@ func (o *Options) BindFlags(cmd *cobra.Command) {
 		return
 	}
 
-	cmd.Flags().StringVar(&o.Kubeconfig, "kubeconfig", o.Kubeconfig, "path to the kubeconfig file")
+	cmd.Flags().StringVar(&o.Kubeconfig, "kubeconfig", o.Kubeconfig, "Path to the kubeconfig file")
 
-	// We add only a subset of kubeconfig-related flags to the plugin.
-	// All those with LongName == "" will be ignored.
+	if !o.OptOutOfWorkspaceFlag {
+		shorthand := "w"
+		if o.OptOutOfWorkspaceFlagShorthand {
+			shorthand = ""
+		}
+		cmd.Flags().StringVarP(&o.Workspace, "workspace", shorthand, o.Workspace,
+			"Workspace path to target. If not specified, the current workspace from the kubeconfig will be used. "+
+				"Use a leading ':' for absolute paths (e.g. ':root:my-ws'), or omit it for relative paths (e.g. 'my-ws'). "+
+				"'.' stays in the current workspace, '..' navigates to the parent workspace.",
+		)
+	}
+
 	kubectlConfigOverrideFlags := clientcmd.RecommendedConfigOverrideFlags("")
-	kubectlConfigOverrideFlags.AuthOverrideFlags.ClientCertificate.LongName = ""
-	kubectlConfigOverrideFlags.AuthOverrideFlags.ClientKey.LongName = ""
-	kubectlConfigOverrideFlags.AuthOverrideFlags.Impersonate.LongName = ""
-	kubectlConfigOverrideFlags.AuthOverrideFlags.ImpersonateGroups.LongName = ""
-	kubectlConfigOverrideFlags.ContextOverrideFlags.ClusterName.LongName = ""
-	kubectlConfigOverrideFlags.Timeout.LongName = ""
-
 	clientcmd.BindOverrideFlags(o.KubectlOverrides, cmd.PersistentFlags(), kubectlConfigOverrideFlags)
 }
 
@@ -76,6 +86,15 @@ func (o *Options) Complete() error {
 		loadingRules.ExplicitPath = o.Kubeconfig
 
 		o.ClientConfig = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, o.KubectlOverrides)
+	}
+
+	// If the workspace flag is set, wrap the given ClientConfig to override
+	// the server URL to point to a specific workspace.
+	if o.Workspace != "" {
+		o.ClientConfig = &workspaceOverrideClientConfig{
+			delegate:  o.ClientConfig,
+			workspace: o.Workspace,
+		}
 	}
 
 	return nil

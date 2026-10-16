@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import (
 )
 
 func TestProcessResourceIdentity(t *testing.T) {
+	t.Parallel()
 	tests := map[string]struct {
 		path             string
 		expectError      bool
@@ -113,6 +114,7 @@ func TestProcessResourceIdentity(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			u, err := url.Parse(test.path)
 			require.NoError(t, err, "error parsing path %q to URL", test.path)
 

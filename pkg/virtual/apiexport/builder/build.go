@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
+	apiuser "k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	genericapiserver "k8s.io/apiserver/pkg/server"
@@ -39,6 +41,14 @@ import (
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
+	"github.com/kcp-dev/virtual-workspace-framework/framework"
+	virtualdynamic "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apidefinition"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apiserver"
+	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/forwardingregistry"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/hops"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/rootapiserver"
 
 	"github.com/kcp-dev/kcp/pkg/authorization"
 	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
@@ -46,13 +56,6 @@ import (
 	virtualapiexportauth "github.com/kcp-dev/kcp/pkg/virtual/apiexport/authorizer"
 	"github.com/kcp-dev/kcp/pkg/virtual/apiexport/controllers/apireconciler"
 	"github.com/kcp-dev/kcp/pkg/virtual/apiexport/schemas"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework"
-	virtualdynamic "github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/apidefinition"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/apiserver"
-	dynamiccontext "github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/context"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/forwardingregistry"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/rootapiserver"
 )
 
 const (
@@ -103,6 +106,12 @@ func BuildVirtualWorkspace(
 		}),
 
 		BootstrapAPISetManagement: func(mainConfig genericapiserver.CompletedConfig) (apidefinition.APIDefinitionSetGetter, error) {
+			// This virtual workspace serves resources by delegating to the
+			// shard, and the shard may forward some of them straight back here.
+			// Carrying the hop count on those calls is what lets that cycle be
+			// cut off instead of spinning.
+			cfg := hops.WrapConfig(cfg)
+
 			dynamicClient, err := kcpdynamic.NewForConfig(cfg)
 			if err != nil {
 				return nil, fmt.Errorf("error creating privileged dynamic kcp client: %w", err)
@@ -138,18 +147,9 @@ func BuildVirtualWorkspace(
 					return nil, fmt.Errorf("error marshaling warrant: %w", err)
 				}
 
-				// Impersonate the request user and add the warrant as an extra
+				// Impersonate the request user and add the warrant as an extra.
 				impersonationConfig := rest.CopyConfig(cfg)
-				impersonationConfig.Impersonate = rest.ImpersonationConfig{
-					UserName: user.GetName(),
-					Groups:   user.GetGroups(),
-					UID:      user.GetUID(),
-					Extra:    user.GetExtra(),
-				}
-				if impersonationConfig.Impersonate.Extra == nil {
-					impersonationConfig.Impersonate.Extra = map[string][]string{}
-				}
-				impersonationConfig.Impersonate.Extra[validation.WarrantExtraKey] = append(impersonationConfig.Impersonate.Extra[validation.WarrantExtraKey], string(bs))
+				impersonationConfig.Impersonate = newImpersonationConfig(user, string(bs))
 				impersonatedClient, err := kcpdynamic.NewForConfig(impersonationConfig)
 				if err != nil {
 					return nil, fmt.Errorf("error generating dynamic client: %w", err)
@@ -319,4 +319,21 @@ type apiDefinitionWithCancel struct {
 func (d *apiDefinitionWithCancel) TearDown() {
 	d.cancelFn()
 	d.APIDefinition.TearDown()
+}
+
+// newImpersonationConfig builds a rest.ImpersonationConfig for the given user,
+// deep-copying the Extra map to avoid concurrent map writes when multiple
+// requests share the same user.Info reference.
+func newImpersonationConfig(u apiuser.Info, warrants ...string) rest.ImpersonationConfig {
+	extra := make(map[string][]string, len(u.GetExtra()))
+	for k, v := range u.GetExtra() {
+		extra[k] = slices.Clone(v)
+	}
+	extra[validation.WarrantExtraKey] = append(extra[validation.WarrantExtraKey], warrants...)
+	return rest.ImpersonationConfig{
+		UserName: u.GetName(),
+		Groups:   u.GetGroups(),
+		UID:      u.GetUID(),
+		Extra:    extra,
+	}
 }

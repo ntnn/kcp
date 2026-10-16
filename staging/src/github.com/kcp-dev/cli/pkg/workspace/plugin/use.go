@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,11 +29,13 @@ import (
 	"github.com/spf13/cobra"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/klog/v2"
 
 	"github.com/kcp-dev/cli/pkg/base"
 	pluginhelpers "github.com/kcp-dev/cli/pkg/helpers"
@@ -70,8 +72,10 @@ type UseWorkspaceOptions struct {
 
 // NewUseWorkspaceOptions returns a new UseWorkspaceOptions.
 func NewUseWorkspaceOptions(streams genericclioptions.IOStreams) *UseWorkspaceOptions {
+	opts := base.NewOptions(streams)
+	opts.OptOutOfWorkspaceFlag = true
 	return &UseWorkspaceOptions{
-		Options: base.NewOptions(streams),
+		Options: opts,
 
 		newKCPClusterClient: newKCPClusterClient,
 		modifyConfig: func(configAccess clientcmd.ConfigAccess, newConfig *clientcmdapi.Config) error {
@@ -170,6 +174,17 @@ func (o *UseWorkspaceOptions) Run(ctx context.Context) (err error) {
 			return err
 		}
 		return o.commitConfig(ctx, currentContext, u, nil)
+	case name == ":admin":
+		// :admin is a reserved pseudo-workspace: the Admin workspace, an
+		// installation-wide administrative view served by the admin virtual
+		// workspace (/services/admin) identically on every shard and reached
+		// through the front-proxy.
+		u, err := o.currentBaseURL()
+		if err != nil {
+			return err
+		}
+		u.Path = path.Join(u.Path, "services", "admin")
+		return o.commitConfig(ctx, currentContext, u, nil)
 	case name == ".":
 		cfg, err := o.ClientConfig.ClientConfig()
 		if err != nil {
@@ -186,7 +201,15 @@ func (o *UseWorkspaceOptions) Run(ctx context.Context) (err error) {
 
 	u, current, err := o.parseCurrentLogicalCluster()
 	if err != nil {
-		return err
+		// The current context may not point to a workspace at all, e.g.
+		// inside the :admin pseudo-workspace. Absolute paths can still be
+		// resolved against the base URL.
+		if name[0] != ':' {
+			return err
+		}
+		if u, err = o.currentBaseURL(); err != nil {
+			return err
+		}
 	}
 
 	// make relative paths absolute
@@ -395,6 +418,26 @@ func (o *UseWorkspaceOptions) currentRootURL() (*url.URL, error) {
 	return u, nil
 }
 
+// currentBaseURL returns the current context's server URL with any known kcp
+// path suffix (/clusters/<path> or /services/...) stripped.
+func (o *UseWorkspaceOptions) currentBaseURL() (*url.URL, error) {
+	config, err := o.ClientConfig.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	if u, _, err := pluginhelpers.ParseClusterURL(config.Host); err == nil {
+		return u, nil
+	}
+	u, err := url.Parse(config.Host)
+	if err != nil {
+		return nil, err
+	}
+	if i := strings.Index(u.Path, "/services/"); i >= 0 {
+		u.Path = u.Path[:i]
+	}
+	return u, nil
+}
+
 func (o *UseWorkspaceOptions) parseCurrentLogicalCluster() (*url.URL, *logicalcluster.Path, error) {
 	config, err := o.ClientConfig.ClientConfig()
 	if err != nil {
@@ -411,7 +454,8 @@ func (o *UseWorkspaceOptions) parseCurrentLogicalCluster() (*url.URL, *logicalcl
 func getAPIBindings(ctx context.Context, kcpClusterClient kcpclientset.ClusterInterface, host string) ([]apisv1alpha2.APIBinding, error) {
 	_, clusterName, err := pluginhelpers.ParseClusterURL(host)
 	if err != nil {
-		return nil, err
+		// not a workspace URL (e.g. the :admin pseudo-workspace) - no bindings.
+		return nil, nil //nolint:nilerr
 	}
 
 	apiBindings, err := kcpClusterClient.Cluster(clusterName).ApisV1alpha2().APIBindings().List(ctx, metav1.ListOptions{})
@@ -420,6 +464,11 @@ func getAPIBindings(ctx context.Context, kcpClusterClient kcpclientset.ClusterIn
 		return nil, nil
 	}
 	if err != nil {
+		// If the server doesn't have the API, it's expected. Log to debug, don't return an error.
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			klog.V(4).Infof("error checking APIBindings: %v", err)
+			return nil, nil
+		}
 		return nil, err
 	}
 
@@ -466,8 +515,10 @@ type CurrentWorkspaceOptions struct {
 
 // NewCurrentWorkspaceOptions returns a new CurrentWorkspaceOptions.
 func NewCurrentWorkspaceOptions(streams genericclioptions.IOStreams) *CurrentWorkspaceOptions {
+	opts := base.NewOptions(streams)
+	opts.OptOutOfWorkspaceFlag = true
 	return &CurrentWorkspaceOptions{
-		Options: base.NewOptions(streams),
+		Options: opts,
 	}
 }
 
@@ -490,6 +541,15 @@ func (o *CurrentWorkspaceOptions) Run(ctx context.Context) error {
 type shortWorkspaceOutput bool
 
 func printCurrentWorkspace(out io.Writer, host string, shortWorkspaceOutput shortWorkspaceOutput, workspaceType *tenancyv1alpha1.WorkspaceTypeReference) error {
+	if strings.HasSuffix(strings.TrimSuffix(host, "/"), "/services/admin") {
+		if shortWorkspaceOutput {
+			_, err := fmt.Fprintln(out, ":admin")
+			return err
+		}
+		_, err := fmt.Fprintln(out, "Current workspace is ':admin' (admin workspace).")
+		return err
+	}
+
 	_, clusterName, err := pluginhelpers.ParseClusterURL(host)
 	if err != nil {
 		if shortWorkspaceOutput {

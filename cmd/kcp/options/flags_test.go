@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 )
 
 func TestNamedFlagSetOrder(t *testing.T) {
+	t.Parallel()
 	fss := flag.NamedFlagSets{}
 	NewOptions(".kcp").AddFlags(&fss)
 

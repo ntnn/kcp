@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@ import (
 	"k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	"k8s.io/apiextensions-apiserver/pkg/registry/customresource"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/validation/path"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -40,9 +39,8 @@ import (
 	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/tenancy/termination"
-
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/apiserver"
-	registry "github.com/kcp-dev/kcp/pkg/virtual/framework/forwardingregistry"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apiserver"
+	registry "github.com/kcp-dev/virtual-workspace-framework/pkg/forwardingregistry"
 )
 
 // filteredLogicalClusterReadWriteRestStorage creates a RestProvider which will
@@ -99,20 +97,26 @@ func filteredLogicalClusterStatusWriteOnly(
 			statusSpec = &apiextensions.CustomResourceSubresourceStatus{}
 		}
 
+		_, scaleEnabled := subresourcesSchemaValidator["scale"]
+		var scaleSpec *apiextensions.CustomResourceSubresourceScale
+		if scaleEnabled {
+			scaleSpec = &apiextensions.CustomResourceSubresourceScale{}
+		}
+
 		strategy := customresource.NewStrategy(
 			typer,
 			namespaceScoped,
 			kind,
-			path.ValidatePathSegmentName,
+			registry.ValidatePathSegmentName,
 			schemaValidator,
 			statusSchemaValidate,
 			structuralSchema,
 			statusSpec,
-			nil, // no scale subresource needed
+			scaleSpec,
 			[]apiextensionsv1.SelectableField{},
 		)
 
-		storage, statusStorage := registry.NewStorage(
+		storage, statusStorage, scaleStorage := registry.NewStorage(
 			ctx,
 			resource,
 			"", // no hash, as this is not backed by an APIExport
@@ -155,6 +159,31 @@ func filteredLogicalClusterStatusWriteOnly(
 				TableConvertorFunc:      statusStorage.TableConvertorFunc,
 				CategoriesProviderFunc:  statusStorage.CategoriesProviderFunc,
 				ResetFieldsStrategyFunc: statusStorage.ResetFieldsStrategyFunc,
+			}
+		}
+
+		if scaleEnabled {
+			subresourceStorages["scale"] = &struct {
+				registry.FactoryFunc
+				registry.DestroyerFunc
+
+				registry.GetterFunc
+				registry.UpdaterFunc
+				// patch is implicit as we have get + update
+
+				registry.TableConvertorFunc
+				registry.CategoriesProviderFunc
+				registry.ResetFieldsStrategyFunc
+			}{
+				FactoryFunc:   scaleStorage.FactoryFunc,
+				DestroyerFunc: scaleStorage.DestroyerFunc,
+
+				GetterFunc:  scaleStorage.GetterFunc,
+				UpdaterFunc: scaleStorage.UpdaterFunc,
+
+				TableConvertorFunc:      scaleStorage.TableConvertorFunc,
+				CategoriesProviderFunc:  scaleStorage.CategoriesProviderFunc,
+				ResetFieldsStrategyFunc: scaleStorage.ResetFieldsStrategyFunc,
 			}
 		}
 
@@ -221,11 +250,25 @@ func validateTerminatorStatusUpdate(terminator corev1alpha1.LogicalClusterTermin
 			)},
 		)
 
+		// Allow updates that don't touch terminators (e.g. condition-only status
+		// updates while termination is still pending).
+		if slices.Equal(previous, current) {
+			return nil
+		}
+
+		// Otherwise require exactly one terminator removed and it must be the one
+		// this VW is scoped to.
 		if len(previous)-len(current) != 1 {
 			return invalidUpdateErr
 		}
 		if slices.Contains(current, string(terminator)) {
 			return invalidUpdateErr
+		}
+		// Ensure no new terminators were introduced (current must be a subset of previous).
+		for _, c := range current {
+			if !slices.Contains(previous, c) {
+				return invalidUpdateErr
+			}
 		}
 
 		return nil

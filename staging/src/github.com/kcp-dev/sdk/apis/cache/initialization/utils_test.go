@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 )
 
 func TestInitializerToLabel(t *testing.T) {
+	t.Parallel()
 	for _, testCase := range []corev1alpha1.LogicalClusterInitializer{
 		"simple:root:org:ws:whatever",
 		"QualifiedName:root:org:ws:whatever",

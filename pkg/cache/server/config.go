@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,14 +34,19 @@ import (
 	apiopenapi "k8s.io/apiserver/pkg/endpoints/openapi"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	kubeoptions "k8s.io/kubernetes/pkg/kubeapiserver/options"
 
 	kcpapiextensionsclientset "github.com/kcp-dev/client-go/apiextensions/client"
 	kcpapiextensionsinformers "github.com/kcp-dev/client-go/apiextensions/informers"
 	"github.com/kcp-dev/embeddedetcd"
+	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
+	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
 	cacheclient "github.com/kcp-dev/kcp/pkg/cache/client"
 	"github.com/kcp-dev/kcp/pkg/cache/client/shard"
 	cacheserveroptions "github.com/kcp-dev/kcp/pkg/cache/server/options"
+	"github.com/kcp-dev/kcp/pkg/reconciler/cache/clustercachedresources"
 	"github.com/kcp-dev/kcp/pkg/server/filters"
 )
 
@@ -66,6 +71,7 @@ type completedConfig struct {
 type ExtraConfig struct {
 	ApiExtensionsClusterClient         kcpapiextensionsclientset.ClusterInterface
 	ApiExtensionsSharedInformerFactory kcpapiextensionsinformers.SharedInformerFactory
+	KcpSharedInformerFactory           kcpinformers.SharedInformerFactory
 }
 
 type CompletedConfig struct {
@@ -97,15 +103,24 @@ func NewConfig(opts *cacheserveroptions.CompletedOptions, optionalLocalShardRest
 		}
 		c.EmbeddedEtcd.LogLevel = "error"
 	}
-	// change the storage prefix under which all resources are kept
-	// this allows us to store the same GR under a different
-	// prefix than the kcp server. It is useful when this server
-	// shares the database with a kcp instance.
+
+	// The cache server must never share a storage prefix with a shard: its
+	// keys are <shard>/<cluster>/<name> where a shard's are <cluster>/<name>,
+	// so co-located keyspaces interleave — shard rows break cache lists
+	// ("had 2 parts, wanted 3") and the poisoned indexes duplicate objects
+	// per path ("multiple apiexports found"). Default the prefix to /cache,
+	// and when `--etcd-prefix` was passed (an embedded cache inherits the
+	// shard's etcd options verbatim), honour it as the base but still
+	// discern the cache with a /cache suffix.
 	//
 	// It boils down to the following on the storage level:
-	// for listing across shard:  /cache/<group>/<resource>:<identity>/*
-	// for listing for one shard: /cache/<group>/<resource>:<identity>/<shard>/*
-	opts.Etcd.StorageConfig.Prefix = "/cache"
+	// for listing across shard:  /<prefix>/<group>/<resource>:<identity>/*
+	// for listing for one shard: /<prefix>/<group>/<resource>:<identity>/<shard>/*
+	if opts.Etcd.StorageConfig.Prefix == kubeoptions.DefaultEtcdPathPrefix {
+		opts.Etcd.StorageConfig.Prefix = "/cache"
+	} else if !strings.HasSuffix(opts.Etcd.StorageConfig.Prefix, "/cache") {
+		opts.Etcd.StorageConfig.Prefix = strings.TrimSuffix(opts.Etcd.StorageConfig.Prefix, "/") + "/cache"
+	}
 
 	serverConfig := genericapiserver.NewRecommendedConfig(apiextensionsapiserver.Codecs)
 	serverConfig.OpenAPIV3Config = genericapiserver.DefaultOpenAPIV3Config(openapi.GetOpenAPIDefinitions, apiopenapi.NewDefinitionNamer(apiextensionsapiserver.Scheme))
@@ -126,10 +141,10 @@ func NewConfig(opts *cacheserveroptions.CompletedOptions, optionalLocalShardRest
 		}
 		serverConfig.LoopbackClientConfig = rest.CopyConfig(optionalLocalShardRestConfig)
 	}
-	if err := opts.Authentication.ApplyTo(&serverConfig.Config.Authentication, serverConfig.SecureServing, serverConfig.OpenAPIConfig); err != nil {
+	if err := opts.Authentication.ApplyTo(&serverConfig.Config.Authentication, serverConfig.Config.SecureServing); err != nil {
 		return nil, err
 	}
-	if err := opts.Authorization.ApplyTo(&serverConfig.Config.Authorization); err != nil {
+	if err := opts.Authorization.ApplyTo(&serverConfig.Config); err != nil {
 		return nil, err
 	}
 
@@ -138,15 +153,29 @@ func NewConfig(opts *cacheserveroptions.CompletedOptions, optionalLocalShardRest
 	}
 
 	serverConfig.Config.BuildHandlerChainFunc = func(apiHandler http.Handler, genericConfig *genericapiserver.Config) (secure http.Handler) {
+		apiHandler = filters.WithResourceIdentity(apiHandler)
 		apiHandler = genericapiserver.DefaultBuildHandlerChainFromAuthzToCompletion(apiHandler, genericConfig)
 		apiHandler = genericapiserver.DefaultBuildHandlerChainFromImpersonationToAuthz(apiHandler, genericConfig)
 		apiHandler = genericapiserver.DefaultBuildHandlerChainFromStartToBeforeImpersonation(apiHandler, genericConfig)
 
 		apiHandler = filters.WithAuditEventClusterAnnotation(apiHandler, nil)
+		// Defense-in-depth: after WithClusterScope has put the cluster on the
+		// request context, reject any request whose cluster.Name is path-shaped
+		// so a bogus name cannot leak into etcd keys.
+		apiHandler = filters.WithClusterNameShapeInvariant(apiHandler)
+		// After WithClusterScope and WithShardScope have populated the request
+		// context, reject shard-level URLs that arrived through a workspace-
+		// or shard-scoped prefix (e.g. /services/cache/shards/X/clusters/Y/metrics).
+		apiHandler = WithCacheShardLevelPaths(apiHandler)
 		apiHandler = filters.WithClusterScope(apiHandler)
 		apiHandler = WithShardScope(apiHandler)
 		apiHandler = WithServiceScope(apiHandler)
 		apiHandler = WithSyntheticDelay(apiHandler, opts.SyntheticDelay)
+
+		apiHandler = filters.WithAcceptHeader(apiHandler)
+		// Outermost, so a request that reached here through a workspace mount proxy
+		// is refused before anything looks at its identity headers.
+		apiHandler = WithRejectMountForwardedRequests(apiHandler)
 		return apiHandler
 	}
 
@@ -204,18 +233,39 @@ func NewConfig(opts *cacheserveroptions.CompletedOptions, optionalLocalShardRest
 		c.ApiExtensionsClusterClient,
 		resyncPeriod,
 	)
+	_ = c.ApiExtensionsSharedInformerFactory.Apiextensions().V1().CustomResourceDefinitions().Informer().GetIndexer().AddIndexers(cache.Indexers{byGroupResourceName: indexCRDByGroupResourceName})
+
+	kcpClient, err := kcpclientset.NewForConfig(serverConfig.LoopbackClientConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	c.KcpSharedInformerFactory = kcpinformers.NewSharedInformerFactory(
+		kcpClient,
+		resyncPeriod,
+	)
+
+	if err := c.KcpSharedInformerFactory.Cache().V1alpha1().ClusterCachedResources().Informer().GetIndexer().AddIndexers(cache.Indexers{
+		clustercachedresources.ByIdentityAndGroupResource: clustercachedresources.IndexByIdentityAndGroupResource,
+		clustercachedresources.ByGroupResource:            clustercachedresources.IndexByGroupResource,
+	}); err != nil {
+		return nil, err
+	}
 
 	crdRESTOptionsGetter := apiextensionsoptions.NewCRDRESTOptionsGetter(*opts.Etcd, serverConfig.ResourceTransformers, serverConfig.StorageObjectCountTracker)
 
 	c.ApiExtensions = &apiextensionsapiserver.Config{
 		GenericConfig: serverConfig,
 		ExtraConfig: apiextensionsapiserver.ExtraConfig{
-			CRDRESTOptionsGetter:  crdRESTOptionsGetter,
-			MasterCount:           1,
-			Client:                c.ApiExtensionsClusterClient,
-			Informers:             c.ApiExtensionsSharedInformerFactory,
-			ClusterAwareCRDLister: &crdClusterLister{lister: c.ApiExtensionsSharedInformerFactory.Apiextensions().V1().CustomResourceDefinitions().Lister()},
-			ConversionFactory:     &nopCRConversionFactory{},
+			CRDRESTOptionsGetter: crdRESTOptionsGetter,
+			MasterCount:          1,
+			Client:               c.ApiExtensionsClusterClient,
+			Informers:            c.ApiExtensionsSharedInformerFactory,
+			ClusterAwareCRDLister: newCacheResourceAwareCRDClusterLister(
+				c.ApiExtensionsSharedInformerFactory,
+				c.KcpSharedInformerFactory,
+			),
+			ConversionFactory: &nopCRConversionFactory{},
 		},
 	}
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 )
 
 func TestInit(t *testing.T) {
+	t.Parallel()
 	// Note: This test previously checked len(BuiltInAPIs) == len(builtInAPIResourceSchemas).
 	// testing for equal length in BuiltInAPIs and builtInAPIResourceSchemas is not enough because
 	// BuiltInAPIs has an entry per API version. If a resource is served from multiple API group versions,
@@ -49,5 +50,5 @@ func TestInit(t *testing.T) {
 		require.Truef(t, versionFound, "could not find version %s in API resource schema %s", api.GroupVersion.String(), schema.Name)
 	}
 
-	require.Equal(t, len(builtInAPIResourceSchemas), len(visitedResourceSchemas))
+	require.Len(t, visitedResourceSchemas, len(builtInAPIResourceSchemas))
 }

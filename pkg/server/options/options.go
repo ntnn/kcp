@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -33,10 +34,12 @@ import (
 	controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver/options"
 
 	etcdoptions "github.com/kcp-dev/embeddedetcd/options"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 
 	kcpadmission "github.com/kcp-dev/kcp/pkg/admission"
 	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
 	"github.com/kcp-dev/kcp/pkg/server/options/batteries"
+	kcpserviceaccount "github.com/kcp-dev/kcp/pkg/server/serviceaccount"
 )
 
 type Options struct {
@@ -53,18 +56,32 @@ type Options struct {
 }
 
 type ExtraOptions struct {
-	ProfilerAddress                       string
-	ShardKubeconfigFile                   string
-	RootShardKubeconfigFile               string
-	ShardBaseURL                          string
-	ShardExternalURL                      string
-	ShardName                             string
-	ShardVirtualWorkspaceURL              string
-	ShardClientCertFile                   string
-	ShardClientKeyFile                    string
-	ShardVirtualWorkspaceCAFile           string
+	ProfilerAddress             string
+	ShardKubeconfigFile         string
+	RootShardKubeconfigFile     string
+	ShardBaseURL                string
+	ShardExternalURL            string
+	ShardName                   string
+	ShardLabels                 map[string]string
+	ShardVirtualWorkspaceURL    string
+	ShardClientCertFile         string
+	ShardClientKeyFile          string
+	ShardVirtualWorkspaceCAFile string
+	// MountProxyClientCertFile / MountProxyClientKeyFile point to a client certificate
+	// (signed by the front-proxy requestheader CA) that the local proxy presents when it
+	// forwards a request for a mounted workspace back to the front-proxy. This lets the
+	// front-proxy trust the forwarded identity headers instead of clearing them.
+	MountProxyClientCertFile string
+	MountProxyClientKeyFile  string
+	// MountProxyServerCAFile points to an optional CA bundle that is trusted, in
+	// addition to the system roots, when the local proxy connects to a mount
+	// target. TLS verification of mount targets is mandatory.
+	MountProxyServerCAFile                string
+	ShardReplicaCount                     int
 	DiscoveryPollInterval                 time.Duration
 	ExperimentalBindFreePort              bool
+	LogicalClusterTotalObjectLimit        int64
+	LogicalClusterObjectCountScanInterval time.Duration
 	LogicalClusterAdminKubeconfig         string
 	ExternalLogicalClusterAdminKubeconfig string
 	ConversionCELTransformationTimeout    time.Duration
@@ -75,6 +92,8 @@ type ExtraOptions struct {
 	// --miniproxy-mapping-file flag of the front-proxy. Do NOT expose this flag to users via main server options.
 	// It is overridden by the kcp start command.
 	AdditionalMappingsFile string
+
+	ServiceAccountCache *kcpserviceaccount.Cache
 }
 
 type completedOptions struct {
@@ -96,6 +115,8 @@ type CompletedOptions struct {
 
 // NewOptions creates a new Options with default parameters.
 func NewOptions(rootDir string) *Options {
+	saCache := kcpserviceaccount.NewCache()
+
 	o := &Options{
 		GenericControlPlane: *controlplaneapiserver.NewOptions(),
 		EmbeddedEtcd:        *etcdoptions.NewOptions(rootDir),
@@ -112,17 +133,23 @@ func NewOptions(rootDir string) *Options {
 			ShardBaseURL:                       "",
 			ShardExternalURL:                   "",
 			ShardName:                          "root",
+			ShardReplicaCount:                  1,
 			DiscoveryPollInterval:              60 * time.Second,
 			ExperimentalBindFreePort:           false,
 			ConversionCELTransformationTimeout: time.Second,
 
-			BatteriesIncluded: sets.List[string](batteries.Defaults),
+			LogicalClusterTotalObjectLimit:        0,
+			LogicalClusterObjectCountScanInterval: 60 * time.Second,
+
+			BatteriesIncluded:   sets.List[string](batteries.Defaults),
+			ServiceAccountCache: saCache,
 		},
 	}
 
 	// override all the stuff
 	o.GenericControlPlane.SecureServing.ServerCert.CertDirectory = rootDir
 	o.GenericControlPlane.Authentication.ServiceAccounts.Issuers = []string{"https://kcp.default.svc"}
+	o.GenericControlPlane.Authentication.ServiceAccounts.OptionalTokenGetter = saCache.TokenGetter
 	o.GenericControlPlane.Etcd.StorageConfig.Transport.ServerList = []string{"embedded"}
 	o.GenericControlPlane.Authorization = nil // we have our own
 
@@ -149,24 +176,32 @@ func (o *Options) AddFlags(fss *cliflag.NamedFlagSets) {
 	etcdServers.Usage += " By default an embedded etcd server is started."
 
 	o.EmbeddedEtcd.AddFlags(fss.FlagSet("Embedded etcd"))
-	o.Controllers.AddFlags(fss.FlagSet("KCP Controllers"))
-	o.Authorization.AddFlags(fss.FlagSet("KCP Authorization"))
-	o.AdminAuthentication.AddFlags(fss.FlagSet("KCP Authentication"))
-	o.Virtual.AddFlags(fss.FlagSet("KCP Virtual Workspaces"))
-	o.HomeWorkspaces.AddFlags(fss.FlagSet("KCP Home Workspaces"))
-	o.Cache.AddFlags(fss.FlagSet("KCP Cache Server"))
+	o.Controllers.AddFlags(fss.FlagSet("kcp Controllers"))
+	o.Authorization.AddFlags(fss.FlagSet("kcp Authorization"))
+	o.AdminAuthentication.AddFlags(fss.FlagSet("kcp Authentication"))
+	o.Virtual.AddFlags(fss.FlagSet("kcp Virtual Workspaces"))
+	o.HomeWorkspaces.AddFlags(fss.FlagSet("kcp Home Workspaces"))
+	o.Cache.AddFlags(fss.FlagSet("kcp Cache Server"))
 
-	fs := fss.FlagSet("KCP")
+	fs := fss.FlagSet("kcp")
 	fs.StringVar(&o.Extra.ProfilerAddress, "profiler-address", o.Extra.ProfilerAddress, "[Address]:port to bind the profiler to")
 	fs.StringVar(&o.Extra.ShardKubeconfigFile, "shard-kubeconfig-file", o.Extra.ShardKubeconfigFile, "Kubeconfig holding admin(!) credentials to peer kcp shards.")
 	fs.StringVar(&o.Extra.RootShardKubeconfigFile, "root-shard-kubeconfig-file", o.Extra.RootShardKubeconfigFile, "Kubeconfig holding admin(!) credentials to the root kcp shard.")
 	fs.StringVar(&o.Extra.ShardBaseURL, "shard-base-url", o.Extra.ShardBaseURL, "Base URL to this kcp shard. Defaults to external address.")
 	fs.StringVar(&o.Extra.ShardExternalURL, "shard-external-url", o.Extra.ShardExternalURL, "URL used by outside clients to talk to this kcp shard. Defaults to external address.")
 	fs.StringVar(&o.Extra.ShardName, "shard-name", o.Extra.ShardName, "A name of this kcp shard. Defaults to the \"root\" name.")
+	// https://github.com/kubernetes/kubernetes/blob/f28b4c9efbca5c5c0af716d9f2d5702667ee8a45/staging/src/k8s.io/apiextensions-apiserver/pkg/apiserver/customresource_handler.go#L491-L495
+	// The --shard-replica-count is passed along and lands as
+	// masterCount in upstream which then causes a 5s delay on startup.
+	fs.IntVar(&o.Extra.ShardReplicaCount, "shard-replica-count", o.Extra.ShardReplicaCount, "Number of kcp server replicas serving this shard. Values greater than 1 delay CRD establishment by 5 seconds so all replicas can warm their caches before the CRD is served.")
+	fs.StringToStringVar(&o.Extra.ShardLabels, "shard-labels", o.Extra.ShardLabels, "Additional labels to set on this shard's Shard object, e.g. region=us-east-1. The Shard object is owned by the shard; labels are part of its configuration. The \"name\" label is always set to the shard name and cannot be overridden.")
 	fs.StringVar(&o.Extra.ShardVirtualWorkspaceCAFile, "shard-virtual-workspace-ca-file", o.Extra.ShardVirtualWorkspaceCAFile, "Path to a CA certificate file that is valid for the virtual workspace server.")
 	fs.StringVar(&o.Extra.ShardVirtualWorkspaceURL, "shard-virtual-workspace-url", o.Extra.ShardVirtualWorkspaceURL, "An external URL address of a virtual workspace server associated with this shard. Defaults to shard's base address.")
 	fs.StringVar(&o.Extra.ShardClientCertFile, "shard-client-cert-file", o.Extra.ShardClientCertFile, "Path to a client certificate file the shard uses to communicate with other system components.")
 	fs.StringVar(&o.Extra.ShardClientKeyFile, "shard-client-key-file", o.Extra.ShardClientKeyFile, "Path to a client certificate key file the shard uses to communicate with other system components.")
+	fs.StringVar(&o.Extra.MountProxyClientCertFile, "mount-proxy-client-cert-file", o.Extra.MountProxyClientCertFile, "Path to a client certificate file (signed by the front-proxy requestheader CA) the local proxy presents when forwarding a request for a mounted workspace back to the front-proxy.")
+	fs.StringVar(&o.Extra.MountProxyClientKeyFile, "mount-proxy-client-key-file", o.Extra.MountProxyClientKeyFile, "Path to the key file for --mount-proxy-client-cert-file.")
+	fs.StringVar(&o.Extra.MountProxyServerCAFile, "mount-proxy-server-ca-file", o.Extra.MountProxyServerCAFile, "Path to a CA bundle that is trusted in addition to the system roots when the local proxy connects to the target of a mounted workspace. Mount targets must serve https with a certificate that chains to the system roots or this bundle.")
 	fs.StringVar(&o.Extra.LogicalClusterAdminKubeconfig, "logical-cluster-admin-kubeconfig", o.Extra.LogicalClusterAdminKubeconfig, "Kubeconfig holding system:kcp:logical-cluster-admin credentials for connecting to other shards. Defaults to the loopback client")
 	fs.StringVar(&o.Extra.ExternalLogicalClusterAdminKubeconfig, "external-logical-cluster-admin-kubeconfig", o.Extra.ExternalLogicalClusterAdminKubeconfig, "Kubeconfig holding system:kcp:external-logical-cluster-admin credentials for connecting to the external address (e.g. the front-proxy). Defaults to the loopback client")
 	fs.StringVar(&o.Extra.RootIdentitiesFile, "root-identities-file", "", "Path to a YAML file used to bootstrap APIExport identities inside the root workspace. The YAML file must be structured as {\"identities\": [ {\"export\": \"<APIExport name>\", \"identity\": \"<APIExport identity>\"}, ... ]}. If a secret with matching APIExport name already exists inside kcp-system namespace, it will be left unchanged. Defaults to empty, i.e. no identities are bootstrapped.")
@@ -174,7 +209,13 @@ func (o *Options) AddFlags(fss *cliflag.NamedFlagSets) {
 	fs.BoolVar(&o.Extra.ExperimentalBindFreePort, "experimental-bind-free-port", o.Extra.ExperimentalBindFreePort, "Bind to a free port. --secure-port must be 0. Use the admin.kubeconfig to extract the chosen port.")
 	fs.MarkHidden("experimental-bind-free-port") //nolint:errcheck
 
+	fs.String("external-hostname", "", "DEPRECATED: This flag is deprecated and will be removed in a future release.")
+	fs.MarkHidden("external-hostname") //nolint:errcheck
+
 	fs.DurationVar(&o.Extra.ConversionCELTransformationTimeout, "conversion-cel-transformation-timeout", o.Extra.ConversionCELTransformationTimeout, "Maximum amount of time that CEL transformations may take per object conversion.")
+
+	fs.Int64Var(&o.Extra.LogicalClusterTotalObjectLimit, "logical-cluster-total-object-limit", o.Extra.LogicalClusterTotalObjectLimit, "Maximum total number of objects allowed in a logical cluster on this shard. 0 disables the default limit. The "+corev1alpha1.LogicalClusterMaxTotalObjectsAnnotationKey+" annotation on a LogicalCluster overrides this value for that logical cluster.")
+	fs.DurationVar(&o.Extra.LogicalClusterObjectCountScanInterval, "logical-cluster-object-count-scan-interval", o.Extra.LogicalClusterObjectCountScanInterval, "Interval at which etcd is scanned to count objects per logical cluster for total object count limit enforcement.")
 
 	fs.StringSliceVar(&o.Extra.BatteriesIncluded, "batteries-included", o.Extra.BatteriesIncluded, fmt.Sprintf(
 		`A list of batteries included (= default objects that might be unwanted in production, but are very helpful in trying out kcp or for development). These are the possible values: %s.
@@ -211,6 +252,14 @@ func (o *CompletedOptions) Validate() []error {
 	errs = append(errs, o.Virtual.Validate()...)
 	errs = append(errs, o.HomeWorkspaces.Validate()...)
 	errs = append(errs, o.Cache.Validate()...)
+
+	if o.Extra.ShardName != corev1alpha1.RootShard && len(o.Cache.Client.KubeconfigFile) == 0 {
+		errs = append(errs, fmt.Errorf("--cache-kubeconfig is required for non-root shards"))
+	}
+
+	if o.Extra.ShardReplicaCount < 1 {
+		errs = append(errs, fmt.Errorf("--shard-replica-count must be at least 1"))
+	}
 
 	differential := false
 	for i, b := range o.Extra.BatteriesIncluded {
@@ -290,18 +339,21 @@ func (o *Options) Complete(ctx context.Context, rootDir string) (*CompletedOptio
 	}
 
 	// ExternalAddress is the address used e.g. when generating
-	// kubeconfigs. It defaults to the default interface, usually the
-	// first non-loopback interface, e.g. 192.168.0.1.
-	// BindAddress is the address the server binds to, it defaults to
-	// 0.0.0.0 or ::.
-	//
-	// If BindAddress is set to a specific address, e.g. the loopback
-	// 127.0.0.1 the ExternalAddress is invalid and all URLs generated
-	// from it will not work.
-	//
-	// To prevent this ExternalAddress is set to the value of
-	// BindAddress if it wasn't set to a specific address.
-	if o.GenericControlPlane.GenericServerRunOptions.ExternalHost == "" && !o.GenericControlPlane.SecureServing.BindAddress.IsUnspecified() {
+	// kubeconfigs. This is the address clients should use to talk to
+	// this server, i.e. the shard url.
+	switch {
+	case o.Extra.ShardBaseURL != "":
+		// If the shard base URL is set, use it as the external host.
+		parsedShardBaseURL, err := url.Parse(o.Extra.ShardBaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --shard-base-url: %w", err)
+		}
+		o.GenericControlPlane.GenericServerRunOptions.ExternalHost = parsedShardBaseURL.Host
+	case !o.GenericControlPlane.SecureServing.BindAddress.IsUnspecified():
+		// If the shard base URL is not set but the bind-address was
+		// specified it is defaulted to the bind address. This is needed
+		// for the case where the server binds on a specific IP, e.g.
+		// when running kcp locally.
 		o.GenericControlPlane.GenericServerRunOptions.ExternalHost = o.GenericControlPlane.SecureServing.BindAddress.String()
 	}
 
@@ -396,6 +448,9 @@ func (o *Options) Complete(ctx context.Context, rootDir string) (*CompletedOptio
 	//  - we need to modify wildcardClusterNameRegex and crdWildcardPartialMetadataClusterNameRegex
 	o.Cache.Server.Etcd.EnableWatchCache = false
 	o.Cache.Server.SecureServing = completedGenericOptions.SecureServing
+	// Pass the client ca configured on the shard to the embedded cache server.
+	// The cache server will still only allow access to identities with the system:master group.
+	o.Cache.Server.Authentication.ClientCAFile = o.GenericControlPlane.Authentication.ClientCert.ClientCA
 	cacheCompletedOptions, err := o.Cache.Complete()
 	if err != nil {
 		return nil, err

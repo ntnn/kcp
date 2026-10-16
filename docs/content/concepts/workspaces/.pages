@@ -1,7 +1,0 @@
-nav:
-    - index.md
-    - workspace-types.md
-    - virtual-workspaces.md
-    - workspace-initialization.md
-    - workspace-termination.md
-    - mounts.md

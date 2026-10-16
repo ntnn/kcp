@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,11 +21,6 @@ limitations under the License.
 //
 // An example configuration:
 //
-//   - path: /services/
-//     backend: https://localhost:6444
-//     backend_server_ca: certs/kcp-ca-cert.pem
-//     proxy_client_cert: certs/proxy-client-cert.pem
-//     proxy_client_key: certs/proxy-client-key.pem
 //   - path: /
 //     backend: https://localhost:6443
 //     backend_server_ca: certs/kcp-ca-cert.pem

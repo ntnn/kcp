@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ func NewPriorityLevelConfigurationClusterInformer(client kcpkubernetes.ClusterIn
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredPriorityLevelConfigurationClusterInformer(client kcpkubernetes.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions kcpinternalinterfaces.TweakListOptionsFunc) kcpcache.ScopeableSharedIndexInformer {
 	return kcpinformers.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
@@ -77,7 +77,7 @@ func NewFilteredPriorityLevelConfigurationClusterInformer(client kcpkubernetes.C
 				}
 				return client.FlowcontrolV1beta2().PriorityLevelConfigurations().Watch(context.Background(), options)
 			},
-		},
+		}, client),
 		&apiflowcontrolv1beta2.PriorityLevelConfiguration{},
 		resyncPeriod,
 		indexers,

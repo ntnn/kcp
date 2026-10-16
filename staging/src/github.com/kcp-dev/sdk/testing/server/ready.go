@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ func WaitForReady(ctx context.Context, cfg *rest.Config) error {
 	}
 
 	if err := waitForEndpoint(ctx, client, "/livez"); err != nil {
-		return fmt.Errorf("server at %s didn't become ready: %w", cfg.Host, err)
+		return fmt.Errorf("server at %s didn't become alive: %w", cfg.Host, err)
 	}
 	if err := waitForEndpoint(ctx, client, "/readyz"); err != nil {
 		return fmt.Errorf("server at %s didn't become ready: %w", cfg.Host, err)

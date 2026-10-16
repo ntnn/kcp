@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2021 The KCP Authors.
+# Copyright 2021 The kcp Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,14 +31,41 @@ GITHUB_USER=${GITHUB_USER:-kcp-dev}
 GITHUB_REPO=${GITHUB_REPO:-kubernetes}
 BRANCH=${BRANCH:-kcp-1.31.0}
 
-current_version="$( GOPROXY=direct go mod edit -json | jq '.Replace[] | select(.Old.Path=="k8s.io/kubernetes") | .New.Version' --raw-output )"
+bump_root() {
+    local current_version="$( GOPROXY=direct go mod edit -json | jq '.Replace[] | select(.Old.Path=="k8s.io/kubernetes") | .New.Version' --raw-output )"
 
-# equivalent to go mod edit -replace
-is_gnu_sed() { sed --version >/dev/null 2>&1; }
-sed_args=( -i )
-if ! is_gnu_sed; then
-    sed_args+=( "" )
-fi
-sed "${sed_args[@]}" -e "s|${current_version}|${BRANCH}|g" -E -e "s,=> github.com/kcp-dev/kubernetes,=> github.com/${GITHUB_USER}/${GITHUB_REPO},g" go.mod
+    # equivalent to go mod edit -replace
+    is_gnu_sed() { sed --version >/dev/null 2>&1; }
+    local sed_args=( -i )
+    if ! is_gnu_sed; then
+        sed_args+=( "" )
+    fi
+    sed "${sed_args[@]}" -e "s|${current_version}|${BRANCH}|g" -E -e "s,=> github.com/kcp-dev/kubernetes,=> github.com/${GITHUB_USER}/${GITHUB_REPO},g" go.mod
 
-GOPROXY=direct go mod tidy
+    GOPROXY=direct go mod tidy
+}
+
+bump_module() {
+    local target="$1"
+    if ! [[ -d "$target" ]]; then
+        echo "target '$target' is not a directory"
+        exit 1
+    fi
+
+    go mod edit -json | jq -r '.Replace[] | "\(.Old.Path)=\(.New.Path)@\(.New.Version)"' | grep k8s.io \
+        | while read replace; do
+        go mod edit -modfile="./$target/go.mod" -replace "$replace"
+    done
+
+    # `go mod tidy` and `-modfile` with relative replacements fails as
+    # it tries to resolve the relative paths from cwd instead of the
+    # modfile location.
+    (
+        cd "$target"
+        go mod tidy
+    )
+}
+
+bump_root
+bump_module "staging/src/github.com/kcp-dev/virtual-workspace-framework"
+bump_module "docs/generators/cli-doc"

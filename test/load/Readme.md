@@ -1,125 +1,61 @@
 # Load Testing
 
-## 10000 workspaces reference architecture
+Load testing framework and loadtests for the kcp project. Please note this setup is intended to be
+used for load-testing only and not setting up fully production grade environments.
 
-Assumptions & Requirements:
+## Architecture
 
-* We want to test how a kcp installation with 10000 workspaces behaves on synthetic workloads
-* We do not want to test how easily kcp handles adding 10000 workspaces at once
-* We don't want to run etcd on machines which are hosting kcp
-* We will be using kcp-operator to setup a sharded kcp instance
-* The minimum amount of replicas for any component is 3
-* The loadtests are infrastructure provider agnostic. This will allow us and community members to
-experiment with different infrastructure sizes
-* We treat the rootshard like we would any other shard. It will be filled with regular workspaces
-So shard1 = rootshard
-* As the kcp-operator currently has no support for a dedicated cache server: We have decided to still
-work with the default model of having an embedded cache in the rootshard (even if it overloads the
-rootshard). Specifically this means when we have 3 shards, we create 1 Rootshard and 2 Shards
-* Results are stored in some permanent storage so we can use them for comparison later
+Please refer to the [drawing of the general layout](./architecture.excalidraw).
 
-### Architecture
+## Setup
 
-[drawing of the general layout](./architecture.excalidraw)
+Installation scripts and manuals are provided in [setup/Readme](./setup/Readme.md).
 
-### Node calculation
+## Usage
 
-All node calculations are based on the number of workspaces and use the following recommended constants:
+### Local Development
 
-* max_workspaces_per_shard = 3500
-* min_replicas = 3
-* kcp_server_buffer = 512MB
-* #kcp_cache_nodes = 1
-* #aux_nodes = 1
-* #frontproxy_nodes = 3
-* mem_per_workspace = 5MB
+All test cases are organized in the `testing` folder. You can run the entire suite using:
 
----
-
-1. We calculate the number of shards
-
-    ```txt
-    #shards = round_up(#workspaces / max_workspaces_per_shard)
-    ```
-
-1. Now we can calculate the number of etcd nodes.
-
-    ```txt
-    #etcd_nodes = #shards * min_replicas
-    ```
-
-1. We can calculcate the number of shards and their size in relation to the number of workspaces
-
-    ```txt
-    #shard_nodes = #shards * min_replicas
-    #actual_workspaces_per_shard = workspaces / shards
-    kcp_server_node_mem = kcp_server_buffer + (#actual_workspaces * mem_per_workspace)
-    ```
-
-The total number of all required nodes is calculated as follows
-
-  ```txt
-  #total_nodes = #frontproxy_nodes + #kcp_cache_nodes + #etcd_nodes + #kcp_server_nodes + #aux_nodes
-  ```
-
-#### Example for 10000 workspaces
-
-```txt
-#shards = 10000 / 3500 = 2,85 = 3
-#etcd_nodes = 3 * 3 = 9
-#shard_nodes = 3 * 3 = 9
-#actual_workspaces_per_shard = 10000 / 3 = 3333
-kcp_server_node_mem = 512 + (3333 * 5) = 17777MB
-#total_nodes =  3 + 1 + 9 + 3 + 1 = 17
+```sh
+go test ./testing/...
 ```
 
-### Testing Protocol
+The tests will prompt you for any specific required variables and configs.
 
-Mantra: We want to test how a kcp installation with 10000 workspaces behaves on simulated, regular
-activities. We don't want to test how easily we can add 10000 workspaces at once
+Alternatively you can run a subset of tests using standard `go test` syntax. E.g.:
 
-#### Procedure
+```sh
+go test ./testing/... -run ^TestExample
+```
 
-1. Create 10000 workspaces, APIExports, etc. and patiently wait for all of them to become ready
-2. Simulate real world activity by simulating end-users using custom kubeconfigs to create APIBindings
-and then CRUD on their custom api-objects
+### Report Creation
 
-##### Level 1 - 10000 empty workspaces
+If you are running the tests to create reports, please use the `suite.sh` helper script. It automatically
+ensures that all files get generated using unified timestamps in a `.loadtest-results` folder.
 
-We are just going to put 10000 empty workspaces into a kcp installation. We will have a nesting level
-setting so we can try out if nesting has any impact (it should not). This test case
-is extremely deterministic and has should spread workspaces relatively equally across shards.
-We mainly use this as a base consumption measurement and to verify nesting has no performance impact.
+```sh
+./suite.sh TestExample
+```
 
-##### Level 2 - Basic CRUD
+Additionally you can also overwrite default parameters, by supplying a custom config file:
 
-Every workspace has a type and we are going to do a basic parallel CRUD workflow which we will simulate
-using simple Kubernetes Jobs. The workflow is done on basic objects from a single provider using a
-singular APIExport.
+```sh
+./suite.sh --config config.example.json TestExample
+```
 
-##### Level 3 - Multiple Providers
+The script will show live output and is safe to run in jumphost environments where connectivity might
+break.
 
-We are multixplexing the level 2 example to use multiple providers.
+## Development
 
-##### Outlook
+The load-testing framework itself is organized in the `pkg` folder. You can run its unit
+tests directly using:
 
-We want to keep the initial version of the tests simple and deterministic. As a result the following
-topics have been discussed, but were considered not to be part of the first 3 level implementation:
+```sh
+go test ./pkg/...
+```
 
-* direct user interaction via simulated users
-* custom workspacetypes with initializers and finalizers
-* integrating the init-agent
-* nested workspaces living on different shards
-* having a chaos monkey randomly killing shards
+## Partitioning
 
-### Scraping of Metrics
-
-We plan on using a plain Prometheus to scrape all of the kcp-instanes: On a higher level we plan to
-monitor:
-
-* CPU + Mem on all components
-* Number of Goroutines over time
-* Request response times on front-proxy (probably percentiles). This could also alternatively be
-measured inside the testing suite (clientside)
-* Disk IO and size on both etcd and rootshard
-* Total number of workspaces (to compare expected with actual)
+You can partition your loadtest by providing it with a unique `start` number. Please be advised that this multiplexes your test. Any load you place will be multiplied by the number of partitions. Depending per test, adjust throughput values like qps accordingly.

@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package informer
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -35,12 +36,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apiserver/pkg/features"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
 	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
@@ -49,6 +52,7 @@ import (
 	kcpinformers "github.com/kcp-dev/client-go/informers"
 	"github.com/kcp-dev/logicalcluster/v3"
 
+	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
 	"github.com/kcp-dev/kcp/pkg/indexers"
 	"github.com/kcp-dev/kcp/pkg/projection"
 )
@@ -117,6 +121,9 @@ type GenericDiscoveringDynamicSharedInformerFactory[Informer cache.SharedIndexIn
 	// handlersLock protects multiple writers racing to update handlers.
 	handlersLock sync.Mutex
 	handlers     atomic.Value
+
+	gvrLifecycleListenersLock sync.Mutex
+	gvrLifecycleListeners     []*gvrLifecycleListener
 
 	// updateCh receives notifications for all CRD add/update/delete events, so we can start new informers and stop
 	// informers no longer needed.
@@ -222,33 +229,45 @@ func NewScopedDiscoveringDynamicSharedInformerFactory(
 // shared informers that discovers new types and informs on updates to resources of
 // those types.
 // It receives the GVR-related information by delegating to a GVRSource.
+//
+// The filterFunc filters events going to handlers.
+// The ignoreFunc is passed to .SetIgnoreFunc on each informer,
+// filtering objects from being processed and stored at all.
 func NewDiscoveringDynamicSharedInformerFactory(
 	dynamicClusterClient kcpdynamic.ClusterInterface,
 	filterFunc func(obj interface{}) bool,
+	ignoreFunc func(obj interface{}) bool,
 	tweakListOptions dynamicinformer.TweakListOptionsFunc,
 	gvrSource GVRSource,
 	indexers cache.Indexers,
 ) (*DiscoveringDynamicSharedInformerFactory, error) {
+	ddsif := &DiscoveringDynamicSharedInformerFactory{}
+
 	f, err := NewGenericDiscoveringDynamicSharedInformerFactory[kcpcache.ScopeableSharedIndexInformer, kcpcache.GenericClusterLister](
 		func(gvr schema.GroupVersionResource, resyncPeriod time.Duration, indexers cache.Indexers) kcpinformers.GenericClusterInformer {
 			indexers[kcpcache.ClusterIndexName] = kcpcache.ClusterIndexFunc
 			indexers[kcpcache.ClusterAndNamespaceIndexName] = kcpcache.ClusterAndNamespaceIndexFunc
-			return kcpdynamicinformer.NewFilteredDynamicInformer(
+			inf := kcpdynamicinformer.NewFilteredDynamicInformer(
 				dynamicClusterClient,
 				gvr,
 				resyncPeriod,
 				indexers,
 				tweakListOptions,
 			)
+			if err := inf.Informer().SetIgnoreFunc(ignoreFunc); err != nil {
+				// This should never happen - .SetIgnoreFunc only errors when the informer
+				// is already running which shouldn't be the case here.
+				panic(fmt.Errorf("failed to set ignore func for %v: %w", gvr, err))
+			}
+			return inf
 		},
 		filterFunc,
 		gvrSource,
 		indexers,
 	)
 
-	return &DiscoveringDynamicSharedInformerFactory{
-		GenericDiscoveringDynamicSharedInformerFactory: f,
-	}, err
+	ddsif.GenericDiscoveringDynamicSharedInformerFactory = f
+	return ddsif, err
 }
 
 // DiscoveringDynamicSharedInformerFactory is a factory for cluster-aware
@@ -275,6 +294,37 @@ func (d *DiscoveringDynamicSharedInformerFactory) ClusterWithContext(ctx context
 	}
 
 	return informer
+}
+
+// PurgeCluster removes all objects belonging to the given logical cluster from all informer stores.
+func (d *DiscoveringDynamicSharedInformerFactory) PurgeCluster(cluster logicalcluster.Name) {
+	d.informersLock.RLock()
+	defer d.informersLock.RUnlock()
+
+	for _, inf := range d.informers {
+		store := inf.Informer().GetIndexer()
+		objs, err := store.ByIndex(kcpcache.ClusterIndexName, kcpcache.ClusterIndexKey(cluster))
+		if err != nil {
+			utilruntime.HandleError(fmt.Errorf("failed to list objects for cluster %v: %w", cluster, err))
+			continue
+		}
+		for _, obj := range objs {
+			if err := store.Delete(obj); err != nil {
+				utilruntime.HandleError(fmt.Errorf("failed to delete object from store for cluster %v: %w", cluster, err))
+			}
+		}
+	}
+}
+
+// ForceRelist causes all informers to perform a full relist from the
+// apiserver on the next list/watch cycle.
+func (d *DiscoveringDynamicSharedInformerFactory) ForceRelist() {
+	d.informersLock.RLock()
+	defer d.informersLock.RUnlock()
+
+	for _, inf := range d.informers {
+		inf.Informer().ForceRelist()
+	}
 }
 
 type scopedDiscoveringDynamicSharedInformerFactory struct {
@@ -392,6 +442,69 @@ func (d *GenericDiscoveringDynamicSharedInformerFactory[Informer, Lister, Generi
 	return informers, notSynced
 }
 
+// GVRLifecycleHandler is an event handler that is notified whenever a GVR is added or removed.
+type GVRLifecycleHandler interface {
+	GVRAdded(gvr schema.GroupVersionResource)
+	GVRRemoved(gvr schema.GroupVersionResource)
+}
+
+type gvrLifecycleEvent struct {
+	gvr   schema.GroupVersionResource
+	added bool
+}
+
+type gvrLifecycleListener struct {
+	handler GVRLifecycleHandler
+	queue   workqueue.TypedInterface[gvrLifecycleEvent]
+}
+
+func newGVRLifecycleListener(handler GVRLifecycleHandler) *gvrLifecycleListener {
+	return &gvrLifecycleListener{
+		handler: handler,
+		queue:   workqueue.NewTyped[gvrLifecycleEvent](),
+	}
+}
+
+func (l *gvrLifecycleListener) enqueue(event gvrLifecycleEvent) {
+	l.queue.Add(event)
+}
+
+func (l *gvrLifecycleListener) run(ctx context.Context) {
+	go func() {
+		<-ctx.Done()
+		l.queue.ShutDown()
+	}()
+	for {
+		item, shutdown := l.queue.Get()
+		if shutdown {
+			return
+		}
+		if item.added {
+			l.handler.GVRAdded(item.gvr)
+		} else {
+			l.handler.GVRRemoved(item.gvr)
+		}
+		l.queue.Done(item)
+	}
+}
+
+type GVRLifecycleHandlerFuncs struct {
+	AddedFunc   func(gvr schema.GroupVersionResource)
+	RemovedFunc func(gvr schema.GroupVersionResource)
+}
+
+func (g GVRLifecycleHandlerFuncs) GVRAdded(gvr schema.GroupVersionResource) {
+	if g.AddedFunc != nil {
+		g.AddedFunc(gvr)
+	}
+}
+
+func (g GVRLifecycleHandlerFuncs) GVRRemoved(gvr schema.GroupVersionResource) {
+	if g.RemovedFunc != nil {
+		g.RemovedFunc(gvr)
+	}
+}
+
 // GVREventHandler is an event handler that includes the GroupVersionResource
 // of the resource being handled.
 type GVREventHandler interface {
@@ -427,14 +540,35 @@ func (d *GenericDiscoveringDynamicSharedInformerFactory[Informer, Lister, Generi
 
 	handlers := d.handlers.Load().([]GVREventHandler)
 
-	newHandlers := make([]GVREventHandler, len(handlers))
-	copy(newHandlers, handlers)
-
+	newHandlers := slices.Clone(handlers)
 	newHandlers = append(newHandlers, handler)
 
 	d.handlers.Store(newHandlers)
 
 	d.handlersLock.Unlock()
+}
+
+// AddGVRLifecycleHandler notifies the handler of changes to known GVRs.
+// It acts similar to a handler on an informer but is bound by the
+// passed context instead of handling a registration.
+func (d *GenericDiscoveringDynamicSharedInformerFactory[Informer, Lister, GenericInformer]) AddGVRLifecycleHandler(ctx context.Context, handler GVRLifecycleHandler) {
+	listener := newGVRLifecycleListener(handler)
+
+	d.gvrLifecycleListenersLock.Lock()
+	d.gvrLifecycleListeners = append(d.gvrLifecycleListeners, listener)
+	d.gvrLifecycleListenersLock.Unlock()
+
+	go func() {
+		listener.run(ctx)
+		d.gvrLifecycleListenersLock.Lock()
+		d.gvrLifecycleListeners = slices.DeleteFunc(
+			d.gvrLifecycleListeners,
+			func(item *gvrLifecycleListener) bool {
+				return item == listener
+			},
+		)
+		d.gvrLifecycleListenersLock.Unlock()
+	}()
 }
 
 // StartWorker starts the worker that waits for notifications that informer updates are needed. This call is blocking,
@@ -586,6 +720,21 @@ func (d *GenericDiscoveringDynamicSharedInformerFactory[Informer, Lister, Generi
 			logger.V(4).Info("unable to notify discovery subscriber - channel full")
 		}
 	}
+
+	d.gvrLifecycleListenersLock.Lock()
+	listeners := d.gvrLifecycleListeners
+	d.gvrLifecycleListenersLock.Unlock()
+
+	for i := range informersToAdd {
+		for _, l := range listeners {
+			l.enqueue(gvrLifecycleEvent{gvr: informersToAdd[i], added: true})
+		}
+	}
+	for i := range informersToRemove {
+		for _, l := range listeners {
+			l.enqueue(gvrLifecycleEvent{gvr: informersToRemove[i], added: false})
+		}
+	}
 }
 
 // gvrsToDiscoveryData returns discovery data for all the resources covered by the factory. It only
@@ -616,7 +765,7 @@ func gvrsToDiscoveryData(gvrs map[schema.GroupVersionResource]GVRPartialMetadata
 	}
 
 	for group, resources := range gvResources {
-		var versions []metav1.GroupVersionForDiscovery
+		versions := make([]metav1.GroupVersionForDiscovery, 0, len(resources))
 		versionedResources := make(map[string][]metav1.APIResource)
 
 		for version, apiResource := range resources {
@@ -862,6 +1011,8 @@ var builtInInformableTypes map[schema.GroupVersionResource]GVRPartialMetadata = 
 	gvrFor("rbac.authorization.k8s.io", "v1", "rolebindings"):                         withGVRPartialMetadata(apiextensionsv1.NamespaceScoped, "RoleBinding", "rolebinding"),
 	gvrFor("events.k8s.io", "v1", "events"):                                           withGVRPartialMetadata(apiextensionsv1.NamespaceScoped, "Event", "event"),
 	gvrFor("admissionregistration.k8s.io", "v1", "mutatingwebhookconfigurations"):     withGVRPartialMetadata(apiextensionsv1.ClusterScoped, "MutatingWebhookConfiguration", "mutatingwebhookconfiguration"),
+	gvrFor("admissionregistration.k8s.io", "v1", "mutatingadmissionpolicies"):         withGVRPartialMetadata(apiextensionsv1.ClusterScoped, "MutatingAdmissionPolicy", "mutatingadmissionpolicy"),
+	gvrFor("admissionregistration.k8s.io", "v1", "mutatingadmissionpolicybindings"):   withGVRPartialMetadata(apiextensionsv1.ClusterScoped, "MutatingAdmissionPolicyBinding", "mutatingadmissionpolicybinding"),
 	gvrFor("admissionregistration.k8s.io", "v1", "validatingadmissionpolicies"):       withGVRPartialMetadata(apiextensionsv1.ClusterScoped, "ValidatingAdmissionPolicy", "validatingadmissionpolicy"),
 	gvrFor("admissionregistration.k8s.io", "v1", "validatingadmissionpolicybindings"): withGVRPartialMetadata(apiextensionsv1.ClusterScoped, "ValidatingAdmissionPolicyBinding", "validatingadmissionpolicybinding"),
 	gvrFor("admissionregistration.k8s.io", "v1", "validatingwebhookconfigurations"):   withGVRPartialMetadata(apiextensionsv1.ClusterScoped, "ValidatingWebhookConfiguration", "validatingwebhookconfiguration"),
@@ -872,7 +1023,12 @@ var builtInInformableTypes map[schema.GroupVersionResource]GVRPartialMetadata = 
 func (s *crdGVRSource) GVRs() map[schema.GroupVersionResource]GVRPartialMetadata {
 	crdGVRs := s.crdIndexer.ListIndexFuncValues(byGroupVersionResourceIndex)
 	result := make(map[schema.GroupVersionResource]GVRPartialMetadata, len(crdGVRs)+len(builtInInformableTypes))
+	mutatingAdmissionPolicyEnabled := kcpfeatures.DefaultFeatureGate.Enabled(features.MutatingAdmissionPolicy)
 	for gvr, metadata := range builtInInformableTypes {
+		if !mutatingAdmissionPolicyEnabled && gvr.Group == "admissionregistration.k8s.io" &&
+			(gvr.Resource == "mutatingadmissionpolicies" || gvr.Resource == "mutatingadmissionpolicybindings") {
+			continue
+		}
 		result[gvr] = metadata
 	}
 	for _, indexedValue := range crdGVRs {

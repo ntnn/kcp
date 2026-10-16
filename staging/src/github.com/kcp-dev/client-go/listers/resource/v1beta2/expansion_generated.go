@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,10 @@ package v1beta2
 // DeviceClassClusterListerExpansion allows custom methods to be added to
 // DeviceClassClusterLister.
 type DeviceClassClusterListerExpansion interface{}
+
+// DeviceTaintRuleClusterListerExpansion allows custom methods to be added to
+// DeviceTaintRuleClusterLister.
+type DeviceTaintRuleClusterListerExpansion interface{}
 
 // ResourceClaimClusterListerExpansion allows custom methods to be added to
 // ResourceClaimClusterLister.

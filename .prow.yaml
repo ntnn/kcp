@@ -7,7 +7,7 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - make
             - verify-boilerplate
@@ -27,7 +27,7 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - make
             - verify-codegen
@@ -44,7 +44,7 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - make
             - lint
@@ -75,6 +75,33 @@ presubmits:
               memory: 1Gi
               cpu: 1
 
+  - name: pull-kcp-build-image-sharded-test-server
+    decorate: true
+    skip_if_only_changed: "(docs)"
+    labels:
+      preset-goproxy: "true"
+    spec:
+      containers:
+        - image: quay.io/containers/buildah:v1.38.0
+          command:
+            - hack/build-image.sh
+          env:
+            - name: DRY_RUN
+              value: "1"
+            - name: IMAGE_REPOSITORY
+              value: "ghcr.io/kcp-dev/kcp-sharded-test-server"
+            - name: DOCKERFILE
+              value: "cmd/sharded-test-server/Dockerfile"
+            - name: IGNOREFILE
+              value: "cmd/sharded-test-server/Dockerfile.dockerignore"
+          # docker-in-docker needs privileged mode
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 1
+
   - name: pull-kcp-test-unit
     decorate: true
     clone_uri: "https://github.com/kcp-dev/kcp"
@@ -83,7 +110,7 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - make
             - test
@@ -104,7 +131,7 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - ./hack/run-with-prow.sh
             - ./hack/run-with-prometheus.sh
@@ -131,15 +158,13 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - ./hack/run-with-prow.sh
             - ./hack/run-with-prometheus.sh
             - make
             - test-e2e
           env:
-            - name: SUITES
-              value: control-plane
             - name: USE_GOTESTSUM
               value: "1"
             - name: KUBE_CACHE_MUTATION_DETECTOR
@@ -160,15 +185,13 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - ./hack/run-with-prow.sh
             - ./hack/run-with-prometheus.sh
             - make
             - test-e2e
           env:
-            - name: SUITES
-              value: control-plane
             - name: USE_GOTESTSUM
               value: "1"
             - name: KUBE_CACHE_MUTATION_DETECTOR
@@ -193,15 +216,13 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - ./hack/run-with-prow.sh
             - ./hack/run-with-prometheus.sh
             - make
             - test-e2e-shared-minimal
           env:
-            - name: SUITES
-              value: control-plane
             - name: USE_GOTESTSUM
               value: "1"
             - name: KUBE_CACHE_MUTATION_DETECTOR
@@ -222,21 +243,111 @@ presubmits:
       preset-goproxy: "true"
     spec:
       containers:
-        - image: ghcr.io/kcp-dev/infra/build:1.24.11-1
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
           command:
             - ./hack/run-with-prow.sh
             - ./hack/run-with-prometheus.sh
             - make
             - test-e2e-sharded-minimal
           env:
-            - name: SUITES
-              value: control-plane
             - name: USE_GOTESTSUM
               value: "1"
             - name: KUBE_CACHE_MUTATION_DETECTOR
               value: "1"
             - name: E2E_PARALLELISM
               value: "3"
+          resources:
+            requests:
+              memory: 6Gi
+              cpu: 4
+
+  # Same suite as pull-kcp-test-e2e-sharded, but each shard runs its own embedded
+  # virtual workspace server instead of a single standalone VW server. This
+  # exercises per-shard virtual workspace serving and cross-shard behaviour.
+  # Marked optional while known cross-shard gaps (e.g. permission-claimed
+  # resources served across shards) are being addressed.
+  - name: pull-kcp-test-e2e-sharded-embedded-vw
+    decorate: true
+    optional: true
+    # only run e2e tests if code changed.
+    run_if_changed: "(cmd|config|pkg|staging|test|go.mod|go.sum|Makefile|.prow.yaml)"
+    clone_uri: "https://github.com/kcp-dev/kcp"
+    labels:
+      preset-goproxy: "true"
+    spec:
+      containers:
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
+          command:
+            - ./hack/run-with-prow.sh
+            - ./hack/run-with-prometheus.sh
+            - make
+            - test-e2e-sharded-embedded-vw
+          env:
+            - name: USE_GOTESTSUM
+              value: "1"
+            - name: KUBE_CACHE_MUTATION_DETECTOR
+              value: "1"
+            - name: E2E_PARALLELISM
+              value: "3"
+          resources:
+            requests:
+              memory: 6Gi
+              cpu: 4
+
+  # Runs the controller-runtime test module (test/controller-runtime, a separate
+  # Go module that keeps sigs.k8s.io/controller-runtime out of the root go.mod)
+  # against a 2-shard server.
+  - name: pull-kcp-test-e2e-sharded-controller-runtime
+    decorate: true
+    optional: true
+    # only run e2e tests if code changed.
+    run_if_changed: "(cmd|config|pkg|staging|test|go.mod|go.sum|Makefile|.prow.yaml)"
+    clone_uri: "https://github.com/kcp-dev/kcp"
+    labels:
+      preset-goproxy: "true"
+    spec:
+      containers:
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
+          command:
+            - ./hack/run-with-prow.sh
+            - ./hack/run-with-prometheus.sh
+            - make
+            - test-e2e-sharded-controller-runtime
+          env:
+            - name: USE_GOTESTSUM
+              value: "1"
+            - name: KUBE_CACHE_MUTATION_DETECTOR
+              value: "1"
+            - name: E2E_PARALLELISM
+              value: "3"
+          resources:
+            requests:
+              memory: 6Gi
+              cpu: 4
+
+  # Verifies the upgrade path: See test/upgrade/README.md. Marked optional 
+  # while the job is new; it also depends on downloading the latest release 
+  # binary from GitHub.
+  - name: pull-kcp-test-upgrade
+    decorate: true
+    optional: true
+    # only run upgrade tests if code changed.
+    run_if_changed: "(cmd|config|pkg|staging|test|go.mod|go.sum|Makefile|.prow.yaml|hack/download-kcp-release.sh)"
+    clone_uri: "https://github.com/kcp-dev/kcp"
+    labels:
+      preset-goproxy: "true"
+    spec:
+      containers:
+        - image: ghcr.io/kcp-dev/infra/build:1.26.4-1
+          command:
+            - ./hack/run-with-prow.sh
+            - make
+            - test-upgrade
+          env:
+            - name: USE_GOTESTSUM
+              value: "1"
+            - name: KUBE_CACHE_MUTATION_DETECTOR
+              value: "1"
           resources:
             requests:
               memory: 6Gi

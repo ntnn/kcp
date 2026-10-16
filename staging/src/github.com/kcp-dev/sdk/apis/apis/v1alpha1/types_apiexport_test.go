@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 )
 
 func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name         string
 		current, old map[string]interface{}
@@ -34,7 +35,7 @@ func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
 			name:    "nothing is set",
 			current: map[string]interface{}{},
 			wantErrs: []string{
-				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: \"object\": either \"all\" or \"resourceSelector\" must be set",
+				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: either \"all\" or \"resourceSelector\" must be set",
 			},
 		},
 		{
@@ -66,7 +67,7 @@ func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
 				},
 			},
 			wantErrs: []string{
-				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: \"object\": either \"all\" or \"resourceSelector\" must be set",
+				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: either \"all\" or \"resourceSelector\" must be set",
 			},
 		},
 		{
@@ -75,7 +76,7 @@ func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
 				"resourceSelector": nil,
 			},
 			wantErrs: []string{
-				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: \"object\": either \"all\" or \"resourceSelector\" must be set",
+				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: either \"all\" or \"resourceSelector\" must be set",
 			},
 		},
 		{
@@ -84,7 +85,7 @@ func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
 				"resourceSelector": []interface{}{},
 			},
 			wantErrs: []string{
-				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: \"object\": either \"all\" or \"resourceSelector\" must be set",
+				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: either \"all\" or \"resourceSelector\" must be set",
 			},
 		},
 		{
@@ -102,7 +103,7 @@ func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
 				"resourceSelector": nil,
 			},
 			wantErrs: []string{
-				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: \"object\": either \"all\" or \"resourceSelector\" must be set",
+				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: either \"all\" or \"resourceSelector\" must be set",
 			},
 		},
 		{
@@ -112,7 +113,7 @@ func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
 				"resourceSelector": []interface{}{},
 			},
 			wantErrs: []string{
-				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: \"object\": either \"all\" or \"resourceSelector\" must be set",
+				"openAPIV3Schema.properties.spec.properties.permissionClaims.items: Invalid value: either \"all\" or \"resourceSelector\" must be set",
 			},
 		},
 		{
@@ -134,6 +135,7 @@ func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
 		require.True(t, found, "failed to find validator for %s", pth)
 
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			errs := validator(tc.current, tc.old)
 			t.Log(errs)
 
@@ -153,6 +155,7 @@ func TestAPIExportPermissionClaimCELValidation(t *testing.T) {
 }
 
 func TestResourceSelectorCELValidation(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name         string
 		current, old map[string]interface{}
@@ -165,7 +168,7 @@ func TestResourceSelectorCELValidation(t *testing.T) {
 				"namespace": nil,
 			},
 			wantErrs: []string{
-				"openAPIV3Schema.properties.spec.properties.permissionClaims.items.properties.resourceSelector.items: Invalid value: \"object\": at least one field must be set",
+				"openAPIV3Schema.properties.spec.properties.permissionClaims.items.properties.resourceSelector.items: Invalid value: at least one field must be set",
 			},
 		},
 		{
@@ -199,6 +202,7 @@ func TestResourceSelectorCELValidation(t *testing.T) {
 		require.True(t, found, "failed to find validator for %s", pth)
 
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			errs := validator(tc.current, tc.old)
 			t.Log(errs)
 
@@ -218,6 +222,7 @@ func TestResourceSelectorCELValidation(t *testing.T) {
 }
 
 func TestAPIExportPermissionClaimPattern(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name      string
 		value     string
@@ -280,6 +285,7 @@ func TestAPIExportPermissionClaimPattern(t *testing.T) {
 		require.True(t, found, "failed to find validator for %s", pth)
 
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			err := validator(tc.value)
 			got := ""
 			if err != nil {

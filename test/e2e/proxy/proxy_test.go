@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -41,6 +41,7 @@ import (
 )
 
 func TestMappingWithClusterContext(t *testing.T) {
+	t.Parallel()
 	framework.Suite(t, "control-plane")
 
 	// start kcp and setup clients;
@@ -121,7 +122,7 @@ func TestMappingWithClusterContext(t *testing.T) {
 		expectedScope       = "cluster:" + teamCluster
 		expectedClusterName = teamCluster
 		expectedUsername    = "oidc:" + email
-		expectedGroups      = []string{"system:authenticated"}
+		expectedGroups      = []string{"system:authenticated"} //nolint:prealloc
 	)
 
 	for _, group := range groups {

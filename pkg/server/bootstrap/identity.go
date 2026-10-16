@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -54,7 +54,9 @@ var (
 
 	// KcpRootGroupResourceExportNames lists the APIExports in the root workspace for standard kcp group resources.
 	KcpRootGroupResourceExportNames = map[schema.GroupResource]string{
-		{Group: "core.kcp.io", Resource: "shards"}: "shards.core.kcp.io",
+		{Group: "core.kcp.io", Resource: "shards"}:                          "shards.core.kcp.io",
+		{Group: "migration.kcp.io", Resource: "logicalclustermigrations"}:   "migration.kcp.io",
+		{Group: "migration.kcp.io", Resource: "apiexportidentityrotations"}: "migration.kcp.io",
 	}
 )
 
@@ -242,7 +244,7 @@ func (rt roundTripperFunc) WrappedRoundTripper() http.RoundTripper {
 	return rt.delegate
 }
 
-// injectKcpIdentities injects the KCP identities into the request URLs.
+// injectKcpIdentities injects the kcp identities into the request URLs.
 func injectKcpIdentities(ids *identities) func(rt http.RoundTripper) http.RoundTripper {
 	return func(rt http.RoundTripper) http.RoundTripper {
 		return roundTripperFunc{

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@ var NonPersistedResourcesClaimable = map[schema.GroupResource]bool{
 	authorizationv1.SchemeGroupVersion.WithResource("selfsubjectrulesreviews").GroupResource():   false,
 	authorizationv1.SchemeGroupVersion.WithResource("subjectaccessreviews").GroupResource():      true,
 	authenticationv1.SchemeGroupVersion.WithResource("selfsubjectreviews").GroupResource():       false,
-	authenticationv1.SchemeGroupVersion.WithResource("tokenreviews").GroupResource():             false,
+	authenticationv1.SchemeGroupVersion.WithResource("tokenreviews").GroupResource():             true,
 }
 
 // Labeler calculates labels to apply to all instances of a cluster-group-resource based on permission claims.
@@ -55,6 +55,7 @@ type Labeler struct {
 	listAPIBindingsAcceptingClaimedGroupResource func(clusterName logicalcluster.Name, groupResource schema.GroupResource) ([]*apisv1alpha2.APIBinding, error)
 	getAPIBinding                                func(clusterName logicalcluster.Name, name string) (*apisv1alpha2.APIBinding, error)
 	getAPIExport                                 func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error)
+	canonicalIdentityHash                        func(hash string) string
 }
 
 // NewLabeler returns a new Labeler.
@@ -74,12 +75,15 @@ func NewLabeler(
 		getAPIExport: func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error) {
 			return indexers.ByPathAndNameWithFallback[*apisv1alpha2.APIExport](apisv1alpha2.Resource("apiexports"), apiExportInformer.Informer().GetIndexer(), globalAPIExportInformer.Informer().GetIndexer(), path, name)
 		},
+		canonicalIdentityHash: func(hash string) string {
+			return indexers.CanonicalIdentityHash(globalAPIExportInformer.Informer().GetIndexer(), hash)
+		},
 	}
 }
 
-// normalizeEventGroupResource normalizes event resources to use the core/v1 version consistently
+// NormalizeEventGroupResource normalizes event resources to use the core/v1 version consistently.
 // This prevents race conditions between core/v1 events and events.k8s.io/v1 events.
-func normalizeEventGroupResource(gr schema.GroupResource) schema.GroupResource {
+func NormalizeEventGroupResource(gr schema.GroupResource) schema.GroupResource {
 	if gr.Resource == "events" && (gr.Group == "" || gr.Group == "events.k8s.io") {
 		// Always normalize to core/v1 events for consistent labeling
 		return schema.GroupResource{Group: "", Resource: "events"}
@@ -97,7 +101,7 @@ func (l *Labeler) LabelsFor(ctx context.Context, cluster logicalcluster.Name, gr
 	}
 
 	// Normalize event resources to prevent race conditions between API versions
-	normalizedGR := normalizeEventGroupResource(groupResource)
+	normalizedGR := NormalizeEventGroupResource(groupResource)
 
 	bindings, err := l.listAPIBindingsAcceptingClaimedGroupResource(cluster, normalizedGR)
 	if err != nil {
@@ -107,6 +111,14 @@ func (l *Labeler) LabelsFor(ctx context.Context, cluster logicalcluster.Name, gr
 	logger := klog.FromContext(ctx)
 
 	for _, binding := range bindings {
+		if !binding.DeletionTimestamp.IsZero() {
+			// A deleting APIBinding no longer grants access to claimed
+			// resources. Dropping its labels here (on any write, and on the
+			// relabel pass the permissionclaimlabel controller triggers during
+			// deletion) is what revokes wildcard access in the APIExport
+			// virtual workspace, which is scoped by these labels only.
+			continue
+		}
 		logger := logging.WithObject(logger, binding)
 
 		path := logicalcluster.NewPath(binding.Spec.Reference.Export.Path)
@@ -136,7 +148,12 @@ func (l *Labeler) LabelsFor(ctx context.Context, cluster logicalcluster.Name, gr
 				}
 			}
 
-			k, v, err := permissionclaims.ToLabelKeyAndValue(logicalcluster.From(export), export.Name, claim.PermissionClaim)
+			// normalize a pre-rotation identity alias to the canonical hash
+			// before hashing, so claims on either side of a rotation produce
+			// identical labels.
+			normalizedClaim := claim.PermissionClaim
+			normalizedClaim.IdentityHash = l.canonicalIdentityHash(normalizedClaim.IdentityHash)
+			k, v, err := permissionclaims.ToLabelKeyAndValue(logicalcluster.From(export), export.Name, normalizedClaim)
 			if err != nil {
 				// extremely unlikely to get an error here - it means the json marshaling failed
 				logger.Error(err, "error calculating permission claim label key and value",

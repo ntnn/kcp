@@ -1,6 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
-Modifications Copyright 2025 The KCP Authors.
+Modifications Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 )
 
 func TestVersionSort(t *testing.T) {
+	t.Parallel()
 	unsortedVersions := []string{"v4beta1", "v2beta1", "v2alpha1", "v3", "v1"}
 	expected := []string{"v2alpha1", "v2beta1", "v4beta1", "v1", "v3"}
 	sort.Sort(sortableSliceOfVersions(unsortedVersions))

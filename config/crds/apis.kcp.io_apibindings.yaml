@@ -79,14 +79,17 @@ spec:
                         This is the identity for a given APIExport that the APIResourceSchema belongs to.
                         The hash can be found on APIExport and APIResourceSchema's status.
                         It will be empty for core types.
-                        Note that one must look this up for a particular KCP instance.
+                        Note that one must look this up for a particular kcp instance.
                       type: string
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      maxLength: 127
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     resourceSelector:
                       description: resourceSelector is a list of claimed resource
@@ -193,14 +196,17 @@ spec:
                         This is the identity for a given APIExport that the APIResourceSchema belongs to.
                         The hash can be found on APIExport and APIResourceSchema's status.
                         It will be empty for core types.
-                        Note that one must look this up for a particular KCP instance.
+                        Note that one must look this up for a particular kcp instance.
                       type: string
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      maxLength: 127
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     resourceSelector:
                       description: resourceSelector is a list of claimed resource
@@ -373,14 +379,17 @@ spec:
                         This is the identity for a given APIExport that the APIResourceSchema belongs to.
                         The hash can be found on APIExport and APIResourceSchema's status.
                         It will be empty for core types.
-                        Note that one must look this up for a particular KCP instance.
+                        Note that one must look this up for a particular kcp instance.
                       type: string
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      maxLength: 127
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     resourceSelector:
                       description: resourceSelector is a list of claimed resource
@@ -470,6 +479,30 @@ spec:
           spec:
             description: Spec holds the desired state.
             properties:
+              deletionPolicy:
+                default: Delete
+                description: |-
+                  deletionPolicy controls what happens to instances of bound resources when
+                  this APIBinding is deleted and no other APIBinding adopts them.
+
+                  "Delete" (the default) deletes all instances of all bound resources.
+                  "WaitForSuccessor" holds the APIBinding's finalizer until every bound
+                  group/resource that still has instances gains a successor APIBinding to
+                  adopt them: the binding stays in deletion with condition
+                  BindingResourceDeleteSuccess=False, reason WaitingForSuccessor, and the
+                  instances remain in storage, covered by this binding, until the handover
+                  completes. Patch the policy back to "Delete" to let deletion proceed
+                  destructively.
+
+                  Independent of this policy, instances of a bound group/resource are never
+                  deleted if, at deletion time, another APIBinding in the workspace
+                  references an APIExport serving the same group/resource with the same
+                  APIResourceSchema (by UID) and the same identity: that binding adopts the
+                  instances instead.
+                enum:
+                - Delete
+                - WaitForSuccessor
+                type: string
               permissionClaims:
                 description: |-
                   permissionClaims records decisions about permission claims requested by the API service provider.
@@ -480,6 +513,64 @@ spec:
                   description: AcceptablePermissionClaim is a PermissionClaim that
                     records if the user accepts or rejects it.
                   properties:
+                    defaultSelector:
+                      description: |-
+                        defaultSelector is the default selector to use when creating APIBindings
+                        via WorkspaceType's defaultAPIBindings. If not set, the APIBinding will
+                        default to matchAll: true.
+
+                        This allows API providers to suggest a default scope for permission claims
+                        that will be used when workspaces are automatically created with default
+                        APIBindings. Users can always override the default selector by accepting the
+                        claim with a different selector or by manually creating APIBindings with a custom selector.
+                      properties:
+                        matchAll:
+                          description: matchAll grants access to all objects of the
+                            claimed resource.
+                          type: boolean
+                        matchExpressions:
+                          description: matchExpressions is a list of label selector
+                            requirements. The requirements are ANDed.
+                          items:
+                            description: |-
+                              A label selector requirement is a selector that contains values, a key, and an operator that
+                              relates the key and values.
+                            properties:
+                              key:
+                                description: key is the label key that the selector
+                                  applies to.
+                                type: string
+                              operator:
+                                description: |-
+                                  operator represents a key's relationship to a set of values.
+                                  Valid operators are In, NotIn, Exists and DoesNotExist.
+                                type: string
+                              values:
+                                description: |-
+                                  values is an array of string values. If the operator is In or NotIn,
+                                  the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                  the values array must be empty. This array is replaced during a strategic
+                                  merge patch.
+                                items:
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: atomic
+                            required:
+                            - key
+                            - operator
+                            type: object
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                            map is equivalent to an element of matchExpressions, whose key field is "key", the
+                            operator is "In", and the values array contains only "value". The requirements are ANDed.
+                          type: object
+                      type: object
+                      x-kubernetes-map-type: atomic
                     group:
                       default: ""
                       description: |-
@@ -493,14 +584,17 @@ spec:
                         This is the identity for a given APIExport that the APIResourceSchema belongs to.
                         The hash can be found on APIExport and APIResourceSchema's status.
                         It will be empty for core types.
-                        Note that one must look this up for a particular KCP instance.
+                        Note that one must look this up for a particular kcp instance.
                       type: string
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      maxLength: 127
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     selector:
                       description: |-
@@ -578,6 +672,13 @@ spec:
                   - state
                   - verbs
                   type: object
+                  x-kubernetes-validations:
+                  - message: for subresource claims the selector is ignored, scope
+                      is inherited from the parent resource claim
+                    rule: '!self.resource.contains(''/'') || (has(self.selector.matchAll)
+                      && self.selector.matchAll)'
+                  - message: defaultSelector is not allowed on subresource claims
+                    rule: '!self.resource.contains(''/'') || !has(self.defaultSelector)'
                 type: array
                 x-kubernetes-list-map-keys:
                 - group
@@ -630,6 +731,64 @@ spec:
                     ScopedPermissionClaim embeds a PermissionClaim and adds a selector to
                     scope down access to objects of the claimed resource.
                   properties:
+                    defaultSelector:
+                      description: |-
+                        defaultSelector is the default selector to use when creating APIBindings
+                        via WorkspaceType's defaultAPIBindings. If not set, the APIBinding will
+                        default to matchAll: true.
+
+                        This allows API providers to suggest a default scope for permission claims
+                        that will be used when workspaces are automatically created with default
+                        APIBindings. Users can always override the default selector by accepting the
+                        claim with a different selector or by manually creating APIBindings with a custom selector.
+                      properties:
+                        matchAll:
+                          description: matchAll grants access to all objects of the
+                            claimed resource.
+                          type: boolean
+                        matchExpressions:
+                          description: matchExpressions is a list of label selector
+                            requirements. The requirements are ANDed.
+                          items:
+                            description: |-
+                              A label selector requirement is a selector that contains values, a key, and an operator that
+                              relates the key and values.
+                            properties:
+                              key:
+                                description: key is the label key that the selector
+                                  applies to.
+                                type: string
+                              operator:
+                                description: |-
+                                  operator represents a key's relationship to a set of values.
+                                  Valid operators are In, NotIn, Exists and DoesNotExist.
+                                type: string
+                              values:
+                                description: |-
+                                  values is an array of string values. If the operator is In or NotIn,
+                                  the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                  the values array must be empty. This array is replaced during a strategic
+                                  merge patch.
+                                items:
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: atomic
+                            required:
+                            - key
+                            - operator
+                            type: object
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                            map is equivalent to an element of matchExpressions, whose key field is "key", the
+                            operator is "In", and the values array contains only "value". The requirements are ANDed.
+                          type: object
+                      type: object
+                      x-kubernetes-map-type: atomic
                     group:
                       default: ""
                       description: |-
@@ -643,14 +802,17 @@ spec:
                         This is the identity for a given APIExport that the APIResourceSchema belongs to.
                         The hash can be found on APIExport and APIResourceSchema's status.
                         It will be empty for core types.
-                        Note that one must look this up for a particular KCP instance.
+                        Note that one must look this up for a particular kcp instance.
                       type: string
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      maxLength: 127
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     selector:
                       description: |-
@@ -722,6 +884,13 @@ spec:
                   - selector
                   - verbs
                   type: object
+                  x-kubernetes-validations:
+                  - message: for subresource claims the selector is ignored, scope
+                      is inherited from the parent resource claim
+                    rule: '!self.resource.contains(''/'') || (has(self.selector.matchAll)
+                      && self.selector.matchAll)'
+                  - message: defaultSelector is not allowed on subresource claims
+                    rule: '!self.resource.contains(''/'') || !has(self.defaultSelector)'
                 type: array
                 x-kubernetes-list-map-keys:
                 - group
@@ -738,6 +907,20 @@ spec:
                       description: group is the group of the bound API. Empty string
                         for the core API group.
                       type: string
+                    identityHashes:
+                      description: |-
+                        identityHashes lists every identity hash under which instances of this
+                        resource may exist in storage. It mirrors storageVersions for identity
+                        rotation: the drain target is always the schema's current identityHash;
+                        every other entry is a drain source that the identity migrator empties
+                        and then prunes from this list. Normally it contains exactly the
+                        schema's current identityHash.
+
+                        Hashes may not be removed while instances exist under them in storage.
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
                     resource:
                       description: |-
                         resource is the resource of the bound API.
@@ -850,6 +1033,64 @@ spec:
                     Its purpose is to determine the added permissions that a service provider may
                     request and that a consumer may accept and allow the service provider access to.
                   properties:
+                    defaultSelector:
+                      description: |-
+                        defaultSelector is the default selector to use when creating APIBindings
+                        via WorkspaceType's defaultAPIBindings. If not set, the APIBinding will
+                        default to matchAll: true.
+
+                        This allows API providers to suggest a default scope for permission claims
+                        that will be used when workspaces are automatically created with default
+                        APIBindings. Users can always override the default selector by accepting the
+                        claim with a different selector or by manually creating APIBindings with a custom selector.
+                      properties:
+                        matchAll:
+                          description: matchAll grants access to all objects of the
+                            claimed resource.
+                          type: boolean
+                        matchExpressions:
+                          description: matchExpressions is a list of label selector
+                            requirements. The requirements are ANDed.
+                          items:
+                            description: |-
+                              A label selector requirement is a selector that contains values, a key, and an operator that
+                              relates the key and values.
+                            properties:
+                              key:
+                                description: key is the label key that the selector
+                                  applies to.
+                                type: string
+                              operator:
+                                description: |-
+                                  operator represents a key's relationship to a set of values.
+                                  Valid operators are In, NotIn, Exists and DoesNotExist.
+                                type: string
+                              values:
+                                description: |-
+                                  values is an array of string values. If the operator is In or NotIn,
+                                  the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                  the values array must be empty. This array is replaced during a strategic
+                                  merge patch.
+                                items:
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: atomic
+                            required:
+                            - key
+                            - operator
+                            type: object
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        matchLabels:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                            map is equivalent to an element of matchExpressions, whose key field is "key", the
+                            operator is "In", and the values array contains only "value". The requirements are ANDed.
+                          type: object
+                      type: object
+                      x-kubernetes-map-type: atomic
                     group:
                       default: ""
                       description: |-
@@ -863,14 +1104,17 @@ spec:
                         This is the identity for a given APIExport that the APIResourceSchema belongs to.
                         The hash can be found on APIExport and APIResourceSchema's status.
                         It will be empty for core types.
-                        Note that one must look this up for a particular KCP instance.
+                        Note that one must look this up for a particular kcp instance.
                       type: string
                     resource:
                       description: |-
                         resource is the name of the resource.
+                        A subresource may be claimed as "resource/subresource",
+                        e.g. "serviceaccounts/token", in the style of RBAC rules.
                         Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
                         not provided by an api export.
-                      pattern: ^[a-z][-a-z0-9]*[a-z0-9]$
+                      maxLength: 127
+                      pattern: ^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$
                       type: string
                     verbs:
                       description: |-
@@ -886,6 +1130,9 @@ spec:
                   - resource
                   - verbs
                   type: object
+                  x-kubernetes-validations:
+                  - message: defaultSelector is not allowed on subresource claims
+                    rule: '!self.resource.contains(''/'') || !has(self.defaultSelector)'
                 type: array
               phase:
                 description: |-

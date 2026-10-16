@@ -17,6 +17,7 @@ limitations under the License.
 package indexers
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,8 @@ import (
 
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
+
+	"github.com/kcp-dev/kcp/pkg/identity"
 )
 
 type identityInformer struct {
@@ -37,8 +40,10 @@ type identityInformer struct {
 func (i *identityInformer) HasSynced() bool { return i.synced }
 
 func TestIdentityLookup(t *testing.T) {
-	for _, kind := range []string{"APIExport", "CachedResource"} {
+	t.Parallel()
+	for _, kind := range []string{"APIExport", "ClusterCachedResource"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			testIdentityLookup(t, func(name, id string, hashes []string) runtime.Object {
 				if kind == "APIExport" {
 					return &apisv1alpha2.APIExport{
@@ -46,9 +51,9 @@ func TestIdentityLookup(t *testing.T) {
 						Status:     apisv1alpha2.APIExportStatus{IdentityHash: id, IdentityKeyHashes: hashes},
 					}
 				}
-				return &cachev1alpha1.CachedResource{
+				return &cachev1alpha1.ClusterCachedResource{
 					ObjectMeta: metav1.ObjectMeta{Name: name},
-					Status:     cachev1alpha1.CachedResourceStatus{IdentityHash: id, IdentityKeyHashes: hashes},
+					Status:     cachev1alpha1.ClusterCachedResourceStatus{IdentityHash: id, IdentityKeyHashes: hashes},
 				}
 			})
 		})
@@ -61,6 +66,14 @@ func testIdentityLookup(t *testing.T, object func(string, string, []string) runt
 	global := &identityInformer{SharedIndexInformer: cache.NewSharedIndexInformer(&cache.ListWatch{}, object("", "", nil), 0, cache.Indexers{}), synced: true}
 	lookup, err := NewIdentityLookup(local, global)
 	require.NoError(t, err)
+	for i, informer := range []*identityInformer{local, global} {
+		retired := fmt.Sprintf("retired-initial-key-%d", i)
+		require.NoError(t, informer.GetStore().Add(object(retired, retired, []string{"replacement-" + retired})))
+		id, hashes, err := identity.Verify("", nil, retired, lookup)
+		require.ErrorContains(t, err, "reserved")
+		require.Empty(t, id)
+		require.Empty(t, hashes)
+	}
 	require.NoError(t, local.GetStore().Add(object("legacy", "legacy-key", nil)))
 	require.NoError(t, global.GetStore().Add(object("rotated", "stable", []string{"new-key"})))
 	for key, want := range map[string]string{"legacy-key": "legacy-key", "new-key": "stable", "unknown": ""} {

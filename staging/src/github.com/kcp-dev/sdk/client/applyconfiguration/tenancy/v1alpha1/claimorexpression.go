@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ package v1alpha1
 
 // ClaimOrExpressionApplyConfiguration represents a declarative configuration of the ClaimOrExpression type for use
 // with apply.
+//
+// ClaimOrExpression provides the configuration for a single claim or expression.
 type ClaimOrExpressionApplyConfiguration struct {
 	Claim      *string `json:"claim,omitempty"`
 	Expression *string `json:"expression,omitempty"`

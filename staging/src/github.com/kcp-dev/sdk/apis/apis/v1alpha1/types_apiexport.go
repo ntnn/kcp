@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -222,7 +222,7 @@ type PermissionClaim struct {
 	// This is the identity for a given APIExport that the APIResourceSchema belongs to.
 	// The hash can be found on APIExport and APIResourceSchema's status.
 	// It will be empty for core types.
-	// Note that one must look this up for a particular KCP instance.
+	// Note that one must look this up for a particular kcp instance.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 }
@@ -288,9 +288,12 @@ type GroupResource struct {
 	Group string `json:"group,omitempty"`
 
 	// resource is the name of the resource.
+	// A subresource may be claimed as "resource/subresource",
+	// e.g. "serviceaccounts/token", in the style of RBAC rules.
 	// Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
 	// not provided by an api export.
-	// +kubebuilder:validation:Pattern=`^[a-z][-a-z0-9]*[a-z0-9]$`
+	// +kubebuilder:validation:Pattern=`^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=127
 	// +required
 	// +kubebuilder:validation:Required
 	Resource string `json:"resource"`

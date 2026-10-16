@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 )
 
 func TestCreateContext(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		config    clientcmdapi.Config
@@ -197,6 +198,7 @@ func TestCreateContext(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var got *clientcmdapi.Config
 
 			clusterName := tt.config.Contexts[tt.config.CurrentContext].Cluster

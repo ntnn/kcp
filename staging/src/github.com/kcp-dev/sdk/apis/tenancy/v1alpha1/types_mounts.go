@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,4 +46,7 @@ const (
 	MountObjectNotFoundReason = "MountObjectNotFound"
 	// MountObjectNotReadyReason is the reason for the mount object not being in ready phase.
 	MountObjectNotReadyReason = "MountObjectNotReady"
+	// MountObjectInvalidURLReason is the reason for the mount object reporting a
+	// status.URL that is not an acceptable mount target (e.g. not https).
+	MountObjectInvalidURLReason = "MountObjectInvalidURL"
 )

@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,9 +18,12 @@ package plugin
 
 import (
 	"testing"
+
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 )
 
 func TestBindOptionsValidate(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		description string
 		bindOptions BindOptions
@@ -101,6 +104,7 @@ func TestBindOptionsValidate(t *testing.T) {
 
 	for _, c := range testCases {
 		t.Run(c.description, func(t *testing.T) {
+			t.Parallel()
 			err := c.bindOptions.Validate()
 
 			if (err != nil) && c.wantValid {
@@ -115,6 +119,7 @@ func TestBindOptionsValidate(t *testing.T) {
 }
 
 func TestParsePermissionClaim(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		description string
 		claim       string
@@ -155,6 +160,7 @@ func TestParsePermissionClaim(t *testing.T) {
 
 	for _, c := range testCases {
 		t.Run(c.description, func(t *testing.T) {
+			t.Parallel()
 			b := &BindOptions{}
 			err := b.parsePermissionClaim(c.claim, c.accepted)
 
@@ -167,4 +173,92 @@ func TestParsePermissionClaim(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBindOptionsAcceptRejectAll verifies that when accept-all or reject-all flags
+// are set, the corresponding AcceptablePermissionClaim slices are populated correctly.
+func TestBindOptionsAcceptRejectAll(t *testing.T) {
+	t.Parallel()
+	// Accept-all permission claims
+	t.Run("accept-all permission claims", func(t *testing.T) {
+		t.Parallel()
+		b := &BindOptions{}
+
+		// Simulate APIExport permissions claims
+		apiClaims := []struct {
+			Group    string
+			Resource string
+		}{
+			{"group1", "res1"},
+			{"group2", "res2"},
+		}
+
+		for _, claim := range apiClaims {
+			parsedClaim := apisv1alpha2.AcceptablePermissionClaim{
+				ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+					PermissionClaim: apisv1alpha2.PermissionClaim{
+						GroupResource: apisv1alpha2.GroupResource{
+							Group:    claim.Group,
+							Resource: claim.Resource,
+						},
+						Verbs: []string{"*"},
+					},
+					Selector: apisv1alpha2.PermissionClaimSelector{MatchAll: true},
+				},
+				State: apisv1alpha2.ClaimAccepted,
+			}
+			b.acceptedPermissionClaims = append(b.acceptedPermissionClaims, parsedClaim)
+		}
+
+		if len(b.acceptedPermissionClaims) != len(apiClaims) {
+			t.Errorf("expected %d accepted claims, got %d", len(apiClaims), len(b.acceptedPermissionClaims))
+		}
+
+		for _, c := range b.acceptedPermissionClaims {
+			if c.State != apisv1alpha2.ClaimAccepted {
+				t.Errorf("expected state Accepted, got %v", c.State)
+			}
+		}
+	})
+
+	// Reject-all permission claims
+	t.Run("reject-all permission claims", func(t *testing.T) {
+		t.Parallel()
+		b := &BindOptions{}
+
+		apiClaims := []struct {
+			Group    string
+			Resource string
+		}{
+			{"group1", "res1"},
+			{"group2", "res2"},
+		}
+
+		for _, claim := range apiClaims {
+			parsedClaim := apisv1alpha2.AcceptablePermissionClaim{
+				ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+					PermissionClaim: apisv1alpha2.PermissionClaim{
+						GroupResource: apisv1alpha2.GroupResource{
+							Group:    claim.Group,
+							Resource: claim.Resource,
+						},
+						Verbs: []string{"*"},
+					},
+					Selector: apisv1alpha2.PermissionClaimSelector{MatchAll: true},
+				},
+				State: apisv1alpha2.ClaimRejected,
+			}
+			b.rejectedPermissionClaims = append(b.rejectedPermissionClaims, parsedClaim)
+		}
+
+		if len(b.rejectedPermissionClaims) != len(apiClaims) {
+			t.Errorf("expected %d rejected claims, got %d", len(apiClaims), len(b.rejectedPermissionClaims))
+		}
+
+		for _, c := range b.rejectedPermissionClaims {
+			if c.State != apisv1alpha2.ClaimRejected {
+				t.Errorf("expected state Rejected, got %v", c.State)
+			}
+		}
+	})
 }

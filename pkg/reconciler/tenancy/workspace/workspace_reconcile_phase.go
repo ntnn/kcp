@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,9 +34,15 @@ import (
 
 type phaseReconciler struct {
 	getLogicalCluster func(ctx context.Context, cluster logicalcluster.Path) (*corev1alpha1.LogicalCluster, error)
+	getShard          func(name string) (*corev1alpha1.Shard, error)
 
 	requeueAfter func(workspace *tenancyv1alpha1.Workspace, after time.Duration)
 }
+
+// logicalClusterTimeout is the time limit for a logical cluster to
+// appear for the shard before marking its corresponding Workspace as
+// Unavailable.
+const logicalClusterTimeout = time.Minute
 
 func (r *phaseReconciler) reconcile(ctx context.Context, workspace *tenancyv1alpha1.Workspace) (reconcileStatus, error) {
 	logger := klog.FromContext(ctx).WithValues("reconciler", "phase")
@@ -54,13 +60,54 @@ func (r *phaseReconciler) reconcile(ctx context.Context, workspace *tenancyv1alp
 			if err != nil && !apierrors.IsNotFound(err) {
 				return reconcileStatusStopAndRequeue, err
 			} else if apierrors.IsNotFound(err) {
-				logger.Info("LogicalCluster disappeared")
-				conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceInitialized, tenancyv1alpha1.WorkspaceInitializedWorkspaceDisappeared, conditionsv1alpha1.ConditionSeverityError, "LogicalCluster disappeared")
+				// The LogicalCluster may not be visible through the front-proxy yet
+				// because the shard index hasn't caught up.
+				shardName, hasShard := workspace.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey]
+				if hasShard {
+					shard, shardErr := r.getShard(shardName)
+					if shardErr == nil && shard.DeletionTimestamp.IsZero() {
+						if workspace.CreationTimestamp.IsZero() || time.Since(workspace.CreationTimestamp.Time) < logicalClusterTimeout {
+							logger.V(3).Info("LogicalCluster not found but shard is alive, requeueing", "shard", shard.Name)
+							r.requeueAfter(workspace, 1*time.Second)
+							return reconcileStatusContinue, nil
+						}
+					}
+				}
+				conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceInitialized,
+					tenancyv1alpha1.WorkspaceInitializedWorkspaceDisappeared,
+					conditionsv1alpha1.ConditionSeverityError,
+					"LogicalCluster %s not found", workspace.Spec.Cluster,
+				)
 				return reconcileStatusContinue, nil
 			}
 
 			// set terminators during initializiation, as we want to show them to the user already
 			workspace.Status.Terminators = logicalCluster.Status.Terminators
+
+			// A LogicalCluster gets its initializers copied from spec to status by
+			// admission, and only on the transition of its own phase to Initializing.
+			// Before that transition lands, an empty status.initializers means "not
+			// assigned yet", not "none to wait for", and reading it as readiness
+			// declares the workspace ready while its default APIBindings are still
+			// being created -- so callers see the workspace ready and the APIs it
+			// promises missing.
+			switch logicalCluster.Status.Phase {
+			case "", corev1alpha1.LogicalClusterPhaseScheduling:
+				// This window is milliseconds wide in the normal case, so poll fast at
+				// first, but back off for a LogicalCluster that is genuinely stuck
+				// rather than spinning on it.
+				after := time.Since(logicalCluster.CreationTimestamp.Time) / 5
+				if minDuration := 100 * time.Millisecond; after < minDuration {
+					after = minDuration
+				}
+				if maxDuration := 10 * time.Second; after > maxDuration {
+					after = maxDuration
+				}
+				logger.V(3).Info("LogicalCluster has not reached Initializing yet, requeuing", "phase", logicalCluster.Status.Phase, "after", after)
+				conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceInitialized, tenancyv1alpha1.WorkspaceInitializedInitializerExists, conditionsv1alpha1.ConditionSeverityInfo, "LogicalCluster is not initializing yet")
+				r.requeueAfter(workspace, after)
+				return reconcileStatusContinue, nil
+			}
 
 			workspace.Status.Initializers = logicalCluster.Status.Initializers
 
@@ -80,12 +127,35 @@ func (r *phaseReconciler) reconcile(ctx context.Context, workspace *tenancyv1alp
 			conditions.MarkTrue(workspace, tenancyv1alpha1.WorkspaceInitialized)
 
 		case corev1alpha1.LogicalClusterPhaseUnavailable:
+			if conditions.IsFalse(workspace, tenancyv1alpha1.WorkspaceInitialized) && conditions.GetReason(workspace, tenancyv1alpha1.WorkspaceInitialized) == tenancyv1alpha1.WorkspaceInitializedWorkspaceDisappeared {
+				shardName, hasShard := workspace.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey]
+				if hasShard {
+					shard, shardErr := r.getShard(shardName)
+					if shardErr == nil && shard.DeletionTimestamp.IsZero() {
+						_, err := r.getLogicalCluster(ctx, logicalcluster.NewPath(workspace.Spec.Cluster))
+						if apierrors.IsNotFound(err) {
+							return reconcileStatusStopAndRequeue, nil
+						}
+						if err != nil {
+							return reconcileStatusStopAndRequeue, err
+						}
+						// Only resetting the condition. Terminal condition phase will update the phase and the
+						// next reconcile will continue where the workspace left off.
+						logger.V(3).Info("LogicalCluster reappeared, recovering workspace", "cluster", workspace.Spec.Cluster)
+						conditions.MarkTrue(workspace, tenancyv1alpha1.WorkspaceInitialized)
+						// Immediately request requeueing to recover the workspace faster.
+						r.requeueAfter(workspace, time.Second)
+					}
+				}
+			}
 			if updateTerminalConditionPhase(workspace) {
 				return reconcileStatusStopAndRequeue, nil
 			}
 			return reconcileStatusContinue, nil
 
-		case corev1alpha1.LogicalClusterPhaseReady:
+		case corev1alpha1.LogicalClusterPhaseReady,
+			corev1alpha1.LogicalClusterPhaseTerminating,
+			corev1alpha1.LogicalClusterPhaseDeleting:
 			// On delete we need to wait for the logical cluster to be deleted
 			// before we can mark the workspace as deleted.
 			if !workspace.DeletionTimestamp.IsZero() {
@@ -100,9 +170,31 @@ func (r *phaseReconciler) reconcile(ctx context.Context, workspace *tenancyv1alp
 					return reconcileStatusContinue, nil
 				}
 
+				// Mirror terminators from the LogicalCluster, then derive the phase the
+				// same way the LogicalCluster's phase reconciler does. Computing locally
+				// (instead of mirroring logicalCluster.Status.Phase) avoids a window
+				// where the WS phase stays Ready because the LC phase reconciler — a
+				// separate controller — has not yet flipped LC.Status.Phase to
+				// Terminating/Deleting. Without this, users see Phase=Ready on a
+				// workspace that has DeletionTimestamp set.
+				workspace.Status.Terminators = logicalCluster.Status.Terminators
+				if len(workspace.Status.Terminators) > 0 {
+					workspace.Status.Phase = corev1alpha1.LogicalClusterPhaseTerminating
+				} else {
+					workspace.Status.Phase = corev1alpha1.LogicalClusterPhaseDeleting
+				}
+
 				if !conditions.IsTrue(workspace, tenancyv1alpha1.WorkspaceContentDeleted) {
+					// Adaptive requeue: poll at 1/5 of the LogicalCluster's age, capped at 5 minutes.
+					// Young clusters get checked quickly (fast feedback when deletion finishes),
+					// older/stuck ones back off to reduce reconciler load.
+					// If the LogicalCluster never finishes deleting, the workspace stays in this
+					// branch indefinitely, requeuing every 5 minutes. There is no timeout or
+					// force-delete path here: exit only happens when getLogicalCluster returns
+					// NotFound, or something else sets WorkspaceContentDeleted=True. The mirrored
+					// condition reason/message below is the only signal of why it's stuck.
 					after := time.Since(logicalCluster.CreationTimestamp.Time) / 5
-					if max := time.Minute * 10; after > max {
+					if max := time.Minute * 5; after > max {
 						after = max
 					}
 					cond := conditions.Get(logicalCluster, tenancyv1alpha1.WorkspaceContentDeleted)
@@ -134,6 +226,14 @@ func (r *phaseReconciler) reconcile(ctx context.Context, workspace *tenancyv1alp
 // updateTerminalConditionPhase checks if the workspace is ready by checking conditions and sets the phase accordingly.
 // It returns true if the phase was changed, false otherwise.
 func updateTerminalConditionPhase(workspace *tenancyv1alpha1.Workspace) bool {
+	// terminating/deleting workspaces are not subject to Unavailable/Ready transitions;
+	// failing conditions (e.g. WorkspaceContentDeleted=False while waiting on
+	// terminators) are expected during termination.
+	if workspace.Status.Phase == corev1alpha1.LogicalClusterPhaseTerminating ||
+		workspace.Status.Phase == corev1alpha1.LogicalClusterPhaseDeleting {
+		return false
+	}
+
 	var notReady bool
 	for _, c := range workspace.Status.Conditions {
 		if c.Status == v1.ConditionFalse && strings.HasPrefix(string(c.Type), "Workspace") {
@@ -147,8 +247,41 @@ func updateTerminalConditionPhase(workspace *tenancyv1alpha1.Workspace) bool {
 		return true
 	}
 	if !notReady && workspace.Status.Phase == corev1alpha1.LogicalClusterPhaseUnavailable {
-		workspace.Status.Phase = corev1alpha1.LogicalClusterPhaseReady
+		workspace.Status.Phase = recoveredPhase(workspace)
 		return true
 	}
 	return false
+}
+
+// recoveredPhase returns the phase an Unavailable workspace goes back to once no
+// condition holds it there anymore.
+//
+// The regular lifecycle of a (non-mounted) workspace is:
+//
+//	Scheduling ──(spec.URL+spec.Cluster set)──> Initializing ──(no initializers left)──> Ready
+//
+// Any phase can drop to Unavailable when a Workspace* condition turns False, and
+// that can happen before the workspace was ever initialized, e.g. when no shard is
+// schedulable yet right after startup:
+//
+//	Scheduling ──(WorkspaceScheduled=False)──> Unavailable ──(WorkspaceScheduled=True)──> ?
+//
+// Going straight to Ready there skips Initializing and reports the workspace ready
+// while its LogicalCluster still has initializers, i.e. before its default
+// APIBindings exist. So the workspace resumes the lifecycle where it left off, and
+// only a workspace that already passed Initializing returns to Ready directly:
+//
+//	Unavailable ──(mounted, or WorkspaceInitialized=True)──> Ready
+//	Unavailable ──(spec.URL or spec.Cluster empty)─────────> Scheduling
+//	Unavailable ──(scheduled, not initialized yet)─────────> Initializing ──> Ready
+func recoveredPhase(workspace *tenancyv1alpha1.Workspace) corev1alpha1.LogicalClusterPhaseType {
+	// mounted workspaces have no LogicalCluster to initialize; their readiness is
+	// driven by the mount.
+	if workspace.Spec.Mount != nil || conditions.IsTrue(workspace, tenancyv1alpha1.WorkspaceInitialized) {
+		return corev1alpha1.LogicalClusterPhaseReady
+	}
+	if workspace.Spec.URL == "" || workspace.Spec.Cluster == "" {
+		return corev1alpha1.LogicalClusterPhaseScheduling
+	}
+	return corev1alpha1.LogicalClusterPhaseInitializing
 }

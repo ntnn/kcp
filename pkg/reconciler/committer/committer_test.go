@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 )
 
 func TestGeneratePatchAndSubResourcesMultipleSubresourcesPanic(t *testing.T) {
+	t.Parallel()
 	// if we change status + either spec or objectmeta, we expect a panic
 	tt := []struct {
 		name string
@@ -59,6 +60,7 @@ func TestGeneratePatchAndSubResourcesMultipleSubresourcesPanic(t *testing.T) {
 
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			require.Panics(t, func() {
 				_, _, _ = generatePatchAndSubResources(tc.old, tc.new)
 			})
@@ -67,6 +69,7 @@ func TestGeneratePatchAndSubResourcesMultipleSubresourcesPanic(t *testing.T) {
 }
 
 func TestGeneratePatchAndSubResources(t *testing.T) {
+	t.Parallel()
 	{
 		tt := []struct {
 			name                 string
@@ -126,6 +129,170 @@ func TestGeneratePatchAndSubResources(t *testing.T) {
 		for _, tc := range tt {
 			t.Run(tc.name, func(t *testing.T) {
 				patch, subresources, err := generatePatchAndSubResources(tc.old, tc.new)
+				require.NoError(t, err)
+				require.Equal(t, tc.expectedPatch, string(patch))
+				require.Equal(t, tc.expectedSubResources, subresources)
+			})
+		}
+	}
+}
+
+func TestGenerateSSAPatchAndSubResourcesMultipleSubresourcesPanic(t *testing.T) {
+	t.Parallel()
+	// if we change status + either spec or objectmeta, we expect a panic for SSA as well
+	tt := []struct {
+		name string
+		old  *Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]
+		new  *Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]
+	}{
+		{
+			name: "spec and status changed",
+			old: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+				APIVersion: "core.kcp.io/v1alpha1",
+				Kind:       "LogicalCluster",
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+				Spec:       corev1alpha1.LogicalClusterSpec{DirectlyDeletable: true},
+				Status:     corev1alpha1.LogicalClusterStatus{Phase: "old"},
+			},
+			new: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+				APIVersion: "core.kcp.io/v1alpha1",
+				Kind:       "LogicalCluster",
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+				Spec:       corev1alpha1.LogicalClusterSpec{DirectlyDeletable: false},
+				Status:     corev1alpha1.LogicalClusterStatus{Phase: "new"},
+			},
+		},
+		{
+			name: "meta and status changed",
+			old: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+				APIVersion: "core.kcp.io/v1alpha1",
+				Kind:       "LogicalCluster",
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Finalizers: []string{}},
+				Status:     corev1alpha1.LogicalClusterStatus{Phase: "old"},
+			},
+			new: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+				APIVersion: "core.kcp.io/v1alpha1",
+				Kind:       "LogicalCluster",
+				ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Finalizers: []string{"changed"}},
+				Status:     corev1alpha1.LogicalClusterStatus{Phase: "new"},
+			},
+		},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Panics(t, func() {
+				_, _, _ = generateSSAPatchAndSubResources(tc.old, tc.new)
+			})
+		})
+	}
+}
+
+func TestGenerateSSAPatchAndSubResources(t *testing.T) {
+	t.Parallel()
+	{
+		tt := []struct {
+			name                 string
+			old                  *Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]
+			new                  *Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]
+			expectedPatch        string
+			expectedSubResources []string
+		}{
+			{
+				name: "spec changed",
+				old: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+					Spec:       corev1alpha1.LogicalClusterSpec{DirectlyDeletable: false},
+				},
+				new: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+					Spec:       corev1alpha1.LogicalClusterSpec{DirectlyDeletable: true},
+				},
+				expectedPatch:        `{"apiVersion":"core.kcp.io/v1alpha1","kind":"LogicalCluster","metadata":{"name":"test-cluster"},"spec":{"directlyDeletable":true},"status":{}}`,
+				expectedSubResources: nil,
+			},
+			{
+				name: "status changed",
+				old: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+					Status:     corev1alpha1.LogicalClusterStatus{Phase: "old"},
+				},
+				new: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+					Status:     corev1alpha1.LogicalClusterStatus{Phase: "new"},
+				},
+				expectedPatch:        `{"apiVersion":"core.kcp.io/v1alpha1","kind":"LogicalCluster","metadata":{"name":"test-cluster"},"spec":{},"status":{"phase":"new"}}`,
+				expectedSubResources: []string{"status"},
+			},
+			{
+				name: "meta changed",
+				old: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Finalizers: []string{}},
+				},
+				new: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Name: "test-cluster", Finalizers: []string{"changed"}},
+				},
+				expectedPatch:        `{"apiVersion":"core.kcp.io/v1alpha1","kind":"LogicalCluster","metadata":{"name":"test-cluster","finalizers":["changed"]},"spec":{},"status":{}}`,
+				expectedSubResources: nil,
+			},
+			{
+				name: "no changes",
+				old: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Finalizers: []string{}},
+				},
+				new: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Finalizers: []string{}},
+				},
+				expectedPatch:        "",
+				expectedSubResources: nil,
+			},
+			{
+				name: "complex status with multiple values",
+				old: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+					Status: corev1alpha1.LogicalClusterStatus{
+						Phase: corev1alpha1.LogicalClusterPhaseInitializing,
+					},
+				},
+				new: &Resource[corev1alpha1.LogicalClusterSpec, corev1alpha1.LogicalClusterStatus]{
+					APIVersion: "core.kcp.io/v1alpha1",
+					Kind:       "LogicalCluster",
+					ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+					Status: corev1alpha1.LogicalClusterStatus{
+						Phase: corev1alpha1.LogicalClusterPhaseReady,
+						Initializers: []corev1alpha1.LogicalClusterInitializer{
+							"kcp.io/apibinder",
+							"kcp.io/workspaces",
+						},
+					},
+				},
+				expectedPatch:        `{"apiVersion":"core.kcp.io/v1alpha1","kind":"LogicalCluster","metadata":{"name":"test-cluster"},"spec":{},"status":{"phase":"Ready","initializers":["kcp.io/apibinder","kcp.io/workspaces"]}}`,
+				expectedSubResources: []string{"status"},
+			},
+		}
+
+		for _, tc := range tt {
+			t.Run(tc.name, func(t *testing.T) {
+				patch, subresources, err := generateSSAPatchAndSubResources(tc.old, tc.new)
 				require.NoError(t, err)
 				require.Equal(t, tc.expectedPatch, string(patch))
 				require.Equal(t, tc.expectedSubResources, subresources)

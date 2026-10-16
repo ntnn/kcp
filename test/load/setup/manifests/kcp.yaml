@@ -1,0 +1,212 @@
+apiVersion: operator.kcp.io/v1alpha1
+kind: RootShard
+metadata:
+  name: root
+  namespace: kcp
+spec:
+  image:
+    tag: 4a47e3b43 # latest working version on release 0.32 branch
+  external:
+    hostname: frontproxy.$GATEWAY_BASE_URL
+    port: 443
+  certificates:
+    issuerRef:
+      group: cert-manager.io
+      kind: Issuer
+      name: selfsigned
+  certificateTemplates:
+    server:
+      spec:
+        dnsNames:
+          - root.$GATEWAY_BASE_URL
+    virtual-workspaces:
+      spec:
+        dnsNames:
+          - root.$GATEWAY_BASE_URL
+  extraArgs:
+    - "--profiling=true"
+  cache:
+    embedded:
+      enabled: true
+  resources:
+    requests:
+      cpu: "2"
+      memory: 3Gi
+    limits:
+      cpu: "14"
+      memory: 115Gi
+  etcd:
+    endpoints:
+      - http://kcp-etcd-shard-1-client.etcd-system.svc.cluster.local:2379
+  deploymentTemplate:
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: $NODEPOOL_SELECTOR
+                        operator: In
+                        values:
+                          - "kcp-server"
+          # TODO once https://github.com/kcp-dev/kcp-operator/issues/163 is implemented
+          # topologySpreadConstraints:
+          #   - maxSkew: 1
+          #     topologyKey: "kubernetes.io/hostname"
+          #     whenUnsatisfiable: DoNotSchedule
+          #     labelSelector:
+          #       matchLabels:
+          #         app.kubernetes.io/name: kcp
+---
+apiVersion: operator.kcp.io/v1alpha1
+kind: FrontProxy
+metadata:
+  name: frontproxy
+  namespace: kcp
+spec:
+  image:
+    tag: 4a47e3b43 # latest working version on release 0.32 branch
+  certificateTemplates:
+    server:
+      spec:
+        dnsNames:
+          - frontproxy.$GATEWAY_BASE_URL
+  rootShard:
+    ref:
+      name: root
+  external:
+    hostname: frontproxy.$GATEWAY_BASE_URL
+    port: 443
+  deploymentTemplate:
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: $NODEPOOL_SELECTOR
+                        operator: In
+                        values:
+                          - "kcp-frontproxy"
+          # TODO once https://github.com/kcp-dev/kcp-operator/issues/163 is implemented
+          # topologySpreadConstraints:
+          #   - maxSkew: 1
+          #     topologyKey: "kubernetes.io/hostname"
+          #     whenUnsatisfiable: DoNotSchedule
+          #     labelSelector:
+          #       matchLabels:
+          #         app.kubernetes.io/component: front-proxy
+---
+apiVersion: operator.kcp.io/v1alpha1
+kind: Shard
+metadata:
+  name: shard2
+  namespace: kcp
+spec:
+  image:
+    tag: 4a47e3b43 # latest working version on release 0.32 branch
+  shardBaseURL: "https://shard2.$GATEWAY_BASE_URL:443"
+  certificateTemplates:
+    server:
+      spec:
+        dnsNames:
+          - shard2.$GATEWAY_BASE_URL
+    virtual-workspaces:
+      spec:
+        dnsNames:
+          - shard2.$GATEWAY_BASE_URL
+  extraArgs:
+    - "--profiling=true"
+  etcd:
+    endpoints:
+      - http://kcp-etcd-shard-2-client.etcd-system.svc.cluster.local:2379
+  rootShard:
+    ref:
+      name: root
+  resources:
+    requests:
+      cpu: "2"
+      memory: 3Gi
+    limits:
+      cpu: "14"
+      memory: 115Gi
+  deploymentTemplate:
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: $NODEPOOL_SELECTOR
+                        operator: In
+                        values:
+                          - "kcp-server"
+          # TODO once https://github.com/kcp-dev/kcp-operator/issues/163 is implemented
+          # topologySpreadConstraints:
+          #   - maxSkew: 1
+          #     topologyKey: "kubernetes.io/hostname"
+          #     whenUnsatisfiable: DoNotSchedule
+          #     labelSelector:
+          #       matchLabels:
+          #         app.kubernetes.io/name: kcp
+---
+apiVersion: operator.kcp.io/v1alpha1
+kind: Shard
+metadata:
+  name: shard3
+  namespace: kcp
+spec:
+  image:
+    tag: 4a47e3b43 # latest working version on release 0.32 branch
+  shardBaseURL: "https://shard3.$GATEWAY_BASE_URL:443"
+  certificateTemplates:
+    server:
+      spec:
+        dnsNames:
+          - shard3.$GATEWAY_BASE_URL
+    virtual-workspaces:
+      spec:
+        dnsNames:
+          - shard3.$GATEWAY_BASE_URL
+  extraArgs:
+    - "--profiling=true"
+  etcd:
+    endpoints:
+      - http://kcp-etcd-shard-3-client.etcd-system.svc.cluster.local:2379
+  rootShard:
+    ref:
+      name: root
+  resources:
+    requests:
+      cpu: "2"
+      memory: 3Gi
+    limits:
+      cpu: "14"
+      memory: 115Gi
+  deploymentTemplate:
+    spec:
+      template:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: $NODEPOOL_SELECTOR
+                        operator: In
+                        values:
+                          - "kcp-server"
+          # TODO once https://github.com/kcp-dev/kcp-operator/issues/163 is implemented
+          # topologySpreadConstraints:
+          #   - maxSkew: 1
+          #     topologyKey: "kubernetes.io/hostname"
+          #     whenUnsatisfiable: DoNotSchedule
+          #     labelSelector:
+          #       matchLabels:
+          #         app.kubernetes.io/name: kcp

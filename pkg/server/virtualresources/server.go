@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -41,11 +42,13 @@ import (
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/hops"
 
 	cacheclient "github.com/kcp-dev/kcp/pkg/cache/client"
 	"github.com/kcp-dev/kcp/pkg/cache/client/shard"
 	"github.com/kcp-dev/kcp/pkg/endpointslice"
 	"github.com/kcp-dev/kcp/pkg/indexers"
+	"github.com/kcp-dev/kcp/pkg/proxy/authheaders"
 	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
 	kcpfilters "github.com/kcp-dev/kcp/pkg/server/filters"
 )
@@ -268,7 +271,26 @@ func (s *Server) handleResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// We have a virtual resource. Get the endpoint URL, create a proxy handler and serve from that endpoint.
+	// We have a virtual resource. Before forwarding, check how far this request
+	// has already travelled: the virtual workspace it is on its way to may
+	// serve it by delegating back here, and only the count says whether that is
+	// one leg of a legitimate chain or a lap of a cycle.
+	inboundHops := hops.FromHeader(r.Header)
+	if hops.Exceeded(inboundHops) {
+		err := fmt.Errorf("request for %s has been forwarded %d times without being served: "+
+			"the virtual workspace advertised for it delegates it back to this shard. "+
+			"Check that the endpoint slice referenced by the APIExport points at a virtual workspace "+
+			"that serves %s, and that --shard-virtual-workspace-url does not point back at this shard",
+			gr, inboundHops, gr)
+		utilruntime.HandleError(err)
+		responsewriters.ErrorNegotiated(
+			apierrors.NewInternalError(err),
+			errorCodecs, schema.GroupVersion{Group: requestInfo.APIGroup, Version: requestInfo.APIVersion}, w, r,
+		)
+		return
+	}
+
+	// Get the endpoint URL, create a proxy handler and serve from that endpoint.
 
 	apiExportShard := shard.Name(apiExport.Annotations[shard.AnnotationKey])
 	if apiExportShard.Empty() {
@@ -293,7 +315,7 @@ func (s *Server) handleResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vrHandler, err := newVirtualResourceHandler(s.Extra.VWClientConfig, vrEndpointURL, clusterNameOrWildcard.String())
+	vrHandler, err := newVirtualResourceHandler(s.Extra.VWClientConfig, vrEndpointURL, clusterNameOrWildcard.String(), inboundHops)
 	if err != nil {
 		utilruntime.HandleError(err)
 		responsewriters.ErrorNegotiated(
@@ -324,12 +346,17 @@ func (s *Server) getVirtualResourceURL(ctx context.Context, apiExportCluster log
 		return "", err
 	}
 
-	urls, err := endpointslice.ListURLsFromUnstructured(*slice)
+	endpoints, err := endpointslice.ListEndpointsFromUnstructured(*slice)
 	if err != nil {
 		return "", err
 	}
 
-	return endpointslice.FindOneURL(s.Extra.ShardVirtualWorkspaceURLGetter(), urls)
+	var shardLabels labels.Set
+	if s.Extra.ThisShardLabels != nil {
+		shardLabels = s.Extra.ThisShardLabels()
+	}
+
+	return endpointslice.PickURL(s.Extra.ShardVirtualWorkspaceURLGetter(), shardLabels, endpoints)
 }
 
 func (s *Server) getAPIBindingForRequest(
@@ -369,7 +396,7 @@ func (s *Server) getAPIBindingForRequest(
 	return nil, nil
 }
 
-func newVirtualResourceHandler(cfg *rest.Config, vwURL, clusterNameOrWildcard string) (http.Handler, error) {
+func newVirtualResourceHandler(cfg *rest.Config, vwURL, clusterNameOrWildcard string, inboundHops int) (http.Handler, error) {
 	scopedURL, err := url.Parse(virtualResourceURLWithCluster(vwURL, clusterNameOrWildcard))
 	if err != nil {
 		return nil, err
@@ -380,8 +407,32 @@ func newVirtualResourceHandler(cfg *rest.Config, vwURL, clusterNameOrWildcard st
 		return nil, err
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(scopedURL)
-	proxy.Transport = tr
+	proxy := &httputil.ReverseProxy{
+		Transport: tr,
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(scopedURL)
+			hops.SetHeader(r.Out.Header, inboundHops+1)
+			// Say who asked.
+			//
+			// The connection to the virtual workspace authenticates as this shard,
+			// so without this the virtual workspace sees the shard and authorizes
+			// that instead of the caller -- and a provider's backend is told the
+			// shard's identity rather than the user's. The virtual workspace
+			// believes these headers only over a connection whose client
+			// certificate its --requestheader-client-ca-file trusts, which is the
+			// same arrangement the front proxy already uses to reach shards.
+			//
+			// Stamping strips any inbound copies first, so a client cannot assert
+			// an identity by setting the headers itself.
+			if user, ok := genericapirequest.UserFrom(r.Out.Context()); ok {
+				authheaders.SetAuthHeaders(r.Out.Header, user,
+					authheaders.DefaultUserHeader, authheaders.DefaultGroupHeader, authheaders.DefaultExtraHeaderPrefix)
+			} else {
+				authheaders.ClearAuthHeaders(r.Out.Header,
+					authheaders.DefaultUserHeader, authheaders.DefaultGroupHeader, authheaders.DefaultExtraHeaderPrefix)
+			}
+		},
+	}
 
 	return proxy, nil
 }

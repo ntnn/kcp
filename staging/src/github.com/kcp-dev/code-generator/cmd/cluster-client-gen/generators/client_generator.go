@@ -1,6 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
-Modifications Copyright 2025 The KCP Authors.
+Modifications Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -144,7 +144,7 @@ func targetForGroup(gv clientgentypes.GroupVersion, typeList []*types.Type, clie
 		// GeneratorsFunc returns a list of generators. Each generator makes a
 		// single file.
 		GeneratorsFunc: func(c *generator.Context) (generators []generator.Generator) {
-			generators = []generator.Generator{
+			generators = []generator.Generator{ //nolint:prealloc
 				// Always generate a "doc.go" file.
 				generator.GoGenerator{OutputFilename: "doc.go"},
 			}

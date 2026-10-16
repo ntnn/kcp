@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,12 +31,17 @@ import (
 	certsigning "k8s.io/kubernetes/plugin/pkg/admission/certificates/signing"
 	certsubjectrestriction "k8s.io/kubernetes/plugin/pkg/admission/certificates/subjectrestriction"
 	"k8s.io/kubernetes/plugin/pkg/admission/defaulttolerationseconds"
+	jobadmission "k8s.io/kubernetes/plugin/pkg/admission/job"
 	"k8s.io/kubernetes/plugin/pkg/admission/limitranger"
 	"k8s.io/kubernetes/plugin/pkg/admission/network/defaultingressclass"
+	"k8s.io/kubernetes/plugin/pkg/admission/nodedeclaredfeatures"
 	"k8s.io/kubernetes/plugin/pkg/admission/nodetaint"
+	"k8s.io/kubernetes/plugin/pkg/admission/podgroup"
+	"k8s.io/kubernetes/plugin/pkg/admission/podresize"
 	"k8s.io/kubernetes/plugin/pkg/admission/podtopologylabels"
 	podpriority "k8s.io/kubernetes/plugin/pkg/admission/priority"
 	"k8s.io/kubernetes/plugin/pkg/admission/runtimeclass"
+	"k8s.io/kubernetes/plugin/pkg/admission/scheduling/podgroupprotection"
 	"k8s.io/kubernetes/plugin/pkg/admission/security/podsecurity"
 	"k8s.io/kubernetes/plugin/pkg/admission/serviceaccount"
 	"k8s.io/kubernetes/plugin/pkg/admission/storage/persistentvolume/resize"
@@ -47,14 +52,17 @@ import (
 	"github.com/kcp-dev/kcp/pkg/admission/apibindingfinalizer"
 	"github.com/kcp-dev/kcp/pkg/admission/apiexport"
 	"github.com/kcp-dev/kcp/pkg/admission/apiexportendpointslice"
+	"github.com/kcp-dev/kcp/pkg/admission/apiexportidentityrotation"
 	"github.com/kcp-dev/kcp/pkg/admission/apiresourceschema"
-	"github.com/kcp-dev/kcp/pkg/admission/cachedresource"
+	"github.com/kcp-dev/kcp/pkg/admission/clustercachedresource"
 	"github.com/kcp-dev/kcp/pkg/admission/crdnooverlappinggvr"
 	"github.com/kcp-dev/kcp/pkg/admission/kubequota"
 	"github.com/kcp-dev/kcp/pkg/admission/logicalcluster"
 	"github.com/kcp-dev/kcp/pkg/admission/logicalclusterfinalizer"
+	kcpmutatingadmissionpolicy "github.com/kcp-dev/kcp/pkg/admission/mutatingadmissionpolicy"
 	kcpmutatingwebhook "github.com/kcp-dev/kcp/pkg/admission/mutatingwebhook"
 	workspacenamespacelifecycle "github.com/kcp-dev/kcp/pkg/admission/namespacelifecycle"
+	"github.com/kcp-dev/kcp/pkg/admission/objectcountlimit"
 	"github.com/kcp-dev/kcp/pkg/admission/pathannotation"
 	"github.com/kcp-dev/kcp/pkg/admission/permissionclaims"
 	"github.com/kcp-dev/kcp/pkg/admission/reservedcrdannotations"
@@ -84,7 +92,9 @@ var AllOrderedPlugins = beforeWebhooks(
 	apibinding.PluginName,
 	apibindingfinalizer.PluginName,
 	apiexportendpointslice.PluginName,
+	apiexportidentityrotation.PluginName,
 	kcpmutatingwebhook.PluginName,
+	kcpmutatingadmissionpolicy.PluginName,
 	kcpvalidatingadmissionpolicy.PluginName,
 	kcpvalidatingwebhook.PluginName,
 	reservedcrdannotations.PluginName,
@@ -94,9 +104,10 @@ var AllOrderedPlugins = beforeWebhooks(
 	reservedmetadata.PluginName,
 	permissionclaims.PluginName,
 	pathannotation.PluginName,
+	objectcountlimit.PluginName,
 	kubequota.PluginName,
 	mutatingadmissionpolicy.PluginName,
-	cachedresource.PluginName,
+	clustercachedresource.PluginName,
 )
 
 func beforeWebhooks(recommended []string, plugins ...string) []string {
@@ -122,10 +133,12 @@ func RegisterAllKcpAdmissionPlugins(plugins *admission.Plugins) {
 	apiresourceschema.Register(plugins)
 	apiexport.Register(plugins)
 	apibinding.Register(plugins)
+	apiexportidentityrotation.Register(plugins)
 	apibindingfinalizer.Register(plugins)
 	apiexportendpointslice.Register(plugins)
 	workspacenamespacelifecycle.Register(plugins)
 	kcpmutatingwebhook.Register(plugins)
+	kcpmutatingadmissionpolicy.Register(plugins)
 	kcpvalidatingadmissionpolicy.Register(plugins)
 	kcpvalidatingwebhook.Register(plugins)
 	reservedcrdannotations.Register(plugins)
@@ -135,8 +148,9 @@ func RegisterAllKcpAdmissionPlugins(plugins *admission.Plugins) {
 	reservedmetadata.Register(plugins)
 	permissionclaims.Register(plugins)
 	pathannotation.Register(plugins)
+	objectcountlimit.Register(plugins)
 	kubequota.Register(plugins)
-	cachedresource.Register(plugins)
+	clustercachedresource.Register(plugins)
 }
 
 var defaultOnPluginsInKcp = sets.New[string](
@@ -145,7 +159,7 @@ var defaultOnPluginsInKcp = sets.New[string](
 	certsigning.PluginName,                 // CertificateSigning
 	certsubjectrestriction.PluginName,      // CertificateSubjectRestriction
 
-	// KCP
+	// kcp
 	workspace.PluginName,
 	logicalclusterfinalizer.PluginName,
 	shard.PluginName,
@@ -157,16 +171,20 @@ var defaultOnPluginsInKcp = sets.New[string](
 	apibinding.PluginName,
 	apibindingfinalizer.PluginName,
 	apiexportendpointslice.PluginName,
+	apiexportidentityrotation.PluginName,
 	kcpmutatingwebhook.PluginName,
+	kcpmutatingadmissionpolicy.PluginName,
 	kcpvalidatingadmissionpolicy.PluginName,
 	kcpvalidatingwebhook.PluginName,
 	reservedcrdannotations.PluginName,
 	reservedcrdgroups.PluginName,
 	reservednames.PluginName,
+	reservedmetadata.PluginName,
 	permissionclaims.PluginName,
 	pathannotation.PluginName,
+	objectcountlimit.PluginName,
 	kubequota.PluginName,
-	cachedresource.PluginName,
+	clustercachedresource.PluginName,
 )
 
 // defaultOnKubePluginsInKube is a copy of kubeapiserveroptions.defaultOnKubePlugins.
@@ -196,6 +214,11 @@ var defaultOnKubePluginsInKube = sets.New[string](
 	podsecurity.PluginName,                  // PodSecurity
 	podtopologylabels.PluginName,            // PodTopologyLabels
 	mutatingadmissionpolicy.PluginName,      // MutatingAdmissionPolicy
+	nodedeclaredfeatures.PluginName,         // NodeDeclaredFeatureValidator
+	jobadmission.PluginName,                 // JobValidation, only active when feature gate WorkloadWithJob is enabled
+	podgroupprotection.PluginName,           // PodGroupProtection
+	podgroup.PluginName,                     // PodGroupWorkloadExists, only active when feature gate GenericWorkload is enabled
+	podresize.PluginName,                    // PodResizeValidator, only active when feature gate InPlacePodVerticalScaling is enabled
 )
 
 // DefaultOffAdmissionPlugins get admission plugins off by default for kcp.

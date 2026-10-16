@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
@@ -49,6 +50,7 @@ type virtualStorageClientOptions struct {
 	// Local shard info.
 	ThisShardName                      shard.Name
 	ThisShardVirtualWorkspaceURLGetter func() string
+	ThisShardLabels                    func() labels.Set
 
 	// Misc.
 	GetUnstructuredEndpointSlice    func(ctx context.Context, cluster logicalcluster.Name, shard shard.Name, gvr schema.GroupVersionResource, name string) (*unstructured.Unstructured, error)
@@ -60,15 +62,12 @@ func newVirtualStorageVerbsProvider(
 	ctx context.Context,
 
 	vrResource schema.GroupVersionResource,
-	vrIdentity string,
-
 	apiExport *apisv1alpha2.APIExport,
 	opts *virtualStorageClientOptions,
 ) (*virtualStorageVerbsProvider, error) {
 	var virtualStorage *apisv1alpha2.ResourceSchemaStorageVirtual
 	for _, resourceSchema := range apiExport.Spec.Resources {
 		if resourceSchema.Storage.Virtual != nil &&
-			resourceSchema.Storage.Virtual.IdentityHash == vrIdentity &&
 			resourceSchema.Group == vrResource.Group &&
 			resourceSchema.Name == vrResource.Resource {
 			virtualStorage = resourceSchema.Storage.Virtual
@@ -76,7 +75,7 @@ func newVirtualStorageVerbsProvider(
 		}
 	}
 	if virtualStorage == nil {
-		return nil, fmt.Errorf("no APIExports for virtual resource %s with identity %s", vrResource, vrIdentity)
+		return nil, fmt.Errorf("APIExport %s|%s doesn't export virtual resource %s", logicalcluster.From(apiExport), apiExport.Name, vrResource)
 	}
 
 	sliceKind := schema.GroupKind{
@@ -91,9 +90,9 @@ func newVirtualStorageVerbsProvider(
 	/*switch sliceKind {
 	case schema.GroupKind{
 		Group: "cache.kcp.io",
-		Kind:  "CachedResourceEndpointSlice",
+		Kind:  "ClusterCachedResourceEndpointSlice",
 	}:
-		return &virtualCachedResourceVerbsProvider{}, nil
+		return &virtualClusterCachedResourceVerbsProvider{}, nil
 	}*/
 
 	// Otherwise we need the VW url from an endpoint slice, where we
@@ -151,6 +150,16 @@ func buildVerbsMap(apiResources *metav1.APIResourceList, resourceName string) ma
 	return m
 }
 
+// thisShardLabels reports the shard's labels, or none if the caller did not
+// supply a way to read them. Without labels only endpoints that select shards
+// are affected, and those fail with a clear error rather than silently.
+func thisShardLabels(opts *virtualStorageClientOptions) labels.Set {
+	if opts.ThisShardLabels == nil {
+		return nil
+	}
+	return opts.ThisShardLabels()
+}
+
 func getVirtualResourceURL(
 	ctx context.Context,
 	apiExportCluster logicalcluster.Name,
@@ -173,10 +182,10 @@ func getVirtualResourceURL(
 		return "", err
 	}
 
-	urls, err := endpointslice.ListURLsFromUnstructured(*slice)
+	endpoints, err := endpointslice.ListEndpointsFromUnstructured(*slice)
 	if err != nil {
 		return "", err
 	}
 
-	return endpointslice.FindOneURL(opts.ThisShardVirtualWorkspaceURLGetter(), urls)
+	return endpointslice.PickURL(opts.ThisShardVirtualWorkspaceURLGetter(), thisShardLabels(opts), endpoints)
 }

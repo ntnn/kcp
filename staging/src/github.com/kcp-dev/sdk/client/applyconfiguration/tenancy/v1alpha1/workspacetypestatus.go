@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,8 +24,12 @@ import (
 
 // WorkspaceTypeStatusApplyConfiguration represents a declarative configuration of the WorkspaceTypeStatus type for use
 // with apply.
+//
+// WorkspaceTypeStatus defines the observed state of WorkspaceType.
 type WorkspaceTypeStatusApplyConfiguration struct {
-	Conditions        *conditionsv1alpha1.Conditions       `json:"conditions,omitempty"`
+	// conditions is a list of conditions that apply to the APIExport.
+	Conditions *conditionsv1alpha1.Conditions `json:"conditions,omitempty"`
+	// virtualWorkspaces contains all APIExport virtual workspace URLs.
 	VirtualWorkspaces []VirtualWorkspaceApplyConfiguration `json:"virtualWorkspaces,omitempty"`
 }
 

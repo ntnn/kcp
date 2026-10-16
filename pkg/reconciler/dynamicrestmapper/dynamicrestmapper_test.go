@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,14 +17,21 @@ limitations under the License.
 package dynamicrestmapper
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/util/workqueue"
 
 	"github.com/kcp-dev/logicalcluster/v3"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 
 	"github.com/kcp-dev/kcp/pkg/reconciler/apis/apibinding"
 )
@@ -58,6 +65,7 @@ func newDefaultRESTMapperWith(gvkrs []typeMeta) *DefaultRESTMapper {
 }
 
 func TestClusterRESTMapping(t *testing.T) {
+	t.Parallel()
 	type applyPair struct {
 		toRemove []typeMeta
 		toAdd    []typeMeta
@@ -232,6 +240,7 @@ func TestClusterRESTMapping(t *testing.T) {
 
 	for testName, s := range scenarios {
 		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
 			for clusterName, apply := range s.applyPairs {
 				s.dmapper.ForCluster(clusterName).apply(apply.toRemove, apply.toAdd)
 			}
@@ -273,7 +282,52 @@ func TestClusterRESTMapping(t *testing.T) {
 		"ResourceFor() on an empty mapper should return an error of type NoResourceMatchError")
 }
 
+func TestRESTMappingVersionFallback(t *testing.T) {
+	t.Parallel()
+
+	// apis.kcp.io defaults to v1alpha2 because of APIExport, while
+	// APIExportEndpointSlice only exists in v1alpha1. Mapping the latter
+	// without an explicit version must fall back to v1alpha1 instead of
+	// failing.
+	exportV1alpha1 := newTypeMeta("apis.kcp.io", "v1alpha1", "APIExport", "apiexport", "apiexports", meta.RESTScopeRoot)
+	exportV1alpha2 := newTypeMeta("apis.kcp.io", "v1alpha2", "APIExport", "apiexport", "apiexports", meta.RESTScopeRoot)
+	sliceV1alpha1 := newTypeMeta("apis.kcp.io", "v1alpha1", "APIExportEndpointSlice", "apiexportendpointslice", "apiexportendpointslices", meta.RESTScopeRoot)
+
+	dmapper := NewDynamicRESTMapper()
+	dmapper.ForCluster("one").apply(nil, []typeMeta{exportV1alpha1, exportV1alpha2, sliceV1alpha1})
+	mapper := dmapper.ForCluster("one")
+
+	mapping, err := mapper.RESTMapping(sliceV1alpha1.groupVersionKind().GroupKind())
+	require.NoError(t, err,
+		"RESTMapping() should fall back to a version serving the kind")
+	require.Equal(t, sliceV1alpha1.groupVersionKind(), mapping.GroupVersionKind,
+		"RESTMapping() fallback should return the newest version serving the kind")
+
+	mappings, err := mapper.RESTMappings(sliceV1alpha1.groupVersionKind().GroupKind())
+	require.NoError(t, err,
+		"RESTMappings() should fall back to versions serving the kind")
+	require.Len(t, mappings, 1)
+	require.Equal(t, sliceV1alpha1.groupVersionKind(), mappings[0].GroupVersionKind)
+
+	// The default version must still win when it serves the kind.
+	mapping, err = mapper.RESTMapping(exportV1alpha2.groupVersionKind().GroupKind())
+	require.NoError(t, err)
+	require.Equal(t, exportV1alpha2.groupVersionKind(), mapping.GroupVersionKind,
+		"RESTMapping() should keep preferring the group's default version")
+
+	// An explicit version request must not trigger the fallback.
+	_, err = mapper.RESTMapping(sliceV1alpha1.groupVersionKind().GroupKind(), "v1alpha2")
+	require.Error(t, err,
+		"RESTMapping() with an explicit unserved version should still fail")
+
+	// An unknown kind must still fail.
+	_, err = mapper.RESTMapping(schema.GroupKind{Group: "apis.kcp.io", Kind: "Unknown"})
+	require.Error(t, err,
+		"RESTMapping() for an unknown kind should fail")
+}
+
 func TestDiffResourceBindingsAnn(t *testing.T) {
+	t.Parallel()
 	scenarios := map[string]struct {
 		oldAnn apibinding.ResourceBindingsAnnotation
 		newAnn apibinding.ResourceBindingsAnnotation
@@ -361,6 +415,7 @@ func TestDiffResourceBindingsAnn(t *testing.T) {
 
 	for testName, s := range scenarios {
 		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
 			toRemove, toAdd :=
 				diffResourceBindingsAnn(s.oldAnn, s.newAnn)
 			require.Equal(t, s.expectedToRemove, toRemove,
@@ -369,4 +424,149 @@ func TestDiffResourceBindingsAnn(t *testing.T) {
 				"mismatch in annotation keys to add")
 		})
 	}
+}
+
+// TestGatherGVKRsForCRD guards against a race where the resource-bindings
+// lock for a CRD becomes visible before the CRD itself is established:
+// reading Status.AcceptedNames at that point would yield empty names and
+// store a garbage mapping that is never corrected.
+func TestGatherGVKRsForCRD(t *testing.T) {
+	t.Parallel()
+
+	newCRD := func(established bool) *apiextensionsv1.CustomResourceDefinition {
+		crd := &apiextensionsv1.CustomResourceDefinition{
+			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+				Group: "example.com",
+				Scope: apiextensionsv1.ClusterScoped,
+				Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+					{Name: "v1", Served: true},
+				},
+			},
+		}
+		if established {
+			// AcceptedNames is only populated once the CRD has been
+			// reconciled to Established; that's the actual race being
+			// guarded against, not just the condition being absent.
+			crd.Status.AcceptedNames = apiextensionsv1.CustomResourceDefinitionNames{
+				Kind:     "Widget",
+				Singular: "widget",
+				Plural:   "widgets",
+			}
+			crd.Status.Conditions = append(crd.Status.Conditions, apiextensionsv1.CustomResourceDefinitionCondition{
+				Type:   apiextensionsv1.Established,
+				Status: apiextensionsv1.ConditionTrue,
+			})
+		}
+		return crd
+	}
+
+	c := &DynamicTypesController{}
+
+	t.Run("not established yields no mappings and signals a retry", func(t *testing.T) {
+		t.Parallel()
+		gvkrs, notEstablished := c.gatherGVKRsForCRD(newCRD(false))
+		require.Empty(t, gvkrs)
+		require.True(t, notEstablished)
+	})
+
+	t.Run("established yields the accepted names", func(t *testing.T) {
+		t.Parallel()
+		gvkrs, notEstablished := c.gatherGVKRsForCRD(newCRD(true))
+		require.False(t, notEstablished)
+		require.Equal(t, []typeMeta{
+			newTypeMeta("example.com", "v1", "Widget", "widget", "widgets", meta.RESTScopeRoot),
+		}, gvkrs)
+	})
+}
+
+// TestProcessRequeuesNotEstablishedCRD checks that a queue item covering
+// several bound resources still applies the mappings it can gather even
+// when one of them is a CRD that hasn't reached Established yet, and that
+// the item is requeued with backoff (rather than the whole batch failing)
+// so the not-yet-established CRD is retried later. It drives the change
+// through processNextWorkItem (not just process) because the backoff only
+// actually escalates if processNextWorkItem calls AddRateLimited instead of
+// Forget when process reports requeue=true; calling process directly can't
+// observe that distinction.
+func TestProcessRequeuesNotEstablishedCRD(t *testing.T) {
+	t.Parallel()
+
+	clusterName := logicalcluster.Name("root:org:ws")
+
+	establishedCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "widgets.example.com"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "example.com",
+			Scope: apiextensionsv1.ClusterScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{Name: "v1", Served: true},
+			},
+		},
+		Status: apiextensionsv1.CustomResourceDefinitionStatus{
+			AcceptedNames: apiextensionsv1.CustomResourceDefinitionNames{
+				Kind:     "Widget",
+				Singular: "widget",
+				Plural:   "widgets",
+			},
+			Conditions: []apiextensionsv1.CustomResourceDefinitionCondition{
+				{Type: apiextensionsv1.Established, Status: apiextensionsv1.ConditionTrue},
+			},
+		},
+	}
+	pendingCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "gadgets.example.com"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "example.com",
+			Scope: apiextensionsv1.ClusterScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{Name: "v1", Served: true},
+			},
+		},
+	}
+
+	c := &DynamicTypesController{
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[string](),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "test"},
+		),
+		state: NewDynamicRESTMapper(),
+		getLogicalCluster: func(logicalcluster.Name, string) (*corev1alpha1.LogicalCluster, error) {
+			return &corev1alpha1.LogicalCluster{}, nil
+		},
+		getCRD: func(_ logicalcluster.Name, name string) (*apiextensionsv1.CustomResourceDefinition, error) {
+			switch name {
+			case establishedCRD.Name:
+				return establishedCRD, nil
+			case pendingCRD.Name:
+				return pendingCRD, nil
+			default:
+				return nil, apierrors.NewNotFound(apiextensionsv1.Resource("customresourcedefinitions"), name)
+			}
+		},
+	}
+
+	item := queueItem{
+		ClusterName:         clusterName,
+		ClusterResourceName: corev1alpha1.LogicalClusterName,
+		Op:                  opUpdate,
+		ToAdd: apibinding.ResourceBindingsAnnotation{
+			establishedCRD.Name: {Lock: apibinding.Lock{CRD: true}},
+			pendingCRD.Name:     {Lock: apibinding.Lock{CRD: true}},
+		},
+	}
+	keyBytes, err := json.Marshal(&item)
+	require.NoError(t, err)
+	key := string(keyBytes)
+	t.Cleanup(c.queue.ShutDown)
+
+	c.queue.Add(key)
+	require.True(t, c.processNextWorkItem(context.Background()))
+
+	gvkrs, err := c.state.ForCluster(clusterName).getGVKRs(schema.GroupResource{Group: "example.com", Resource: "widgets"})
+	require.NoError(t, err)
+	require.NotEmpty(t, gvkrs, "the established CRD's mapping should still be applied")
+
+	require.Equal(t, 1, c.queue.NumRequeues(key),
+		"processNextWorkItem must call AddRateLimited (not Forget) when process reports requeue, "+
+			"otherwise the per-item exponential backoff never escalates for a CRD that never establishes")
 }

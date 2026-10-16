@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,19 +17,13 @@ limitations under the License.
 package workspace
 
 import (
-	"crypto/sha256"
-	"strings"
-
-	"github.com/martinlindhe/base36"
-
-	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/third_party/conditions/util/conditions"
 )
 
 const (
-	byBase36Sha224Name = "byBase36Sha224Name"
-	unschedulable      = "unschedulable"
+	unschedulable    = "unschedulable"
+	byLogicalCluster = "byLogicalCluster"
 )
 
 func indexUnschedulable(obj interface{}) ([]string, error) {
@@ -40,14 +34,14 @@ func indexUnschedulable(obj interface{}) ([]string, error) {
 	return []string{}, nil
 }
 
-func indexByBase36Sha224Name(obj interface{}) ([]string, error) {
-	s := obj.(*corev1alpha1.Shard)
-	return []string{ByBase36Sha224NameValue(s.Name)}, nil
-}
-
-func ByBase36Sha224NameValue(name string) string {
-	hash := sha256.Sum224([]byte(name))
-	base36hash := strings.ToLower(base36.EncodeBytes(hash[:]))
-
-	return base36hash[:8]
+// indexWorkspaceByLogicalCluster indexes Workspaces by their spec.cluster (the
+// logical cluster name of the underlying LogicalCluster). This lets the
+// controller quickly find the Workspace tied to a given LogicalCluster when a
+// LogicalCluster event fires.
+func indexWorkspaceByLogicalCluster(obj interface{}) ([]string, error) {
+	workspace := obj.(*tenancyv1alpha1.Workspace)
+	if workspace.Spec.Cluster == "" {
+		return []string{}, nil
+	}
+	return []string{workspace.Spec.Cluster}, nil
 }

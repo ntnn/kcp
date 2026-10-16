@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package filters
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,17 +31,21 @@ import (
 	"sigs.k8s.io/yaml"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apiserver/pkg/endpoints/request"
+
+	"github.com/kcp-dev/logicalcluster/v3"
 )
 
 var (
 	// reClusterName is a regular expression for cluster names. It is based on
 	// modified RFC 1123. It allows for 63 characters for single name and includes
-	// KCP specific ':' separator for workspace nesting. We are not re-using k8s
+	// kcp specific ':' separator for workspace nesting. We are not re-using k8s
 	// validation regex because its purpose is for single name validation.
 	reClusterName = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?:)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
 func Test_isPartialMetadataHeader(t *testing.T) {
+	t.Parallel()
 	tests := map[string]struct {
 		accept string
 		want   bool
@@ -55,6 +61,7 @@ func Test_isPartialMetadataHeader(t *testing.T) {
 	}
 	for testName, test := range tests {
 		t.Run(testName, func(t *testing.T) {
+			t.Parallel()
 			got := isPartialMetadataHeader(test.accept)
 			require.Equal(t, test.want, got)
 		})
@@ -62,6 +69,7 @@ func Test_isPartialMetadataHeader(t *testing.T) {
 }
 
 func TestWorkspaceNamePattern(t *testing.T) {
+	t.Parallel()
 	_, fileName, _, _ := runtime.Caller(0)
 	bs, err := os.ReadFile(filepath.Join(filepath.Dir(fileName), "..", "..", "..", "config", "crds", "tenancy.kcp.io_workspaces.yaml"))
 	require.NoError(t, err)
@@ -79,6 +87,7 @@ func TestWorkspaceNamePattern(t *testing.T) {
 }
 
 func TestReCluster(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		cluster string
 		valid   bool
@@ -118,9 +127,95 @@ func TestReCluster(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.cluster, func(t *testing.T) {
+			t.Parallel()
 			if got := reClusterName.MatchString(tt.cluster); got != tt.valid {
 				t.Errorf("reCluster.MatchString(%q) = %v, want %v", tt.cluster, got, tt.valid)
 			}
+		})
+	}
+}
+
+// TestWithClusterNameShapeInvariant verifies that the defense-in-depth filter
+// rejects requests whose context carries a path-shaped cluster name (which
+// would otherwise be concatenated verbatim into the etcd key by
+// NoNamespaceKeyRootFunc, producing orphaned rows), while leaving legitimate
+// bare names, system:* names, wildcard requests, and unset-cluster requests
+// alone.
+func TestWithClusterNameShapeInvariant(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		cluster    *request.Cluster
+		wantStatus int
+		wantCalled bool
+	}{
+		"no cluster on context": {
+			cluster:    nil,
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		"bare logical cluster name (hash)": {
+			cluster:    &request.Cluster{Name: logicalcluster.Name("25t3xbr5iceb0155")},
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		"bare human-readable name": {
+			cluster:    &request.Cluster{Name: logicalcluster.Name("root")},
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		"system:admin is allowed": {
+			cluster:    &request.Cluster{Name: logicalcluster.Name("system:admin")},
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		"system:system-crds is allowed": {
+			cluster:    &request.Cluster{Name: logicalcluster.Name("system:system-crds")},
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		"wildcard request passes through even with weird name": {
+			cluster:    &request.Cluster{Wildcard: true, Name: logicalcluster.Name("*")},
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		"empty name passes through": {
+			cluster:    &request.Cluster{Name: logicalcluster.Name("")},
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		"path-shaped name root:internal-cluster is rejected": {
+			cluster:    &request.Cluster{Name: logicalcluster.Name("root:internal-cluster")},
+			wantStatus: http.StatusInternalServerError,
+			wantCalled: false,
+		},
+		"path-shaped name root:org:ws is rejected": {
+			cluster:    &request.Cluster{Name: logicalcluster.Name("root:org:ws")},
+			wantStatus: http.StatusInternalServerError,
+			wantCalled: false,
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			called := false
+			downstream := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			h := WithClusterNameShapeInvariant(downstream)
+
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/namespaces/default/configmaps", http.NoBody)
+			if tt.cluster != nil {
+				req = req.WithContext(request.WithCluster(req.Context(), *tt.cluster))
+			}
+			rr := httptest.NewRecorder()
+
+			h.ServeHTTP(rr, req)
+
+			require.Equal(t, tt.wantStatus, rr.Code, "status code; body=%s", rr.Body.String())
+			require.Equal(t, tt.wantCalled, called, "downstream called")
 		})
 	}
 }

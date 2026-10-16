@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,4 +18,5 @@ limitations under the License.
 // +groupName=apis.kcp.io
 // +k8s:conversion-gen=github.com/kcp-dev/sdk/apis/apis/v1alpha1
 // +k8s:openapi-gen=true
+// +k8s:openapi-model-package=com.github.kcp-dev.sdk.apis.apis.v1alpha2
 package v1alpha2

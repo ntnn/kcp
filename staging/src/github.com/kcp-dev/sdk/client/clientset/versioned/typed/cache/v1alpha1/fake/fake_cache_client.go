@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,16 +29,12 @@ type FakeCacheV1alpha1 struct {
 	*testing.Fake
 }
 
-func (c *FakeCacheV1alpha1) CachedObjects() v1alpha1.CachedObjectInterface {
-	return newFakeCachedObjects(c)
+func (c *FakeCacheV1alpha1) ClusterCachedResources() v1alpha1.ClusterCachedResourceInterface {
+	return newFakeClusterCachedResources(c)
 }
 
-func (c *FakeCacheV1alpha1) CachedResources() v1alpha1.CachedResourceInterface {
-	return newFakeCachedResources(c)
-}
-
-func (c *FakeCacheV1alpha1) CachedResourceEndpointSlices() v1alpha1.CachedResourceEndpointSliceInterface {
-	return newFakeCachedResourceEndpointSlices(c)
+func (c *FakeCacheV1alpha1) ClusterCachedResourceEndpointSlices() v1alpha1.ClusterCachedResourceEndpointSliceInterface {
+	return newFakeClusterCachedResourceEndpointSlices(c)
 }
 
 // RESTClient returns a RESTClient that is used to communicate

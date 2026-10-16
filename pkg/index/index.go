@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,17 +17,31 @@ limitations under the License.
 package index
 
 import (
+	"context"
+	"fmt"
 	"maps"
-	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
+
+	"github.com/kcp-dev/kcp/pkg/contextmanager"
+	"github.com/kcp-dev/kcp/pkg/mounts"
 )
+
+// defaultMigrationGracePeriod is the period during which a cluster is considered "recently migrated".
+// Watches with a non-zero RV (so clients trying to reestablish watch) get a 410 returned while a
+// cluster is considered recently migrated to force the client to do a full relist.
+//
+// This is set to 90s since client-go reflectors, the most likely clients, may have started to backoff
+// trying to reconnect during the migration. The backoff ceiling is 60s, so 90s should be enough of a
+// window for all clients to receive a 410 and start a new watch.
+const defaultMigrationGracePeriod = 90 * time.Second
 
 // Index implements a mapping from logical cluster to (shard) URL.
 type Index interface {
@@ -48,6 +62,12 @@ type Result struct {
 	// ErrorCode is the HTTP error code to return for the request.
 	// If this is set, the URL and Shard fields are ignored.
 	ErrorCode int
+}
+
+// IsMount returns true if the result describes a mounted workspace: it has a
+// mount target URL but no logical cluster.
+func (r Result) IsMount() bool {
+	return r.URL != "" && r.Cluster.Empty()
 }
 
 // PathRewriter can rewrite a logical cluster path before the actual mapping through
@@ -73,6 +93,18 @@ type State struct {
 	shardClusterWorkspaceMount map[string]map[logicalcluster.Name]map[string]tenancyv1alpha1.WorkspaceSpec // (shard name, logical cluster, workspace name) -> WorkspaceSpec
 
 	shardClusterWorkspaceNameErrorCode map[string]map[logicalcluster.Name]map[string]int // (shard name, logical cluster, workspace name) -> error code
+
+	// now is overridable for testing.
+	now func() time.Time
+
+	// migrated at maps logicalcluster.Name to the timestamp it was migrated.
+	// The timestamp is cleared after the grace period on the next request.
+	migratedAt sync.Map
+	// migrationGracePeriod is the grace period for migratedAt.
+	migrationGracePeriod time.Duration
+
+	// clusterContexts allows deriving contexts from both a connection and a shared per-cluster context.
+	clusterContexts *contextmanager.Manager[logicalcluster.Name]
 }
 
 func New(rewriters []PathRewriter) *State {
@@ -93,6 +125,10 @@ func New(rewriters []PathRewriter) *State {
 		// shardClusterWorkspaceNameErrorCode is a map of shar,logical cluster, workspace to error code when we want to return an error code
 		// instead of a URL.
 		shardClusterWorkspaceNameErrorCode: map[string]map[logicalcluster.Name]map[string]int{},
+
+		migrationGracePeriod: defaultMigrationGracePeriod,
+		now:                  time.Now,
+		clusterContexts:      contextmanager.New[logicalcluster.Name](context.Background()),
 	}
 }
 
@@ -200,7 +236,7 @@ func (c *State) DeleteWorkspace(shard string, ws *tenancyv1alpha1.Workspace) {
 		if len(c.shardClusterWorkspaceMount[shard][clusterName]) == 0 {
 			delete(c.shardClusterWorkspaceMount[shard], clusterName)
 			if len(c.shardClusterWorkspaceMount[shard]) == 0 {
-				delete(c.shardClusterWorkspaceName, shard)
+				delete(c.shardClusterWorkspaceMount, shard)
 			}
 		}
 	}
@@ -223,19 +259,87 @@ func (c *State) UpsertLogicalCluster(shard string, logicalCluster *corev1alpha1.
 	got := c.clusterShards[clusterName]
 	c.lock.RUnlock()
 
-	if got != shard {
-		c.lock.Lock()
-		defer c.lock.Unlock()
+	if got == shard {
+		return
+	}
 
-		c.clusterShards[clusterName] = shard
+	c.lock.Lock()
+	defer c.lock.Unlock()
 
-		// LogicalClusters are annotated with "path:name" of their workspace's type.
-		typeIdent := logicalcluster.NewPath(logicalCluster.Annotations[tenancyv1alpha1.LogicalClusterTypeAnnotationKey])
+	// Re-read under write lock, a concurrent upsert may have won the race.
+	got = c.clusterShards[clusterName]
+	if got == shard {
+		return
+	}
 
-		if c.shardClusterWorkspaceType[shard] == nil {
-			c.shardClusterWorkspaceType[shard] = map[logicalcluster.Name]logicalcluster.Path{}
+	// If the migrating annotation is set do not handle the update at all.
+	// The delete event from the origin shard is processed in DeleteLogicalCluster.
+	// The update event from the destination shard must only be
+	// processed (as in, cause the entries in the front-proxies maps to
+	// be updated) after the migration has finished and the annotation
+	// has been removed from the LC.
+	// TODO(ntnn): Make the migrating annotation part of the API.
+	if logicalCluster.Annotations["internal.kcp.io/migrating"] != "" {
+		return
+	}
+
+	// If got is not empty then the logical cluster was migrated from shard `got` to shard `shard`.
+	// Record the timestamp and delete the context from the manager.
+	// The timestamp is recorded so clients with a watch are getting a 410 sent back to trigger a full relist.
+	// The context is cancelled to force close watches, which will then cause them to get the aforementioned 410s to relist.
+	// The relist is important because the RV on the destination shard will be different, leading to erroneous watch results if no relist is done.
+	if got != "" {
+		c.migratedAt.Store(clusterName, c.now())
+		c.clusterContexts.Delete(clusterName, fmt.Errorf("logical cluster %s migrated from shard %s to shard %s", clusterName, got, shard))
+	}
+
+	c.clusterShards[clusterName] = shard
+
+	// LogicalClusters are annotated with "path:name" of their workspace's type.
+	typeIdent := logicalcluster.NewPath(logicalCluster.Annotations[tenancyv1alpha1.LogicalClusterTypeAnnotationKey])
+
+	if c.shardClusterWorkspaceType[shard] == nil {
+		c.shardClusterWorkspaceType[shard] = map[logicalcluster.Name]logicalcluster.Path{}
+	}
+	c.shardClusterWorkspaceType[shard][clusterName] = typeIdent
+
+	// Use the LC owner to fill the rest of the maps
+	owner := logicalCluster.Spec.Owner
+	if owner == nil || owner.Resource != "workspaces" || owner.Name == "" || owner.Cluster == "" {
+		return
+	}
+
+	parentCluster := logicalcluster.Name(owner.Cluster)
+
+	// The edges are keyed by the shard the parent's Workspace lives on.
+	// If the parent is not known yet the Workspace event will fill the edges.
+	parentShard, found := c.clusterShards[parentCluster]
+	if !found {
+		return
+	}
+
+	if _, found := c.shardClusterWorkspaceNameCluster[parentShard][parentCluster][owner.Name]; !found {
+		if c.shardClusterWorkspaceNameCluster[parentShard] == nil {
+			c.shardClusterWorkspaceNameCluster[parentShard] = map[logicalcluster.Name]map[string]logicalcluster.Name{}
 		}
-		c.shardClusterWorkspaceType[shard][clusterName] = typeIdent
+		if c.shardClusterWorkspaceNameCluster[parentShard][parentCluster] == nil {
+			c.shardClusterWorkspaceNameCluster[parentShard][parentCluster] = map[string]logicalcluster.Name{}
+		}
+		c.shardClusterWorkspaceNameCluster[parentShard][parentCluster][owner.Name] = clusterName
+	}
+
+	if _, found := c.shardClusterWorkspaceName[parentShard][clusterName]; !found {
+		if c.shardClusterWorkspaceName[parentShard] == nil {
+			c.shardClusterWorkspaceName[parentShard] = map[logicalcluster.Name]string{}
+		}
+		c.shardClusterWorkspaceName[parentShard][clusterName] = owner.Name
+	}
+
+	if _, found := c.shardClusterParentCluster[parentShard][clusterName]; !found {
+		if c.shardClusterParentCluster[parentShard] == nil {
+			c.shardClusterParentCluster[parentShard] = map[logicalcluster.Name]logicalcluster.Name{}
+		}
+		c.shardClusterParentCluster[parentShard][clusterName] = parentCluster
 	}
 }
 
@@ -246,18 +350,101 @@ func (c *State) DeleteLogicalCluster(shard string, logicalCluster *corev1alpha1.
 	got := c.clusterShards[clusterName]
 	c.lock.RUnlock()
 
-	if got == shard {
-		c.lock.Lock()
-		defer c.lock.Unlock()
-		if got := c.clusterShards[clusterName]; got == shard {
-			delete(c.clusterShards, clusterName)
-		}
+	if got != shard {
+		return
+	}
 
-		delete(c.shardClusterWorkspaceType[shard], clusterName)
-		if len(c.shardClusterWorkspaceType[shard]) == 0 {
-			delete(c.shardClusterWorkspaceType, shard)
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	// Re-read under write lock, a concurrent upsert may have won the race.
+	got = c.clusterShards[clusterName]
+	if got != shard {
+		// The shard in the mapping changed between the read- and
+		// write-locked read, all related changes in the other maps are
+		// already updated.
+		return
+	}
+
+	// delete LC from shard->LC map
+	delete(c.clusterShards, clusterName)
+	c.clusterContexts.Delete(clusterName, fmt.Errorf("logical cluster %s deleted from shard %s", clusterName, shard))
+
+	// This LC keyed as the cluster being addressed.
+	delete(c.shardClusterWorkspaceType[shard], clusterName)
+	if len(c.shardClusterWorkspaceType[shard]) == 0 {
+		delete(c.shardClusterWorkspaceType, shard)
+	}
+
+	// This LC keyed as the child in a parent→child relationship. Normally
+	// cleaned by DeleteWorkspace via the parent's Workspace event, but if
+	// the LogicalCluster delete races ahead of the Workspace delete (or the
+	// Workspace event is missed) the entries leak. Capture the parent and
+	// workspace name before deleting the reverse edges so we can also scrub
+	// the forward edge under the parent below.
+	parentCluster, hasParent := c.shardClusterParentCluster[shard][clusterName]
+	workspaceName, hasWorkspaceName := c.shardClusterWorkspaceName[shard][clusterName]
+
+	delete(c.shardClusterWorkspaceName[shard], clusterName)
+	if len(c.shardClusterWorkspaceName[shard]) == 0 {
+		delete(c.shardClusterWorkspaceName, shard)
+	}
+	delete(c.shardClusterParentCluster[shard], clusterName)
+	if len(c.shardClusterParentCluster[shard]) == 0 {
+		delete(c.shardClusterParentCluster, shard)
+	}
+
+	// This LC keyed as the parent of sub-workspaces. Same race rationale:
+	// child Workspace deletes normally scrub these per-entry, but the LC
+	// going away first means any stragglers are unreachable and should be
+	// dropped wholesale.
+	delete(c.shardClusterWorkspaceNameCluster[shard], clusterName)
+	if len(c.shardClusterWorkspaceNameCluster[shard]) == 0 {
+		delete(c.shardClusterWorkspaceNameCluster, shard)
+	}
+	delete(c.shardClusterWorkspaceMount[shard], clusterName)
+	if len(c.shardClusterWorkspaceMount[shard]) == 0 {
+		delete(c.shardClusterWorkspaceMount, shard)
+	}
+	delete(c.shardClusterWorkspaceNameErrorCode[shard], clusterName)
+	if len(c.shardClusterWorkspaceNameErrorCode[shard]) == 0 {
+		delete(c.shardClusterWorkspaceNameErrorCode, shard)
+	}
+
+	// Scrub the forward edge in the parent's per-workspace maps. Without
+	// this, deleting the child LC before its Workspace event arrives leaves
+	// shardClusterWorkspaceNameCluster[shard][parent][wsName] pointing at a
+	// gone cluster — and the parent map keeps growing across churn.
+	if hasParent && hasWorkspaceName {
+		if m := c.shardClusterWorkspaceNameCluster[shard][parentCluster]; m != nil {
+			delete(m, workspaceName)
+			if len(m) == 0 {
+				delete(c.shardClusterWorkspaceNameCluster[shard], parentCluster)
+				if len(c.shardClusterWorkspaceNameCluster[shard]) == 0 {
+					delete(c.shardClusterWorkspaceNameCluster, shard)
+				}
+			}
+		}
+		if m := c.shardClusterWorkspaceMount[shard][parentCluster]; m != nil {
+			delete(m, workspaceName)
+			if len(m) == 0 {
+				delete(c.shardClusterWorkspaceMount[shard], parentCluster)
+				if len(c.shardClusterWorkspaceMount[shard]) == 0 {
+					delete(c.shardClusterWorkspaceMount, shard)
+				}
+			}
+		}
+		if m := c.shardClusterWorkspaceNameErrorCode[shard][parentCluster]; m != nil {
+			delete(m, workspaceName)
+			if len(m) == 0 {
+				delete(c.shardClusterWorkspaceNameErrorCode[shard], parentCluster)
+				if len(c.shardClusterWorkspaceNameErrorCode[shard]) == 0 {
+					delete(c.shardClusterWorkspaceNameErrorCode, shard)
+				}
+			}
 		}
 	}
+
+	clustersOnShard.WithLabelValues(shard).Set(float64(len(c.shardClusterWorkspaceName[shard])))
 }
 
 func (c *State) UpsertShard(shardName, baseURL string) {
@@ -268,6 +455,12 @@ func (c *State) UpsertShard(shardName, baseURL string) {
 	if got != baseURL {
 		c.lock.Lock()
 		defer c.lock.Unlock()
+
+		// Re-read under write lock, a concurrent upsert may have won the race.
+		if c.shardBaseURLs[shardName] == baseURL {
+			return
+		}
+
 		c.shardBaseURLs[shardName] = baseURL
 	}
 }
@@ -285,6 +478,7 @@ func (c *State) DeleteShard(shardName string) {
 	delete(c.shardClusterWorkspaceName, shardName)
 	delete(c.shardClusterWorkspaceType, shardName)
 	delete(c.shardClusterParentCluster, shardName)
+	delete(c.shardClusterWorkspaceMount, shardName)
 	delete(c.shardClusterWorkspaceNameErrorCode, shardName)
 
 	clustersOnShard.DeleteLabelValues(shardName)
@@ -332,9 +526,11 @@ func (c *State) Lookup(path logicalcluster.Path) (Result, bool) {
 			wsSpec, foundMount := c.shardClusterWorkspaceMount[shard][originalCluster][s] // experimental feature
 			if foundMount {
 				if wsSpec.Mount != nil && wsSpec.URL != "" {
-					u, err := url.Parse(wsSpec.URL)
-					if err == nil {
-						return Result{URL: u.String(), ErrorCode: errorCode}, true
+					// Only route to mount targets that pass the same validation
+					// admission applies; objects written before that validation
+					// existed must not become reachable.
+					if u, err := mounts.ValidateURL(wsSpec.URL); err == nil {
+						return Result{Shard: shard, URL: u.String(), ErrorCode: errorCode}, true
 					}
 				}
 			}
@@ -366,13 +562,27 @@ func (c *State) LookupURL(path logicalcluster.Path) (Result, bool) {
 		return result, true
 	}
 
-	if result.URL != "" && result.Shard == "" && result.Cluster == "" {
-		return result, true
-	}
-
 	baseURL, found := c.shardBaseURLs[result.Shard]
 	if !found {
 		return Result{}, false
+	}
+
+	if result.IsMount() {
+		// The path is a mounted workspace. Mount traffic is not forwarded to the
+		// mount target from here: it goes to the shard hosting the parent
+		// workspace, whose handler chain authenticates, audits and flow-controls
+		// the request before its mount proxy forwards it to the target. The
+		// shard's local index resolves paths relative to logical clusters it
+		// hosts, so the request is addressed as <parent cluster>:<mount name>.
+		parentPath, name := path.Split()
+		parent, found := c.Lookup(parentPath)
+		if !found || parent.Cluster.Empty() {
+			return Result{}, false
+		}
+		return Result{
+			Shard: result.Shard,
+			URL:   strings.TrimSuffix(baseURL, "/") + parent.Cluster.Path().Join(name).RequestPath(),
+		}, true
 	}
 
 	return Result{
@@ -381,4 +591,27 @@ func (c *State) LookupURL(path logicalcluster.Path) (Result, bool) {
 		Type:    result.Type,
 		URL:     strings.TrimSuffix(baseURL, "/") + result.Cluster.Path().RequestPath(),
 	}, true
+}
+
+// RecentlyMigrated returns true if the given cluster was recently migrated.
+func (c *State) RecentlyMigrated(cluster logicalcluster.Name) bool {
+	loaded, stored := c.migratedAt.Load(cluster)
+	if !stored {
+		return false
+	}
+
+	t := loaded.(time.Time)
+	if c.now().Sub(t) < c.migrationGracePeriod {
+		return true
+	}
+
+	// Grace period is over, drop it
+	c.migratedAt.Delete(cluster)
+	return false
+}
+
+// ClusterContext returns a context derived from the parent that will be
+// cancelled when the cluster is deleted or migrated.
+func (c *State) ClusterContext(parent context.Context, cluster logicalcluster.Name) (context.Context, context.CancelFunc) {
+	return c.clusterContexts.Context(parent, cluster)
 }

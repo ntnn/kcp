@@ -34,8 +34,9 @@ import (
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
 	"github.com/kcp-dev/kcp/pkg/admission/apiexport"
-	"github.com/kcp-dev/kcp/pkg/admission/cachedresource"
+	"github.com/kcp-dev/kcp/pkg/admission/clustercachedresource"
 	"github.com/kcp-dev/kcp/pkg/admission/helpers"
+	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
 )
 
 type identityTestCase struct {
@@ -47,11 +48,11 @@ type identityTestCase struct {
 	wantErr bool
 }
 
-type cachedResourceInitializer struct{}
+type clusterCachedResourceInitializer struct{}
 
-func (cachedResourceInitializer) Initialize(plugin admission.Interface) {
+func (clusterCachedResourceInitializer) Initialize(plugin admission.Interface) {
 	factory := kcpinformers.NewSharedInformerFactory(nil, 0)
-	plugin.(*cachedresource.CachedResourceAdmission).SetKcpInformers(factory, factory)
+	plugin.(*clustercachedresource.ClusterCachedResourceAdmission).SetKcpInformers(factory, factory)
 }
 
 func identityObject(identity string, keys ...string) *unstructured.Unstructured {
@@ -68,10 +69,12 @@ func identityObject(identity string, keys ...string) *unstructured.Unstructured 
 }
 
 func TestIdentityStatus(t *testing.T) {
+	t.Parallel()
+
 	privileged := &user.DefaultInfo{Name: "system:apiserver", Groups: []string{user.SystemPrivilegedGroup}}
 	ordinary := &user.DefaultInfo{Name: "alice", Groups: []string{user.AllAuthenticated}}
 	serviceAccount := &user.DefaultInfo{Name: "system:serviceaccount:default:controller", Groups: []string{user.AllAuthenticated, "system:serviceaccounts"}}
-	tests := []identityTestCase{
+	baseTests := []identityTestCase{
 		{name: "empty create", object: identityObject(""), caller: ordinary, create: true},
 		{name: "untrusted initial identity", object: identityObject("victim"), caller: ordinary, create: true, wantErr: true},
 		{name: "untrusted initial fingerprints", object: identityObject("", "attacker-key"), caller: ordinary, create: true, wantErr: true},
@@ -97,6 +100,8 @@ func TestIdentityStatus(t *testing.T) {
 		{name: "typed object", old: identityObject(""), object: &metav1.Status{}, caller: privileged, wantErr: true},
 		{name: "nil object", old: identityObject(""), object: (*unstructured.Unstructured)(nil), caller: privileged, wantErr: true},
 	}
+	tests := make([]identityTestCase, 0, len(baseTests)+7)
+	tests = append(tests, baseTests...)
 	for name, status := range map[string]map[string]interface{}{
 		"invalid identity":            {"identityHash": int64(1)},
 		"invalid fingerprint list":    {"identityKeyHashes": "key"},
@@ -113,8 +118,8 @@ func TestIdentityStatus(t *testing.T) {
 	tests = append(tests, identityTestCase{name: "unrelated status update", old: identityObject("original", "key"), object: unrelated, caller: ordinary})
 
 	plugins := admission.NewPlugins()
-	cachedresource.Register(plugins)
-	cached, err := plugins.InitPlugin(cachedresource.PluginName, nil, cachedResourceInitializer{})
+	clustercachedresource.Register(plugins)
+	cached, err := plugins.InitPlugin(clustercachedresource.PluginName, nil, clusterCachedResourceInitializer{})
 	require.NoError(t, err)
 	for _, resource := range []struct {
 		name   string
@@ -124,13 +129,17 @@ func TestIdentityStatus(t *testing.T) {
 	}{
 		{"apiexport-v1alpha1", schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha1", Resource: "apiexports"}, schema.GroupVersionKind{Group: "apis.kcp.io", Version: "v1alpha1", Kind: "APIExport"}, apiexport.NewAPIExportAdmission(func(apis.GroupResource) bool { return true })},
 		{"apiexport-v1alpha2", schema.GroupVersionResource{Group: "apis.kcp.io", Version: "v1alpha2", Resource: "apiexports"}, schema.GroupVersionKind{Group: "apis.kcp.io", Version: "v1alpha2", Kind: "APIExport"}, apiexport.NewAPIExportAdmission(func(apis.GroupResource) bool { return true })},
-		{"cachedresource-v1alpha1", schema.GroupVersionResource{Group: "cache.kcp.io", Version: "v1alpha1", Resource: "cachedresources"}, schema.GroupVersionKind{Group: "cache.kcp.io", Version: "v1alpha1", Kind: "CachedResource"}, cached.(admission.ValidationInterface)},
+		{"clustercachedresource-v1alpha1", schema.GroupVersionResource{Group: "cache.kcp.io", Version: "v1alpha1", Resource: "clustercachedresources"}, schema.GroupVersionKind{Group: "cache.kcp.io", Version: "v1alpha1", Kind: "ClusterCachedResource"}, cached.(admission.ValidationInterface)},
 	} {
 		t.Run(resource.name, func(t *testing.T) {
+			t.Parallel()
+
 			require.True(t, resource.plugin.Handles(admission.Update))
 			for _, subresource := range []string{"", "status"} {
 				for _, tc := range tests {
 					t.Run(subresource+"/"+tc.name, func(t *testing.T) {
+						t.Parallel()
+
 						op := admission.Update
 						if tc.create {
 							op = admission.Create
@@ -142,11 +151,12 @@ func TestIdentityStatus(t *testing.T) {
 						} else {
 							require.NoError(t, err)
 						}
-						// CachedResource's create-only discovery/uniqueness checks need
+						// ClusterCachedResource's create-only discovery/uniqueness checks need
 						// informers; successful creation is covered by its own tests.
-						if tc.create && !tc.wantErr && resource.name == "cachedresource-v1alpha1" {
+						if tc.create && !tc.wantErr && resource.name == "clustercachedresource-v1alpha1" {
 							return
 						}
+
 						err = resource.plugin.Validate(context.Background(), attr, nil)
 						if tc.wantErr {
 							require.True(t, apierrors.IsForbidden(err), "expected forbidden, got %v", err)
@@ -157,5 +167,49 @@ func TestIdentityStatus(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCrossShardRotationIdentityStatus(t *testing.T) {
+	t.Parallel()
+
+	caller := &user.DefaultInfo{
+		Name:   "shard-controller",
+		Groups: []string{user.AllAuthenticated, bootstrap.SystemExternalLogicalClusterAdmin},
+	}
+	for _, resource := range []struct {
+		group, name string
+	}{
+		{"apis.kcp.io", "apiexports"},
+		{"cache.kcp.io", "clustercachedresources"},
+	} {
+		for _, tc := range []struct {
+			name      string
+			old, next *unstructured.Unstructured
+			allowed   bool
+		}{
+			{"initialize", identityObject(""), identityObject("victim", "key"), false},
+			{"reassign", identityObject("stable", "key"), identityObject("victim", "key"), false},
+			{"clear", identityObject("stable", "key"), identityObject(""), false},
+			{"publish key", identityObject("stable", "key"), identityObject("stable", "key", "new-key"), resource.name == "apiexports"},
+			{"retire key", identityObject("stable", "key", "new-key"), identityObject("stable", "new-key"), resource.name == "apiexports"},
+			{"publish before assignment", identityObject(""), identityObject("", "key"), false},
+		} {
+			t.Run(resource.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				attr := admission.NewAttributesRecord(
+					tc.next, tc.old, schema.GroupVersionKind{}, "", "test",
+					schema.GroupVersionResource{Group: resource.group, Version: "v1alpha1", Resource: resource.name},
+					"status", admission.Update, nil, false, caller,
+				)
+				err := helpers.ValidateIdentityStatus(attr)
+				if tc.allowed {
+					require.NoError(t, err)
+				} else {
+					require.True(t, apierrors.IsForbidden(err), "expected forbidden, got %v", err)
+				}
+			})
+		}
 	}
 }

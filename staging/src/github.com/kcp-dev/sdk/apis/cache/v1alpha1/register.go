@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -45,12 +45,10 @@ var (
 // Adds the list of known types to Scheme.
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
-		&CachedResource{},
-		&CachedResourceList{},
-		&CachedResourceEndpointSlice{},
-		&CachedResourceEndpointSliceList{},
-		&CachedObject{},
-		&CachedObjectList{},
+		&ClusterCachedResource{},
+		&ClusterCachedResourceList{},
+		&ClusterCachedResourceEndpointSlice{},
+		&ClusterCachedResourceEndpointSliceList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

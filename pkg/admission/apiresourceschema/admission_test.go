@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@ func createAttr(s *apisv1alpha1.APIResourceSchema) admission.Attributes {
 }
 
 func TestValidate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		attr           admission.Attributes
@@ -163,9 +164,117 @@ spec:
 				"spec.group: Invalid value: \"core\": must be empty string for the core group",
 			},
 		},
+		{
+			name: "selectableFields are accepted",
+			attr: createAttr(unmarshalOrDie(`
+apiVersion: apis.kcp.sh/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: july.cowboys.wild.west
+spec:
+  group: wild.west
+  names:
+    plural: cowboys
+    singular: cowboy
+    kind: Cowboy
+    listKind: CowboyList
+  scope: Cluster
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            color:
+              type: string
+    selectableFields:
+    - jsonPath: .spec.color
+            `)),
+		},
+		{
+			name: "too many selectableFields are rejected",
+			attr: createAttr(unmarshalOrDie(`
+apiVersion: apis.kcp.sh/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: july.cowboys.wild.west
+spec:
+  group: wild.west
+  names:
+    plural: cowboys
+    singular: cowboy
+    kind: Cowboy
+    listKind: CowboyList
+  scope: Cluster
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      type: object
+      properties:
+        spec:
+          type: object
+          properties:
+            c0: {type: string}
+            c1: {type: string}
+            c2: {type: string}
+            c3: {type: string}
+            c4: {type: string}
+            c5: {type: string}
+            c6: {type: string}
+            c7: {type: string}
+            c8: {type: string}
+    selectableFields:
+    - jsonPath: .spec.c0
+    - jsonPath: .spec.c1
+    - jsonPath: .spec.c2
+    - jsonPath: .spec.c3
+    - jsonPath: .spec.c4
+    - jsonPath: .spec.c5
+    - jsonPath: .spec.c6
+    - jsonPath: .spec.c7
+    - jsonPath: .spec.c8
+            `)),
+			expectedErrors: []string{
+				"spec.versions[0].selectableFields: Too many: 9: must have at most 8 items",
+			},
+		},
+		{
+			name: "selectableFields without a schema are rejected",
+			attr: createAttr(unmarshalOrDie(`
+apiVersion: apis.kcp.sh/v1alpha1
+kind: APIResourceSchema
+metadata:
+  name: july.cowboys.wild.west
+spec:
+  group: wild.west
+  names:
+    plural: cowboys
+    singular: cowboy
+    kind: Cowboy
+    listKind: CowboyList
+  scope: Cluster
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    selectableFields:
+    - jsonPath: .spec.color
+            `)),
+			expectedErrors: []string{
+				"spec.versions[0].schema: Required value",
+				"spec.versions[0].selectableFields: Invalid value: \"\": may only be set when `version.schema.openAPIV3Schema` is not included",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			o := &apiResourceSchemaValidation{
 				Handler: admission.NewHandler(admission.Create, admission.Update),
 			}

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,5 +29,7 @@ import (
 type ScopeableSharedIndexInformer interface {
 	Cluster(clusterName logicalcluster.Name) cache.SharedIndexInformer
 	ClusterWithContext(ctx context.Context, clusterName logicalcluster.Name) cache.SharedIndexInformer
+	SetIgnoreFunc(fn func(interface{}) bool) error
+	ForceRelist()
 	cache.SharedIndexInformer
 }

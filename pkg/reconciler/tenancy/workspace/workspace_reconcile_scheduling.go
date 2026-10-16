@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,15 +19,14 @@ package workspace
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	mathrand "math/rand"
 	"net/url"
 	"path"
-	"strings"
 
-	"github.com/martinlindhe/base36"
-
+	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
+	kcpcrypto "github.com/kcp-dev/apimachinery/v2/pkg/util/crypto"
 	"github.com/kcp-dev/client-go/kubernetes"
 	"github.com/kcp-dev/logicalcluster/v3"
 	"github.com/kcp-dev/sdk/apis/core"
@@ -55,6 +55,9 @@ import (
 const (
 	// WorkspaceShardHashAnnotationKey keeps track on which shard LogicalCluster must be scheduled. The value
 	// is a base36(sha224) hash of the Shard name.
+	//
+	// Deprecated: use corev1alpha1.LogicalClusterShardAnnotationKey instead.
+	// This key is still updated for backwards compatibility but will be removed in a future release.
 	WorkspaceShardHashAnnotationKey = "internal.tenancy.kcp.io/shard"
 
 	// workspaceClusterAnnotationKey keeps track of the logical cluster on the shard.
@@ -65,12 +68,28 @@ const (
 	unschedulableAnnotationKey = "experimental.core.kcp.io/unschedulable"
 )
 
+// applyShardToWorkspaceMetadata updates a workspaces shard metadata.
+func applyShardToWorkspaceMetadata(ws *tenancyv1alpha1.Workspace, shard *corev1alpha1.Shard) {
+	if ws.Annotations == nil {
+		ws.Annotations = map[string]string{}
+	}
+	ws.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey] = shard.Name
+	ws.Annotations[WorkspaceShardHashAnnotationKey] = kcpcrypto.Base36Sha224.StringPad(shard.Name)[:8]
+
+	if ws.Labels == nil {
+		ws.Labels = map[string]string{}
+	}
+	delete(ws.Labels, "region")
+	if region, found := shard.Labels["region"]; found {
+		ws.Labels["region"] = region
+	}
+}
+
 type schedulingReconciler struct {
 	generateClusterName func(path logicalcluster.Path) (logicalcluster.Name, error)
 
-	getShard       func(name string) (*corev1alpha1.Shard, error)
-	getShardByHash func(hash string) (*corev1alpha1.Shard, error)
-	listShards     func(selector labels.Selector) ([]*corev1alpha1.Shard, error)
+	getShard   func(name string) (*corev1alpha1.Shard, error)
+	listShards func(selector labels.Selector) ([]*corev1alpha1.Shard, error)
 
 	getWorkspaceType func(clusterName logicalcluster.Path, name string) (*tenancyv1alpha1.WorkspaceType, error)
 
@@ -96,14 +115,14 @@ func (r *schedulingReconciler) reconcile(ctx context.Context, workspace *tenancy
 		// This is bit of edge case, but nevertheless we need to check if logical cluster url still matches the workspace url.
 		clusterNameString, hasCluster := workspace.Annotations[workspaceClusterAnnotationKey]
 		clusterName := logicalcluster.Name(clusterNameString)
-		shardNameHash, hasShard := workspace.Annotations[WorkspaceShardHashAnnotationKey]
+		shardName, hasShard := workspace.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey]
 		if !hasShard || !hasCluster {
 			return reconcileStatusContinue, nil
 		}
-		shard, err := r.getShardByHash(shardNameHash)
+		shard, err := r.getShard(shardName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceScheduled, tenancyv1alpha1.WorkspaceReasonUnschedulable, conditionsv1alpha1.ConditionSeverityError, "chosen shard hash %q does not exist anymore: %v", shardNameHash, err)
+				conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceScheduled, tenancyv1alpha1.WorkspaceReasonUnschedulable, conditionsv1alpha1.ConditionSeverityError, "chosen shard %q does not exist anymore: %v", shardName, err)
 				return reconcileStatusContinue, nil
 			}
 			return reconcileStatusStopAndRequeue, err
@@ -139,7 +158,7 @@ func (r *schedulingReconciler) reconcile(ctx context.Context, workspace *tenancy
 		conditions.MarkTrue(workspace, tenancyv1alpha1.WorkspaceScheduled)
 		return reconcileStatusContinue, nil
 	case workspace.Spec.URL == "" || workspace.Spec.Cluster == "":
-		shardNameHash, hasShard := workspace.Annotations[WorkspaceShardHashAnnotationKey]
+		shardName, hasShard := workspace.Annotations[corev1alpha1.LogicalClusterShardAnnotationKey]
 		clusterNameString, hasCluster := workspace.Annotations[workspaceClusterAnnotationKey]
 		clusterName := logicalcluster.Name(clusterNameString)
 		hasFinalizer := sets.New[string](workspace.Finalizers...).Has(corev1alpha1.LogicalClusterFinalizerName)
@@ -161,14 +180,8 @@ func (r *schedulingReconciler) reconcile(ctx context.Context, workspace *tenancy
 				return reconcileStatusContinue, nil // retry is automatic when new shards show up
 			}
 			logger.V(2).Info("Chose shard", "shard", shard.Name)
-			shardNameHash = ByBase36Sha224NameValue(shard.Name)
-			if workspace.Annotations == nil {
-				workspace.Annotations = map[string]string{}
-			}
-			workspace.Annotations[WorkspaceShardHashAnnotationKey] = shardNameHash
-			if region, found := shard.Labels["region"]; found {
-				workspace.Labels["region"] = region
-			}
+			applyShardToWorkspaceMetadata(workspace, shard)
+			shardName = shard.Name
 		}
 		if !hasCluster {
 			cluster, err := r.generateClusterName(logicalcluster.From(workspace).Path().Join(workspace.Name))
@@ -189,16 +202,16 @@ func (r *schedulingReconciler) reconcile(ctx context.Context, workspace *tenancy
 			return reconcileStatusStopAndRequeue, nil
 		}
 
-		shard, err := r.getShardByHash(shardNameHash)
+		shard, err := r.getShard(shardName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceScheduled, tenancyv1alpha1.WorkspaceReasonUnschedulable, conditionsv1alpha1.ConditionSeverityError, "chosen shard hash %q does not exist anymore: %v", shardNameHash, err)
+				conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceScheduled, tenancyv1alpha1.WorkspaceReasonUnschedulable, conditionsv1alpha1.ConditionSeverityError, "chosen shard %q does not exist anymore: %v", shardName, err)
 				return reconcileStatusContinue, nil
 			}
 			return reconcileStatusStopAndRequeue, err
 		}
 		if valid, reason, message := isValidShard(shard); !valid {
-			conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceScheduled, tenancyv1alpha1.WorkspaceReasonUnschedulable, conditionsv1alpha1.ConditionSeverityError, "chosen shard hash %q is no longer valid, reason %q, message %q", shardNameHash, message, reason)
+			conditions.MarkFalse(workspace, tenancyv1alpha1.WorkspaceScheduled, tenancyv1alpha1.WorkspaceReasonUnschedulable, conditionsv1alpha1.ConditionSeverityError, "chosen shard %q is no longer valid, reason %q, message %q", shardName, message, reason)
 			return reconcileStatusContinue, nil
 		}
 
@@ -275,7 +288,44 @@ func (r *schedulingReconciler) chooseShardAndMarkCondition(logger klog.Logger, w
 		}
 	}
 
-	if len(validShards) == 0 {
+	// Partition the valid shards by their workspace limits: shards under their
+	// soft limit are preferred, shards at or over their soft limit are used
+	// only as a fallback, and shards at or over their hard limit refuse new
+	// workspaces entirely. The workspace count of a shard is self-reported by
+	// each shard in status.used.
+	preferredShards := make([]*corev1alpha1.Shard, 0, len(validShards))
+	softLimitedShards := make([]*corev1alpha1.Shard, 0, len(validShards))
+	for _, shard := range validShards {
+		softLimit := shardResourceLimit(shard, corev1alpha1.ResourceWorkspaces, false)
+		hardLimit := shardResourceLimit(shard, corev1alpha1.ResourceWorkspaces, true)
+		count := shardUsed(shard, corev1alpha1.ResourceWorkspaces)
+		switch {
+		case hardLimit > 0 && count >= hardLimit:
+			logger.V(4).Info("Skipping a shard because it reached its hard workspace limit", "shard", shard.Name, "workspaces", count, "hardLimit", hardLimit)
+			invalidShards[shard.Name] = struct {
+				reason, message string
+			}{
+				reason:  "WorkspaceLimitReached",
+				message: fmt.Sprintf("shard holds %d workspaces, at or over its hard limit of %d", count, hardLimit),
+			}
+		case softLimit > 0 && count >= softLimit:
+			softLimitedShards = append(softLimitedShards, shard)
+		default:
+			preferredShards = append(preferredShards, shard)
+		}
+	}
+
+	candidates := preferredShards
+	if len(candidates) == 0 && len(softLimitedShards) > 0 {
+		names := make([]string, 0, len(softLimitedShards))
+		for _, shard := range softLimitedShards {
+			names = append(names, shard.Name)
+		}
+		logger.Info("all schedulable shards are at or over their soft workspace limit, scheduling anyway; consider adding shards or raising limits", "shards", names)
+		candidates = softLimitedShards
+	}
+
+	if len(candidates) == 0 {
 		failures := make([]error, 0, len(invalidShards))
 		for name, x := range invalidShards {
 			failures = append(failures, fmt.Errorf("  %s: reason %q, message %q", name, x.reason, x.message))
@@ -283,8 +333,38 @@ func (r *schedulingReconciler) chooseShardAndMarkCondition(logger klog.Logger, w
 		logger.Error(utilerrors.NewAggregate(failures), "no valid shards found for workspace, skipping")
 		return nil, "No available shards to schedule the workspace", nil // retry is automatic when new shards show up
 	}
-	targetShard := validShards[mathrand.Intn(len(validShards))]
+	targetShard := candidates[mathrand.Intn(len(candidates))]
 	return targetShard, "", nil
+}
+
+// shardResourceLimit returns the shard's configured soft or hard limit for the
+// given resource, or 0 if the limit is absent or non-positive (disabled).
+func shardResourceLimit(shard *corev1alpha1.Shard, resource corev1.ResourceName, hard bool) int64 {
+	if shard.Spec.ResourceLimits == nil {
+		return 0
+	}
+	list := shard.Spec.ResourceLimits.Soft
+	if hard {
+		list = shard.Spec.ResourceLimits.Hard
+	}
+	quantity, ok := list[resource]
+	if !ok {
+		return 0
+	}
+	if value := quantity.Value(); value > 0 {
+		return value
+	}
+	return 0
+}
+
+// shardUsed returns the shard's self-reported usage of the given resource from
+// status.used, or 0 if it has not been reported.
+func shardUsed(shard *corev1alpha1.Shard, resource corev1.ResourceName) int64 {
+	quantity, ok := shard.Status.Used[resource]
+	if !ok {
+		return 0
+	}
+	return quantity.Value()
 }
 
 func (r *schedulingReconciler) createLogicalCluster(ctx context.Context, shard *corev1alpha1.Shard, cluster logicalcluster.Path, canonicalPath logicalcluster.Path, workspace *tenancyv1alpha1.Workspace) error {
@@ -293,7 +373,15 @@ func (r *schedulingReconciler) createLogicalCluster(ctx context.Context, shard *
 			Name: corev1alpha1.LogicalClusterName,
 			Annotations: map[string]string{
 				tenancyv1alpha1.LogicalClusterTypeAnnotationKey: logicalcluster.NewPath(workspace.Spec.Type.Path).Join(string(workspace.Spec.Type.Name)).String(),
-				core.LogicalClusterPathAnnotationKey:            canonicalPath.String(),
+				// The shard must be set in the annotation when
+				// scheduling the LC, otherwise the LC metadata
+				// reconciler will detect this is a drift and try to set
+				// the annotation on the LC and the workspace, which
+				// will trigger another reconcile here.
+				// Not a problem, but doing this prevents a few
+				// reconcile cycles.
+				corev1alpha1.LogicalClusterShardAnnotationKey: shard.Name,
+				core.LogicalClusterPathAnnotationKey:          canonicalPath.String(),
 			},
 		},
 		Spec: corev1alpha1.LogicalClusterSpec{
@@ -306,9 +394,20 @@ func (r *schedulingReconciler) createLogicalCluster(ctx context.Context, shard *
 			},
 		},
 	}
-	if owner, found := workspace.Annotations[tenancyv1alpha1.ExperimentalWorkspaceOwnerAnnotationKey]; found {
+	if owner, found := workspace.Annotations[tenancyv1alpha1.ExperimentalWorkspaceOwnerAnnotationKey]; found && owner != "" {
+		var user authenticationv1.UserInfo
+		if err := json.Unmarshal([]byte(owner), &user); err == nil {
+			logicalCluster.Spec.CreatedBy = &corev1alpha1.OwnerUserInfo{
+				Username: user.Username,
+				UID:      user.UID,
+				Groups:   user.Groups,
+				Extra:    user.Extra,
+			}
+		}
+
 		logicalCluster.Annotations[tenancyv1alpha1.ExperimentalWorkspaceOwnerAnnotationKey] = owner
 	}
+
 	if groups, found := workspace.Annotations[authorization.RequiredGroupsAnnotationKey]; found {
 		logicalCluster.Annotations[authorization.RequiredGroupsAnnotationKey] = groups
 	}
@@ -430,7 +529,5 @@ func randomClusterName(path logicalcluster.Path) (logicalcluster.Name, error) {
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.Sum224(token)
-	base36hash := strings.ToLower(base36.EncodeBytes(hash[:]))
-	return logicalcluster.Name(base36hash[:16]), nil // 36^16 = 82 bits, P(conflict)<10^-9 for 2^26 clusters
+	return logicalcluster.Name(kcpcrypto.Base36Sha224.BytesPad(token)[:16]), nil // 36^16 = 82 bits, P(conflict)<10^-9 for 2^26 clusters
 }

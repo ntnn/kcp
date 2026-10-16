@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -75,7 +75,7 @@ func TestWorkspaceLogicalClusterRelationship(t *testing.T) {
 	// delete the workspace
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		err = clientset.Cluster(fixtureRoot).TenancyV1alpha1().Workspaces().Delete(ctx, wsName, v1.DeleteOptions{})
-		require.NoError(c, err, "error deleting workspace")
+		kcptestinghelpers.TolerateOrFail(t, err, apierrors.IsNotFound)
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for finalizer to be applied and workspace to be deleted")
 
 	// ensure that the deletion has propagated to the logicalcluster, meaning:
@@ -85,7 +85,7 @@ func TestWorkspaceLogicalClusterRelationship(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		lc, err := clientset.Cluster(testPath).CoreV1alpha1().LogicalClusters().Get(ctx, corev1alpha1.LogicalClusterName, v1.GetOptions{})
 		require.NoError(c, err, "error getting logicalcluster")
-		require.NotEqual(c, nil, lc.DeletionTimestamp)
+		require.NotNil(c, lc.DeletionTimestamp)
 		require.Contains(c, lc.Finalizers, customFinalizer)
 		require.NotContains(c, lc.Finalizers, logicalclusterdeletion.LogicalClusterDeletionFinalizer)
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for logicalcluster to be marked for deletion")
@@ -95,7 +95,7 @@ func TestWorkspaceLogicalClusterRelationship(t *testing.T) {
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		ws, err := clientset.Cluster(fixtureRoot).TenancyV1alpha1().Workspaces().Get(ctx, wsName, v1.GetOptions{})
 		require.NoError(c, err, "error getting workspace")
-		require.NotEqual(c, nil, ws.DeletionTimestamp)
+		require.NotNil(c, ws.DeletionTimestamp)
 		require.Contains(c, ws.Finalizers, corev1alpha1.LogicalClusterFinalizerName)
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting for workspace to be marked for deletion")
 
@@ -112,7 +112,13 @@ func TestWorkspaceLogicalClusterRelationship(t *testing.T) {
 	// the logicalcluster should now be cleaned up successfully
 	kcptestinghelpers.Eventually(t, func() (success bool, reason string) {
 		_, err := clientset.Cluster(testPath).CoreV1alpha1().LogicalClusters().Get(ctx, corev1alpha1.LogicalClusterName, v1.GetOptions{})
-		if apierrors.IsForbidden(err) {
+		// Either Forbidden (LC object is gone but the workspace path still
+		// resolves on the shard) or NotFound (the workspace has been
+		// hard-deleted and the shard's local proxy can no longer resolve
+		// the path) is a valid "logicalcluster is gone" signal. Which one
+		// we observe depends on the race between LC deletion and workspace
+		// hard-deletion.
+		if apierrors.IsForbidden(err) || apierrors.IsNotFound(err) {
 			return true, ""
 		}
 		return false, "logicalcluster still exists"

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -70,7 +70,7 @@ type pathAnnotationPlugin struct {
 
 var pathAnnotationResources = sets.New[string](
 	apisv1alpha2.Resource("apiexports").String(),
-	cachev1alpha1.Resource("cachedresources").String(),
+	cachev1alpha1.Resource("clustercachedresources").String(),
 	apisv1alpha2.Resource("apibindings").String(),
 	tenancyv1alpha1.Resource("workspacetypes").String(),
 )

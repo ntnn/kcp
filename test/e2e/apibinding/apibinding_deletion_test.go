@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -220,7 +220,7 @@ func TestAPIBindingDeletion(t *testing.T) {
 		},
 	}
 	_, err = cowboyClient.Create(t.Context(), cowboyDenied, metav1.CreateOptions{})
-	require.Equal(t, apierrors.IsForbidden(err), true)
+	require.True(t, apierrors.IsForbidden(err))
 
 	t.Logf("Clean finalizer to remove the cowboy")
 	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {

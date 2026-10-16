@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import (
 )
 
 func TestReconcileMetadata(t *testing.T) {
+	t.Parallel()
 	date, err := time.Parse(time.RFC3339, "2006-01-02T15:04:05Z")
 	require.NoError(t, err)
 
@@ -66,13 +67,31 @@ func TestReconcileMetadata(t *testing.T) {
 			wantStatus: reconcileStatusStopAndRequeue,
 		},
 		{
-			name: "shows phase Deleting when deletion timestamp is set",
+			name: "label tracks Terminating phase",
 			input: &corev1alpha1.LogicalCluster{
 				ObjectMeta: metav1.ObjectMeta{
 					DeletionTimestamp: &metav1.Time{Time: date},
 				},
 				Status: corev1alpha1.LogicalClusterStatus{
-					Phase: corev1alpha1.LogicalClusterPhaseReady,
+					Phase: corev1alpha1.LogicalClusterPhaseTerminating,
+				},
+			},
+			expected: metav1.ObjectMeta{
+				DeletionTimestamp: &metav1.Time{Time: date},
+				Labels: map[string]string{
+					"tenancy.kcp.io/phase": string(corev1alpha1.LogicalClusterPhaseTerminating),
+				},
+			},
+			wantStatus: reconcileStatusStopAndRequeue,
+		},
+		{
+			name: "label tracks Deleting phase",
+			input: &corev1alpha1.LogicalCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: &metav1.Time{Time: date},
+				},
+				Status: corev1alpha1.LogicalClusterStatus{
+					Phase: corev1alpha1.LogicalClusterPhaseDeleting,
 				},
 			},
 			expected: metav1.ObjectMeta{
@@ -241,6 +260,7 @@ func TestReconcileMetadata(t *testing.T) {
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 			reconciler := metaDataReconciler{}
 			status, err := reconciler.reconcile(context.Background(), testCase.input)
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,11 +19,8 @@ package bootstrap
 import (
 	"context"
 	"fmt"
-	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
 	kcpapiextensionsclientset "github.com/kcp-dev/client-go/apiextensions/client"
@@ -31,11 +28,10 @@ import (
 
 	configcrds "github.com/kcp-dev/kcp/config/crds"
 	cacheclient "github.com/kcp-dev/kcp/pkg/cache/client"
-	"github.com/kcp-dev/kcp/pkg/logging"
 )
 
 // SystemCRDLogicalCluster holds a logical cluster name under which we store system-related CRDs.
-// We use the same name as the KCP for symmetry.
+// We use the same name as the kcp for symmetry.
 var SystemCRDLogicalCluster = logicalcluster.Name("system:system-crds")
 
 // SystemCacheServerShard holds a default shard name.
@@ -50,16 +46,19 @@ func Bootstrap(ctx context.Context, apiExtensionsClusterClient kcpapiextensionsc
 		{"apis.kcp.io", "apiexports"},
 		{"apis.kcp.io", "apiexportendpointslices"},
 		{"core.kcp.io", "logicalclusters"},
+		{"migration.kcp.io", "logicalclustermigrations"},
 		{"core.kcp.io", "shards"},
 		{"cache.kcp.io", "cachedobjects"},
-		{"cache.kcp.io", "cachedresources"},
-		{"cache.kcp.io", "cachedresourceendpointslices"},
+		{"cache.kcp.io", "clustercachedresources"},
+		{"cache.kcp.io", "clustercachedresourceendpointslices"},
 		{"tenancy.kcp.io", "workspacetypes"},
 		{"rbac.authorization.k8s.io", "roles"},
 		{"rbac.authorization.k8s.io", "clusterroles"},
 		{"rbac.authorization.k8s.io", "rolebindings"},
 		{"rbac.authorization.k8s.io", "clusterrolebindings"},
 		{"admissionregistration.k8s.io", "mutatingwebhookconfigurations"},
+		{"admissionregistration.k8s.io", "mutatingadmissionpolicies"},
+		{"admissionregistration.k8s.io", "mutatingadmissionpolicybindings"},
 		{"admissionregistration.k8s.io", "validatingwebhookconfigurations"},
 		{"admissionregistration.k8s.io", "validatingadmissionpolicies"},
 		{"admissionregistration.k8s.io", "validatingadmissionpolicybindings"},
@@ -81,16 +80,7 @@ func Bootstrap(ctx context.Context, apiExtensionsClusterClient kcpapiextensionsc
 		crds = append(crds, crd)
 	}
 
-	logger := klog.FromContext(ctx)
 	ctx = cacheclient.WithShardInContext(ctx, SystemCacheServerShard)
-	return wait.PollUntilContextCancel(ctx, time.Second, false, func(ctx context.Context) (bool, error) {
-		for _, crd := range crds {
-			err := configcrds.CreateSingle(ctx, apiExtensionsClusterClient.Cluster(SystemCRDLogicalCluster.Path()).ApiextensionsV1().CustomResourceDefinitions(), crd)
-			if err != nil {
-				logging.WithObject(logger, crd).Error(err, "failed to create CustomResourceDefinition")
-				return false, nil
-			}
-		}
-		return true, nil
-	})
+
+	return configcrds.CreateMultiple(ctx, apiExtensionsClusterClient.Cluster(SystemCRDLogicalCluster.Path()).ApiextensionsV1().CustomResourceDefinitions(), crds)
 }

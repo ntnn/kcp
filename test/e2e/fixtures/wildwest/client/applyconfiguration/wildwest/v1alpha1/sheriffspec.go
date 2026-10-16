@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ package v1alpha1
 
 // SheriffSpecApplyConfiguration represents a declarative configuration of the SheriffSpec type for use
 // with apply.
+//
+// Sheriff holds the desired state of the Sheriff.
 type SheriffSpecApplyConfiguration struct {
 	Intent *string `json:"intent,omitempty"`
 }

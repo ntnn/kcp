@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,11 +28,11 @@ import (
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
-
-	dynamiccontext "github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/context"
+	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
 )
 
 func TestMaximalPermissionPolicyAuthorizer(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name                    string
 		attr                    authorizer.Attributes
@@ -315,6 +315,7 @@ func TestMaximalPermissionPolicyAuthorizer(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := dynamiccontext.WithAPIDomainKey(context.Background(), dynamiccontext.APIDomainKey(tc.apidomainKey))
 			auth := &maximalPermissionAuthorizer{
 				getAPIExport:            tc.getAPIExport,
@@ -326,7 +327,7 @@ func TestMaximalPermissionPolicyAuthorizer(t *testing.T) {
 			if err != nil {
 				errString = err.Error()
 			}
-			require.Equal(t, errString, tc.expectedErr)
+			require.Equal(t, tc.expectedErr, errString)
 			require.Equal(t, tc.expectedDecision, dec)
 			require.Equal(t, tc.expectedReason, reason)
 		})

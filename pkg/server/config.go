@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,13 +21,17 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"sync"
+	"time"
 
 	apiextensionsapiserver "k8s.io/apiextensions-apiserver/pkg/apiserver"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/admission"
@@ -57,6 +61,8 @@ import (
 	"github.com/kcp-dev/embeddedetcd"
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
@@ -64,18 +70,23 @@ import (
 	"github.com/kcp-dev/kcp/pkg/authentication"
 	"github.com/kcp-dev/kcp/pkg/authorization"
 	bootstrappolicy "github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
+	"github.com/kcp-dev/kcp/pkg/contextmanager"
 	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
 	"github.com/kcp-dev/kcp/pkg/indexers"
 	"github.com/kcp-dev/kcp/pkg/informer"
 	"github.com/kcp-dev/kcp/pkg/network"
+	"github.com/kcp-dev/kcp/pkg/objectcount"
 	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
+	"github.com/kcp-dev/kcp/pkg/reconciler/migration/logicalclustermigration"
 	"github.com/kcp-dev/kcp/pkg/server/aggregatingcrdversiondiscovery"
 	"github.com/kcp-dev/kcp/pkg/server/bootstrap"
 	kcpfilters "github.com/kcp-dev/kcp/pkg/server/filters"
+	"github.com/kcp-dev/kcp/pkg/server/migrationdump"
 	"github.com/kcp-dev/kcp/pkg/server/openapiv3"
 	kcpserveroptions "github.com/kcp-dev/kcp/pkg/server/options"
 	"github.com/kcp-dev/kcp/pkg/server/options/batteries"
 	"github.com/kcp-dev/kcp/pkg/server/virtualresources"
+	"github.com/kcp-dev/kcp/pkg/shardlookup"
 
 	_ "net/http/pprof"
 )
@@ -112,6 +123,7 @@ type ExtraConfig struct {
 	KubeClusterClient                   kcpkubernetesclientset.ClusterInterface
 	DeepSARClient                       kcpkubernetesclientset.ClusterInterface
 	ApiExtensionsClusterClient          kcpapiextensionsclientset.ClusterInterface
+	CacheApiExtensionsClusterClient     kcpapiextensionsclientset.ClusterInterface
 	KcpClusterClient                    kcpclientset.ClusterInterface
 	KcpCacheClusterClient               kcpclientset.ClusterInterface
 	RootShardKcpClusterClient           kcpclientset.ClusterInterface
@@ -124,10 +136,18 @@ type ExtraConfig struct {
 	ExternalLogicalClusterAdminConfig *rest.Config // client config connecting to the front proxy
 
 	// misc
-	preHandlerChainMux    *handlerChainMuxes
-	quotaAdmissionStopCh  chan struct{}
-	openAPIv3Controller   *openapiv3.Controller
-	openAPIv3ServiceCache *openapiv3.ServiceCache
+	preHandlerChainMux       *handlerChainMuxes
+	quotaAdmissionStopCh     chan struct{}
+	ClusterContextManager    *contextmanager.Manager[logicalcluster.Path]
+	MigratingLogicalClusters *logicalclustermigration.MigratingLogicalClusters
+	MigrationDumpHandler     *migrationdump.Handler
+	openAPIv3Controller      *openapiv3.Controller
+	openAPIv3ServiceCache    *openapiv3.ServiceCache
+
+	// ObjectCountRegistry tracks the total object count per logical cluster on
+	// this shard, fed by a periodic etcd scan and admission-time deltas. It is
+	// shared between the objectcountlimit admission plugin and the scanner.
+	ObjectCountRegistry *objectcount.Registry
 
 	// URL getters depending on genericspiserver.ExternalAddress which is initialized on server run
 	ShardBaseURL             func() string
@@ -135,13 +155,14 @@ type ExtraConfig struct {
 	ShardVirtualWorkspaceURL func() string
 
 	// informers
-	KcpSharedInformerFactory                     kcpinformers.SharedInformerFactory
-	KubeSharedInformerFactory                    kcpkubernetesinformers.SharedInformerFactory
-	ApiExtensionsSharedInformerFactory           kcpapiextensionsinformers.SharedInformerFactory
-	DiscoveringDynamicSharedInformerFactory      *informer.DiscoveringDynamicSharedInformerFactory
-	CacheDiscoveringDynamicSharedInformerFactory *informer.DiscoveringDynamicSharedInformerFactory
-	CacheKcpSharedInformerFactory                kcpinformers.SharedInformerFactory
-	CacheKubeSharedInformerFactory               kcpkubernetesinformers.SharedInformerFactory
+	KcpSharedInformerFactory                kcpinformers.SharedInformerFactory
+	KubeSharedInformerFactory               kcpkubernetesinformers.SharedInformerFactory
+	ApiExtensionsSharedInformerFactory      kcpapiextensionsinformers.SharedInformerFactory
+	PartialMetadataDDSIF                    *informer.DiscoveringDynamicSharedInformerFactory
+	CachePartialMetadataDDSIF               *informer.DiscoveringDynamicSharedInformerFactory
+	CacheApiExtensionsSharedInformerFactory kcpapiextensionsinformers.SharedInformerFactory
+	CacheKcpSharedInformerFactory           kcpinformers.SharedInformerFactory
+	CacheKubeSharedInformerFactory          kcpkubernetesinformers.SharedInformerFactory
 
 	// DynRESTMapper is a workspace-aware REST mapper, backed by a reconciler,
 	// which dynamically loads all bound resources through every type associated
@@ -342,6 +363,13 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		}
 	}
 
+	externalKubeClient, err := kcpkubernetesclientset.NewForConfig(c.ExternalLogicalClusterAdminConfig)
+	if err != nil {
+		return nil, err
+	}
+	opts.Extra.ServiceAccountCache.SetKubeShardClient(externalKubeClient)
+	opts.Extra.ServiceAccountCache.SetInformers(c.KcpSharedInformerFactory)
+
 	// Setup apiextensions * informers
 	c.ApiExtensionsClusterClient, err = kcpapiextensionsclientset.NewForConfig(c.GenericConfig.LoopbackClientConfig)
 	if err != nil {
@@ -349,6 +377,15 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 	}
 	c.ApiExtensionsSharedInformerFactory = kcpapiextensionsinformers.NewSharedInformerFactoryWithOptions(
 		c.ApiExtensionsClusterClient,
+		resyncPeriod,
+	)
+
+	c.CacheApiExtensionsClusterClient, err = kcpapiextensionsclientset.NewForConfig(cacheClientConfig)
+	if err != nil {
+		return nil, err
+	}
+	c.CacheApiExtensionsSharedInformerFactory = kcpapiextensionsinformers.NewSharedInformerFactoryWithOptions(
+		c.CacheApiExtensionsClusterClient,
 		resyncPeriod,
 	)
 
@@ -424,6 +461,16 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		virtualWorkspaceServerProxyTransport = transport
 	}
 
+	// Transport used by the mount proxy when it forwards a request for a mounted
+	// workspace to its target. The target's serving certificate is always verified.
+	// If configured, it presents a requestheader-CA-signed client certificate so a
+	// target inside kcp (e.g. the front-proxy) authenticates the forwarded identity
+	// headers instead of clearing them.
+	mountProxyTransport, err := newMountProxyTransport(opts.Extra.MountProxyClientCertFile, opts.Extra.MountProxyClientKeyFile, opts.Extra.MountProxyServerCAFile)
+	if err != nil {
+		return nil, err
+	}
+
 	// Prepare a local cluster index that can be used both by the LocalProxy, as well as the authenticator
 	// (the authenticator cannot always use the data the localproxy puts into the context because the
 	// authentication rest storage provider calls the authenticator outside of the handler chain).
@@ -439,20 +486,64 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 	// an error.
 	var authIndex authentication.AuthenticatorIndex
 	if kcpfeatures.DefaultFeatureGate.Enabled(kcpfeatures.WorkspaceAuthentication) {
-		// Start an index and a shard watcher to fill this index;
-		// the shard watcher's lifetime is tied to the given context.
-		authIndexState := authentication.NewIndex(ctx, c.GenericConfig.Authentication.APIAudiences)
-		_, err := authentication.NewShardWatcher(ctx, c.Options.Extra.ShardName, c.KcpClusterClient, authIndexState)
+		localWSTIndexer := c.KcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes().Informer().GetIndexer()
+		_ = localWSTIndexer.AddIndexers(cache.Indexers{
+			indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
+		})
+		cacheWSTIndexer := c.CacheKcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceTypes().Informer().GetIndexer()
+		_ = cacheWSTIndexer.AddIndexers(cache.Indexers{
+			indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
+		})
+
+		logicalClusterLister := c.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters().Lister()
+		wacLister := c.KcpSharedInformerFactory.Tenancy().V1alpha1().WorkspaceAuthenticationConfigurations().Lister()
+		externalKcpClient, err := kcpclientset.NewForConfig(c.ExternalLogicalClusterAdminConfig)
 		if err != nil {
-			return nil, fmt.Errorf("failed to start shard watcher: %w", err)
+			return nil, fmt.Errorf("failed to create external kcp client for workspace authentication: %w", err)
 		}
 
-		authIndex = authIndexState
+		wacCache := shardlookup.NewTTLCache[*tenancyv1alpha1.WorkspaceAuthenticationConfiguration]()
+		wacCache.StartWithContext(ctx)
+		wacLookup := shardlookup.NewLookup(
+			wacCache,
+			func(clusterName logicalcluster.Name, _, _ string) bool {
+				_, err := logicalClusterLister.Cluster(clusterName).Get(corev1alpha1.LogicalClusterName)
+				return err == nil
+			},
+			func(clusterName logicalcluster.Name, _, name string) (*tenancyv1alpha1.WorkspaceAuthenticationConfiguration, error) {
+				return wacLister.Cluster(clusterName).Get(name)
+			},
+			func(clusterName logicalcluster.Name, _, name string) (*tenancyv1alpha1.WorkspaceAuthenticationConfiguration, error) {
+				// Enforce a timeout in case the front-proxy or targeted shard do not answer.
+				ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+				defer cancel()
+				return externalKcpClient.TenancyV1alpha1().WorkspaceAuthenticationConfigurations().Cluster(clusterName.Path()).Get(ctx, name, metav1.GetOptions{})
+			},
+		)
+
+		authIndex = authentication.NewLazyIndex(
+			ctx,
+			c.GenericConfig.Authentication.APIAudiences,
+			localWSTIndexer, cacheWSTIndexer,
+			func(clusterName logicalcluster.Name, name string) (*tenancyv1alpha1.WorkspaceAuthenticationConfiguration, error) {
+				return wacLookup.Get(clusterName, "", name)
+			},
+		)
 	}
+
+	c.ExtraConfig.ClusterContextManager = contextmanager.New[logicalcluster.Path](ctx)
 
 	// preHandlerChainMux is called before the actual handler chain. Note that BuildHandlerChainFunc below
 	// is called multiple times, but only one of the handler chain will actually be used. Hence, we wrap it
 	// to give handlers below one mux.Handle func to call.
+	//
+	// NOTE: kcp fully replaces BuildHandlerChainFunc here, which means any handler chain customization
+	// done earlier in the setup pipeline (e.g. genericConfig.BuildHandlerChainFunc =
+	// genericapiserver.BuildHandlerChainWithStorageVersionPrecondition in CreateAggregatorConfig when
+	// StorageVersionAPI + APIServerIdentity feature gates are enabled) is overwritten and never applied.
+	// WithStorageVersionPrecondition is therefore applied explicitly below, gated behind the
+	// StorageVersionAPI feature gate (alpha, off by default) to match upstream k8s behaviour.
+	// See: https://github.com/kcp-dev/kubernetes/pull/185
 	c.preHandlerChainMux = &handlerChainMuxes{}
 	c.GenericConfig.BuildHandlerChainFunc = func(apiHandler http.Handler, genericConfig *genericapiserver.Config) (secure http.Handler) {
 		apiHandler = openapiv3.WithOpenAPIv3(apiHandler, c.openAPIv3ServiceCache) // will be initialized further down after apiextensions-apiserver
@@ -461,13 +552,24 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		apiHandler = authorization.WithSubjectAccessReviewAuditAnnotations(apiHandler)
 		apiHandler = authorization.WithDeepSubjectAccessReview(apiHandler)
 
+		// WithStorageVersionPrecondition blocks write requests to resources whose storage versions
+		// have not yet converged across all kcp shards during a rolling upgrade. It must wrap the
+		// API handler before the authz chain runs, and relies on WithRequestInfo
+		// (in DefaultBuildHandlerChainFromStartToBeforeImpersonation below) being present in the
+		// outer chain at request time.
+		// Gated behind StorageVersionAPI (alpha, off by default) to match upstream k8s behaviour.
+		if kcpfeatures.DefaultFeatureGate.Enabled(kcpfeatures.StorageVersionAPI) {
+			apiHandler = filters.WithStorageVersionPrecondition(apiHandler, genericConfig.StorageVersionManager, genericConfig.Serializer)
+		}
+
 		// The following ensures that only the default main api handler chain executes authorizers which log audit messages.
 		// All other invocations of the same authorizer chain still work but do not produce audit log entries.
 		// This compromises audit log size and information overflow vs. having audit reasons for the main api handler only.
 		// First, remember authorizer chain with audit logging disabled.
 		authorizerWithoutAudit := genericConfig.Authorization.Authorizer
 		// configure audit logging enabled authorizer chain and build the apiHandler using this configuration.
-		genericConfig.Authorization.Authorizer = authorization.WithAuditLogging("request.auth.kcp.io", genericConfig.Authorization.Authorizer)
+		authorizerWithAudit := authorization.WithAuditLogging("request.auth.kcp.io", genericConfig.Authorization.Authorizer)
+		genericConfig.Authorization.Authorizer = authorizerWithAudit
 		apiHandler = genericapiserver.DefaultBuildHandlerChainFromAuthzToCompletion(apiHandler, genericConfig)
 		// reset authorizer chain with audit logging disabled.
 		genericConfig.Authorization.Authorizer = authorizerWithoutAudit
@@ -490,16 +592,27 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		// Only include this when the virtual workspace server is external
 		if shardVirtualWorkspaceURL != nil && virtualWorkspaceServerProxyTransport != nil {
 			proxy := &httputil.ReverseProxy{
-				Director: func(r *http.Request) {
-					r.URL.Scheme = shardVirtualWorkspaceURL.Scheme
-					r.URL.Host = shardVirtualWorkspaceURL.Host
-					delete(r.Header, "X-Forwarded-For")
+				Rewrite: func(pr *httputil.ProxyRequest) {
+					pr.Out.URL.Scheme = shardVirtualWorkspaceURL.Scheme
+					pr.Out.URL.Host = shardVirtualWorkspaceURL.Host
+					// inbound X-Forwarded-For is already stripped from Out; forward only the real client IP
+					if clientIP, _, err := net.SplitHostPort(pr.In.RemoteAddr); err == nil {
+						pr.Out.Header.Set("X-Forwarded-For", clientIP)
+					}
 				},
 			}
 			// Note: this has to come after DefaultBuildHandlerChainBeforeAuthz because it needs the user info, which
 			// is only available after DefaultBuildHandlerChainBeforeAuthz.
 			apiHandler = WithVirtualWorkspacesProxy(apiHandler, shardVirtualWorkspaceURL, virtualWorkspaceServerProxyTransport, proxy)
 		}
+
+		// Requests for mounted workspaces are resolved by WithLocalProxy in front of
+		// the chain and forwarded here, after authentication, audit, flow control
+		// and impersonation, and before authorization (there is no logical cluster
+		// to authorize against; the caller is instead required to be able to get
+		// the Workspace object of the mount in its parent). Like the virtual
+		// workspace proxy above, this needs the user info in the context.
+		apiHandler = WithMountProxy(apiHandler, mountProxyTransport, authorizerWithAudit)
 
 		// Wrap authenticator with a per-workspace authenticator if desired. This authenticator
 		// requires the WorkspaceAuth middleware to have looked up and injected the relevant
@@ -516,6 +629,10 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		// 2. Rest of the handlers up to Authz
 		// 3. Scoping handlers to ensure that the request is scoped to the user's clusters before authz is done.
 		// 4. Rest of the handlers.
+		if kcpfeatures.DefaultFeatureGate.Enabled(kcpfeatures.LogicalClusterMigration) {
+			apiHandler = kcpfilters.WithMigrationDumpHandler(apiHandler, c.MigrationDumpHandler)
+			apiHandler = kcpfilters.WithBlockMigratingLogicalClusters(apiHandler, c.MigratingLogicalClusters.IsMigrating)
+		}
 		apiHandler = kcpfilters.WithImpersonationScoping(apiHandler)
 		apiHandler = genericapiserver.DefaultBuildHandlerChainFromImpersonationToAuthz(apiHandler, genericConfig)
 		apiHandler = kcpfilters.WithImpersonationGatekeeper(apiHandler)
@@ -534,6 +651,7 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		apiHandler = filters.WithWarningRecorder(apiHandler)
 
 		apiHandler = kcpfilters.WithAuditEventClusterAnnotation(apiHandler, c.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters())
+		apiHandler = kcpfilters.WithPerClusterContext(apiHandler, c.ClusterContextManager)
 		apiHandler = kcpfilters.WithBlockInactiveLogicalClusters(apiHandler, c.KcpSharedInformerFactory.Core().V1alpha1().LogicalClusters())
 
 		// Add a mux before the chain, for other handlers with their own handler chain to hook in. For example, when
@@ -542,9 +660,20 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		mux := http.NewServeMux()
 		mux.Handle("/", apiHandler)
 		*c.preHandlerChainMux = []*http.ServeMux{mux}
-		apiHandler = mux
+		// Requests for mounted workspaces bypass the mux: their remaining path
+		// belongs to the mount target and must not be captured by e.g. /services/.
+		apiHandler = kcpfilters.WithMountBypass(mux, apiHandler)
 
 		apiHandler = filters.WithAuditInit(apiHandler) // Must run before any audit annotation is made
+		// Defense-in-depth: after WithLocalProxy has resolved the workspace path to
+		// a logical cluster name, reject any request whose cluster.Name is still
+		// path-shaped. Prevents path strings from leaking into etcd keys if the
+		// localproxy logic ever regresses.
+		apiHandler = kcpfilters.WithClusterNameShapeInvariant(apiHandler)
+		// After WithLocalProxy has set (or left empty) the cluster context, decide
+		// whether shard-wide URLs like /metrics may be served. Workspace-scoped
+		// requests are 501'd; top-level requests are evaluated against root RBAC.
+		apiHandler = kcpfilters.WithShardLevelPaths(apiHandler)
 		apiHandler, err = WithLocalProxy(apiHandler, opts.Extra.ShardName, opts.Extra.AdditionalMappingsFile, clusterIndex)
 		if err != nil {
 			panic(err) // shouldn't happen due to flag validation
@@ -562,12 +691,15 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 	quotaConfiguration := generic.NewConfiguration(nil, quotainstall.DefaultIgnoredResources())
 
 	c.ExtraConfig.quotaAdmissionStopCh = make(chan struct{})
+	c.ExtraConfig.MigratingLogicalClusters = logicalclustermigration.NewMigratingLogicalClusters()
+	c.ExtraConfig.ObjectCountRegistry = objectcount.NewRegistry(opts.Extra.LogicalClusterTotalObjectLimit)
 
 	// DynamicRESTMapper is initialized here, but it starts to be populated only once its controller starts.
 	c.DynamicRESTMapper = dynamicrestmapper.NewDynamicRESTMapper()
 
-	admissionPluginInitializers := []admission.PluginInitializer{
+	admissionPluginInitializers := []admission.PluginInitializer{ //nolint:prealloc
 		kcpadmissioninitializers.NewKcpInformersInitializer(c.KcpSharedInformerFactory, c.CacheKcpSharedInformerFactory),
+		kcpadmissioninitializers.NewObjectCountRegistryInitializer(c.ObjectCountRegistry),
 		kcpadmissioninitializers.NewKubeInformersInitializer(c.KubeSharedInformerFactory, c.CacheKubeSharedInformerFactory),
 		kcpadmissioninitializers.NewKubeClusterClientInitializer(c.KubeClusterClient),
 		kcpadmissioninitializers.NewKcpClusterClientInitializer(c.KcpClusterClient),
@@ -578,6 +710,7 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		kcpadmissioninitializers.NewServerShutdownInitializer(c.quotaAdmissionStopCh),
 		kcpadmissioninitializers.NewDynamicClusterClientInitializer(c.DynamicClusterClient),
 		kcpadmissioninitializers.NewDynamicRESTMapperInitializer(c.DynamicRESTMapper),
+		kcpadmissioninitializers.NewClusterContextManagerInitializer(c.ClusterContextManager),
 	}
 
 	c.ShardBaseURL = func() string {
@@ -592,6 +725,24 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		}
 		return c.ShardBaseURL()
 	}
+	// thisShardLabels reports the labels of this shard's own Shard object, which
+	// is what an endpoint's shard selector is matched against. Every shard
+	// labels itself with its name when it registers, so a selector can name a
+	// shard without the installation having to label anything.
+	thisShardLabels := func() labels.Set {
+		shard, err := indexers.ShardByName(
+			c.CacheKcpSharedInformerFactory.Core().V1alpha1().Shards().Lister(),
+			opts.Extra.ShardName,
+		)
+		if err != nil {
+			// Before the Shard object exists or syncs there is nothing to match
+			// on. Selective endpoints will not match, which fails loudly, and
+			// endpoints without a selector are unaffected.
+			return nil
+		}
+		return labels.Set(shard.Labels)
+	}
+
 	c.ShardVirtualWorkspaceURL = func() string {
 		if opts.Extra.ShardVirtualWorkspaceURL != "" {
 			return opts.Extra.ShardVirtualWorkspaceURL
@@ -626,7 +777,7 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		informerfactoryhack.Wrap(c.KubeSharedInformerFactory),
 		admissionPluginInitializers,
 		opts.GenericControlPlane,
-		3,
+		opts.Extra.ShardReplicaCount,
 		conversionFactory)
 	if err != nil {
 		return nil, fmt.Errorf("error configuring api extensions: %w", err)
@@ -641,10 +792,10 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		indexers.APIBindingByBoundResources:           indexers.IndexAPIBindingByBoundResources,
 	})
 	_ = c.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().GetIndexer().AddIndexers(cache.Indexers{
-		indexers.APIExportByVirtualResourceIdentities: indexers.IndexAPIExportByVirtualResourceIdentities,
+		indexers.APIExportByVirtualResourceFingerprint: indexers.IndexAPIExportByVirtualResourceFingerprint,
 	})
 	_ = c.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer().GetIndexer().AddIndexers(cache.Indexers{
-		indexers.APIExportByVirtualResourceIdentities: indexers.IndexAPIExportByVirtualResourceIdentities,
+		indexers.APIExportByVirtualResourceFingerprint: indexers.IndexAPIExportByVirtualResourceFingerprint,
 	})
 
 	apiBindingAwareCRDClusterLister := &apiBindingAwareCRDClusterLister{
@@ -670,15 +821,40 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 	c.ApiExtensions.ExtraConfig.TableConverterProvider = NewTableConverterProvider()
 
 	if kcpfeatures.DefaultFeatureGate.Enabled(kcpfeatures.CacheAPIs) {
-		// vwClientConfig is used by the proxy handler to proxy the client requests to the virtual workspace.
+		// vwClientConfig is used by the aggregating CRD-version discovery server and the virtual
+		// resources server to forward requests to the virtual workspace endpoint URLs advertised
+		// in ClusterCachedResourceEndpointSlices.
 		vwClientConfig := rest.CopyConfig(c.GenericConfig.LoopbackClientConfig)
-		if !opts.Virtual.Enabled {
+		if opts.Extra.ShardClientCertFile != "" && opts.Extra.ShardClientKeyFile != "" {
+			// On a real, multi-component deployment the advertised endpoint URL is the serving
+			// shard's own external virtual-workspace URL (Shard.Spec.VirtualWorkspaceURL, e.g.
+			// https://shard.example:8443/services/replication/...), which is reached through the
+			// cluster ingress that routes by TLS SNI directly to that shard — not the in-cluster
+			// Service address and not loopback, even when the virtual workspace runs embedded in
+			// this shard.
+			//
+			// The loopback config therefore cannot be used: its bearer token is only valid on the
+			// loopback listener (the forwarded request would authenticate as anonymous and be
+			// denied) and its ServerName is the loopback name (so the ingress cannot SNI-route the
+			// connection and resets it). Authenticate with the shard client certificate against a
+			// CA that trusts the shard serving certificate, drop the loopback bearer token, and
+			// leave ServerName empty so the SNI is derived from the target host.
+			virtualWorkspaceCAFile := opts.Extra.ShardVirtualWorkspaceCAFile
+			if virtualWorkspaceCAFile == "" {
+				// With embedded virtual workspaces --shard-virtual-workspace-ca-file is typically
+				// not set; fall back to the root CA, which signs the shard serving certificate.
+				virtualWorkspaceCAFile = opts.Controllers.SAController.RootCAFile
+			}
+			vwClientConfig.BearerToken = ""
+			vwClientConfig.BearerTokenFile = ""
 			vwClientConfig.TLSClientConfig = rest.TLSClientConfig{
-				CAFile:   opts.Extra.ShardVirtualWorkspaceCAFile,
+				CAFile:   virtualWorkspaceCAFile,
 				CertFile: opts.Extra.ShardClientCertFile,
 				KeyFile:  opts.Extra.ShardClientKeyFile,
 			}
 		}
+		// Otherwise (no shard client certificate, e.g. an in-process test server) the endpoint URL
+		// points back at this same server, so the loopback config is correct and is kept as-is.
 
 		// We need an aggregating version discovery for CRDs that is RESTstorage-aware.
 		// The apiextensions apiserver sources its data from the apiBindingAwareCRDClusterLister.
@@ -695,6 +871,7 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 			vwClientConfig,
 			c.Options.Extra.ShardName,
 			c.ShardVirtualWorkspaceURL,
+			thisShardLabels,
 			c.ApiExtensionsSharedInformerFactory.Apiextensions().V1().CustomResourceDefinitions(),
 			apiBindingAwareCRDClusterLister,
 			c.KcpSharedInformerFactory.Apis().V1alpha2().APIBindings(),
@@ -715,6 +892,7 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 			c.CacheDynamicClient,
 			c.Options.Extra.ShardName,
 			c.ShardVirtualWorkspaceURL,
+			thisShardLabels,
 			c.ApiExtensionsSharedInformerFactory.Apiextensions().V1().CustomResourceDefinitions(),
 			c.KcpSharedInformerFactory.Apis().V1alpha2().APIBindings(),
 			c.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports(),
@@ -723,6 +901,19 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		if err != nil {
 			return nil, fmt.Errorf("failed to create config for virtual resources server: %v", err)
 		}
+	}
+
+	if kcpfeatures.DefaultFeatureGate.Enabled(kcpfeatures.LogicalClusterMigration) {
+		etcdClient, err := newEtcdClient(c.Options.GenericControlPlane.Etcd.StorageConfig.Transport)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create etcd client for migration dump handler: %w", err)
+		}
+		c.ExtraConfig.MigrationDumpHandler = migrationdump.NewHandler(
+			etcdClient,
+			c.Options.GenericControlPlane.Etcd.StorageConfig.Prefix,
+			c.GenericConfig.ResourceTransformers,
+			c.ExtraConfig.MigratingLogicalClusters,
+		)
 	}
 
 	c.openAPIv3Controller = openapiv3.NewController(c.ApiExtensionsSharedInformerFactory.Apiextensions().V1().CustomResourceDefinitions())
@@ -739,13 +930,22 @@ func NewConfig(ctx context.Context, opts kcpserveroptions.CompletedOptions) (*Co
 		virtualWorkspacesConfig := rest.CopyConfig(c.GenericConfig.LoopbackClientConfig)
 		virtualWorkspacesConfig = rest.AddUserAgent(virtualWorkspacesConfig, "virtual-workspaces")
 
+		// externalLogicalClusterAdminConfig (front-proxy) is used by VWs that
+		// need to reach clusters hosted on other shards. Defaults to the
+		// loopback when no dedicated kubeconfig was supplied; the SAR will
+		// fall back to local-only resolution which works in single-shard
+		// deployments.
+		externalLogicalClusterAdminConfig := rest.CopyConfig(c.ExternalLogicalClusterAdminConfig)
+		externalLogicalClusterAdminConfig = rest.AddUserAgent(externalLogicalClusterAdminConfig, "virtual-workspaces-external")
+
 		c.OptionalVirtual, err = newVirtualConfig(
 			opts,
 			virtualWorkspacesConfig,
+			cacheClientConfig,
+			externalLogicalClusterAdminConfig,
 			c.KubeSharedInformerFactory,
 			c.KcpSharedInformerFactory,
 			c.CacheKcpSharedInformerFactory,
-			c.ShardExternalURL,
 		)
 		if err != nil {
 			return nil, err

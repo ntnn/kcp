@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@ type CertificatesV1beta1ClusterInterface interface {
 	CertificatesV1beta1ClusterScoper
 	CertificateSigningRequestsClusterGetter
 	ClusterTrustBundlesClusterGetter
+	PodCertificateRequestsClusterGetter
 }
 
 type CertificatesV1beta1ClusterScoper interface {
@@ -58,6 +59,10 @@ func (c *CertificatesV1beta1ClusterClient) CertificateSigningRequests() Certific
 
 func (c *CertificatesV1beta1ClusterClient) ClusterTrustBundles() ClusterTrustBundleClusterInterface {
 	return &clusterTrustBundlesClusterInterface{clientCache: c.clientCache}
+}
+
+func (c *CertificatesV1beta1ClusterClient) PodCertificateRequests() PodCertificateRequestClusterInterface {
+	return &podCertificateRequestsClusterInterface{clientCache: c.clientCache}
 }
 
 // NewForConfig creates a new CertificatesV1beta1ClusterClient for the given config.

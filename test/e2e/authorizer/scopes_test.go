@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The KCP Authors.
+Copyright 2024 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
@@ -149,6 +150,7 @@ func TestSubjectAccessReview(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -179,8 +181,7 @@ func TestSelfSubjectRulesReview(t *testing.T) {
 	t.Parallel()
 	framework.Suite(t, "control-plane")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	server := kcptesting.SharedKcpServer(t)
 	cfg := server.BaseConfig(t)
@@ -233,6 +234,10 @@ func TestSelfSubjectRulesReview(t *testing.T) {
 		groups    []string
 		extra     map[string][]string
 		wantRules []authorizationv1.ResourceRule
+		// wantForbidden is set when the impersonation itself is rejected.
+		// Only system:masters may claim a service account cluster name other
+		// than the cluster the request goes to.
+		wantForbidden bool
 	}
 	for _, tt := range []tests{
 		{
@@ -271,7 +276,7 @@ func TestSelfSubjectRulesReview(t *testing.T) {
 		{
 			name: "service account with other cluster",
 			user: "system:serviceaccount:default:default", groups: []string{"system:kcp:admin"}, extra: map[string][]string{serviceaccount.ClusterNameKey: {"other"}},
-			wantRules: authenticatedBaseRules,
+			wantForbidden: true,
 		},
 		{
 			name: "admin scoped to other cluster",
@@ -292,12 +297,18 @@ func TestSelfSubjectRulesReview(t *testing.T) {
 				serviceaccount.ClusterNameKey:          {"other"},
 				rbacregistryvalidation.WarrantExtraKey: {`{"user":"user","groups":["system:kcp:admin"]}`},
 			},
-			wantRules: append([]authorizationv1.ResourceRule{
-				{Verbs: []string{"*"}, APIGroups: []string{"*"}, Resources: []string{"*"}},
-			}, authenticatedBaseRules...),
+			wantForbidden: true,
+		},
+		{
+			name: "user with warrant for service account of other cluster",
+			user: "user", groups: []string{"system:kcp:admin"}, extra: map[string][]string{
+				rbacregistryvalidation.WarrantExtraKey: {`{"user":"system:serviceaccount:default:default","extra":{"authentication.kcp.io/cluster-name":["other"]}}`},
+			},
+			wantForbidden: true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -320,6 +331,10 @@ func TestSelfSubjectRulesReview(t *testing.T) {
 				},
 			}
 			resp, err := impersonatedClient.Cluster(wsPath).AuthorizationV1().SelfSubjectRulesReviews().Create(ctx, req, metav1.CreateOptions{})
+			if tt.wantForbidden {
+				require.True(t, apierrors.IsForbidden(err), "expected forbidden, got: %v", err)
+				return
+			}
 			require.NoError(t, err)
 
 			sort.Sort(sortedResourceRules(resp.Status.ResourceRules))

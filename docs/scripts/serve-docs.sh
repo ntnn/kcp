@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2023 The KCP Authors.
+# Copyright 2023 The kcp Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ fi
 
 mike set-default "${MIKE_OPTIONS[@]}" --allow-undefined "${DEFAULT_VERSION}"
 if [[ -n "${DEV_MODE:-}" ]]; then
-  mkdocs serve --dev-addr=127.0.0.1:8000 --livereload
+  zensical serve --dev-addr=127.0.0.1:8000
 else
   mike serve "${MIKE_OPTIONS[@]}"
 fi

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 )
 
 func TestParseClusterURL(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		host    string
 		url     string
@@ -50,6 +51,7 @@ func TestParseClusterURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
+			t.Parallel()
 			gotURL, gotCluster, err := ParseClusterURL(tt.host)
 			if tt.wantErr {
 				require.Error(t, err, "instead of error got %q, %q", gotURL, gotCluster)

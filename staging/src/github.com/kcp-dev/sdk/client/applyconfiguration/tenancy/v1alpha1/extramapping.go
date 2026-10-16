@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ package v1alpha1
 
 // ExtraMappingApplyConfiguration represents a declarative configuration of the ExtraMapping type for use
 // with apply.
+//
+// ExtraMapping provides the configuration for a single extra mapping.
 type ExtraMappingApplyConfiguration struct {
 	Key             *string `json:"key,omitempty"`
 	ValueExpression *string `json:"valueExpression,omitempty"`

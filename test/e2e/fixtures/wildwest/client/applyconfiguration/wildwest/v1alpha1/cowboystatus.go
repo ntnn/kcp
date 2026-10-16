@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ package v1alpha1
 
 // CowboyStatusApplyConfiguration represents a declarative configuration of the CowboyStatus type for use
 // with apply.
+//
+// CowboyStatus communicates the observed state of the Cowboy.
 type CowboyStatusApplyConfiguration struct {
 	Result *string `json:"result,omitempty"`
 }

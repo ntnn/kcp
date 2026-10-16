@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ import (
 )
 
 func TestReconciler(t *testing.T) {
+	t.Parallel()
 	expired := time.Now().Add(-1).UTC().Format(time.RFC3339)
 	notExpired := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 
@@ -96,6 +97,10 @@ func TestReconciler(t *testing.T) {
 			logicalCluster: &corev1alpha1.LogicalCluster{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 				"internal.apis.kcp.io/resource-bindings": `{"as.group":{"n":"binding1"},"bs.group":{"n":"binding1"},"crd1s.group":{"c":true},"crd2s.group":{"c":true},"cs.group":{"n":"binding2"},"ds.group":{"n":"binding2"}}`,
 			}}},
+			crds: []*apiextensionsv1.CustomResourceDefinition{
+				withEstablished(newCRD("group", "crd1s")),
+				withEstablished(newCRD("group", "crd2s")),
+			},
 			apiBindings: []*apisv1alpha2.APIBinding{
 				&newAPIBinding().WithName("binding1").WithBoundResources("group", "as", "group", "bs").APIBinding,
 			},
@@ -114,9 +119,19 @@ func TestReconciler(t *testing.T) {
 				"internal.apis.kcp.io/resource-bindings": fmt.Sprintf(`{"crd1s.group":{"c":true},"crd3s.group":{"c":true,"e":%q}}`, notExpired),
 			}}},
 		},
+		"deleted CRD whose lock has no expiry is removed": {
+			logicalCluster: &corev1alpha1.LogicalCluster{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				"internal.apis.kcp.io/resource-bindings": `{"crd1s.group":{"c":true}}`,
+			}}},
+			crds: []*apiextensionsv1.CustomResourceDefinition{},
+			want: &corev1alpha1.LogicalCluster{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				"internal.apis.kcp.io/resource-bindings": `{}`,
+			}}},
+		},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			var got *corev1alpha1.LogicalCluster
 			c := &controller{
 				getLogicalCluster: func(clusterName logicalcluster.Name) (*corev1alpha1.LogicalCluster, error) {
@@ -164,8 +179,11 @@ func (b *bindingBuilder) WithName(name string) *bindingBuilder {
 }
 
 func (b *bindingBuilder) WithBoundResources(boundResources ...string) *bindingBuilder {
+	if len(boundResources)%2 != 0 {
+		panic("bound resources slice of unexpected length")
+	}
 	for i := 0; i < len(boundResources); i += 2 {
-		group, resource := boundResources[i], boundResources[i+1]
+		group, resource := boundResources[i], boundResources[i+1] //nolint:gosec // Bounds is checked with the modulo above
 		b.Status.BoundResources = append(b.Status.BoundResources, apisv1alpha2.BoundAPIResource{
 			Group:    group,
 			Resource: resource,

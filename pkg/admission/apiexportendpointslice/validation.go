@@ -1,5 +1,5 @@
 /*
-Copyright 2023 The KCP Authors.
+Copyright 2023 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import (
 
 // ValidateAPIExportEndpointSlice validates an APIExport.
 func ValidateAPIExportEndpointSlice(slice *apisv1alpha1.APIExportEndpointSlice) field.ErrorList {
-	allErrs := field.ErrorList{}
+	allErrs := field.ErrorList{} //nolint:prealloc // prealloc doesn't make sense for this function
 
 	allErrs = append(allErrs, ValidateAPIExportEndpointSliceReference(slice.Spec.APIExport, field.NewPath("spec", "export"))...)
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -85,8 +85,6 @@ func TestAPIExportAuthorizers(t *testing.T) {
 	tenantUser := server.ClientCAUserConfig(t, rest.CopyConfig(cfg), "tenant-user")
 
 	kubeClient, err := kcpkubernetesclientset.NewForConfig(rest.CopyConfig(cfg))
-	require.NoError(t, err)
-	kcpClient, err := kcpclientset.NewForConfig(rest.CopyConfig(cfg))
 	require.NoError(t, err)
 
 	framework.AdmitWorkspaceAccess(t.Context(), t, kubeClient, orgPath, []string{"service-provider-1-admin", "service-provider-2-admin", "tenant-user"}, nil, false)
@@ -411,14 +409,7 @@ metadata:
 	serviceProvider2AdminApiExportVWCfg := rest.CopyConfig(serviceProvider2Admin)
 	serviceProvider2AdminClient, err := kcpclientset.NewForConfig(serviceProvider2Admin)
 	require.NoError(t, err)
-	kcptestinghelpers.Eventually(t, func() (bool, string) {
-		apiExportEndpointSlice, err := serviceProvider2AdminClient.Cluster(serviceProvider2Path).ApisV1alpha1().APIExportEndpointSlices().Get(t.Context(), "today-cowboys", metav1.GetOptions{})
-		require.NoError(t, err)
-		var found bool
-		serviceProvider2AdminApiExportVWCfg.Host, found, err = framework.VirtualWorkspaceURL(t.Context(), kcpClient, tenantWorkspace, framework.ExportVirtualWorkspaceURLs(apiExportEndpointSlice))
-		require.NoError(t, err)
-		return found, fmt.Sprintf("waiting for virtual workspace URLs to be available: %v", apiExportEndpointSlice.Status.APIExportEndpoints)
-	}, wait.ForeverTestTimeout, time.Millisecond*100)
+	serviceProvider2AdminApiExportVWCfg.Host = vwURL(t, serviceProvider2AdminClient, cfg, serviceProvider2Path, "today-cowboys", tenantWorkspace, tenantPath)
 
 	serviceProvider2DynamicVWClientForTenantWorkspace, err := kcpdynamic.NewForConfig(serviceProvider2AdminApiExportVWCfg)
 	require.NoError(t, err)
@@ -481,14 +472,7 @@ metadata:
 	shadowVWCfg := rest.CopyConfig(serviceProvider2Admin)
 	shadowVWClient, err := kcpclientset.NewForConfig(serviceProvider2Admin)
 	require.NoError(t, err)
-	kcptestinghelpers.Eventually(t, func() (bool, string) {
-		apiExportEndpointSlice, err := shadowVWClient.Cluster(serviceProvider2Path).ApisV1alpha1().APIExportEndpointSlices().Get(t.Context(), "today-cowboys", metav1.GetOptions{})
-		require.NoError(t, err)
-		var found bool
-		shadowVWCfg.Host, found, err = framework.VirtualWorkspaceURL(t.Context(), kcpClient, tenantShadowCRDWorkspace, framework.ExportVirtualWorkspaceURLs(apiExportEndpointSlice))
-		require.NoError(t, err)
-		return found, fmt.Sprintf("waiting for virtual workspace URLs to be available: %v", apiExportEndpointSlice.Status.APIExportEndpoints)
-	}, wait.ForeverTestTimeout, time.Millisecond*100)
+	shadowVWCfg.Host = vwURL(t, shadowVWClient, cfg, serviceProvider2Path, "today-cowboys", tenantShadowCRDWorkspace, tenantShadowCRDPath)
 
 	serviceProvider2DynamicVWClientForShadowTenantWorkspace, err := kcpdynamic.NewForConfig(shadowVWCfg)
 	require.NoError(t, err)
@@ -519,13 +503,14 @@ func TestAPIExportBindingAuthorizer(t *testing.T) {
 	// And we can replace logicalcluster in the url and test other workspaces for authorization leaking.
 	t.Logf("Check if we can access shards")
 	var shards *corev1alpha1.ShardList
-	{
-		kcpClusterClient, err := kcpclientset.NewForConfig(cfg)
-		require.NoError(t, err, "failed to construct kcp cluster client for server")
-
-		shards, err = kcpClusterClient.Cluster(core.RootCluster.Path()).CoreV1alpha1().Shards().List(t.Context(), metav1.ListOptions{})
+	// Shards are served through the Admin workspace from the cache server
+	// and appear asynchronously after shard startup.
+	require.Eventually(t, func() bool {
+		var err error
+		shards, err = kcptesting.ListShards(t.Context(), cfg)
 		require.NoError(t, err, "failed to list shards")
-	}
+		return len(shards.Items) > 0
+	}, wait.ForeverTestTimeout, 100*time.Millisecond, "expected at least one Shard in the admin workspace")
 
 	serviceProviderPath, _ := kcptesting.NewWorkspaceFixture(t, server, orgPath, kcptesting.WithName("service-provider"))
 	tenantPath, tenantWorkspace := kcptesting.NewWorkspaceFixture(t, server, orgPath, kcptesting.WithName("tenant"))
@@ -635,17 +620,7 @@ func TestAPIExportBindingAuthorizer(t *testing.T) {
 	serviceProviderAdminApiExportVWCfg := rest.CopyConfig(serviceProviderAdmin)
 	serviceProviderAdminClient, err := kcpclientset.NewForConfig(serviceProviderAdmin)
 	require.NoError(t, err)
-	kcptestinghelpers.Eventually(t, func() (bool, string) {
-		apiExportEndpointSlice, err := serviceProviderAdminClient.Cluster(serviceProviderPath).ApisV1alpha1().APIExportEndpointSlices().Get(t.Context(), "wild.wild.west", metav1.GetOptions{})
-		require.NoError(t, err)
-		var found bool
-		serviceProviderAdminApiExportVWCfg.Host, found, err = framework.VirtualWorkspaceURL(t.Context(), kcpClient, tenantWorkspace, framework.ExportVirtualWorkspaceURLs(apiExportEndpointSlice))
-		require.NoError(t, err)
-		if !found {
-			return false, fmt.Sprintf("waiting for virtual workspace URLs to be available: %v", apiExportEndpointSlice.Status.APIExportEndpoints)
-		}
-		return true, ""
-	}, wait.ForeverTestTimeout, time.Millisecond*100)
+	serviceProviderAdminApiExportVWCfg.Host = vwURL(t, serviceProviderAdminClient, cfg, serviceProviderPath, "wild.wild.west", tenantWorkspace, tenantPath)
 
 	serviceProviderDynamicVWClientForTenantWorkspace, err := kcpdynamic.NewForConfig(serviceProviderAdminApiExportVWCfg)
 	require.NoError(t, err)
@@ -880,10 +855,17 @@ func apply(t *testing.T, workspace logicalcluster.Path, cfg *rest.Config, manife
 			}
 		}()
 
-		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-		if err != nil {
-			return fmt.Errorf("error getting REST mapping for %s/%s: %w", gvk.GroupKind(), gvk.Version, err)
-		}
+		// While warming up and under load discovery can be slow and fail.
+		var mapping *meta.RESTMapping
+		kcptestinghelpers.Eventually(t, func() (bool, string) {
+			var mErr error
+			mapping, mErr = mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+			if mErr != nil {
+				mapper.Reset()
+				return false, fmt.Sprintf("error getting REST mapping for %s/%s: %v", gvk.GroupKind(), gvk.Version, mErr)
+			}
+			return true, ""
+		}, wait.ForeverTestTimeout, 100*time.Millisecond, "expected REST mapping for %s/%s", gvk.GroupKind(), gvk.Version)
 
 		dynamicClient, err := kcpdynamic.NewForConfig(cfg)
 		require.NoError(t, err)
@@ -1041,7 +1023,7 @@ func TestRootAPIExportAuthorizers(t *testing.T) {
 
 	t.Logf("Get virtual workspace client for service APIExport in workspace %q", servicePath)
 	serviceAPIExportVWCfg := framework.StaticTokenUserConfig(providerUser, rest.CopyConfig(cfg))
-	serviceAPIExportVWCfg.Host = vwURL(t, kcpClient, servicePath, apiExport.Name, userWorkspace, userPath)
+	serviceAPIExportVWCfg.Host = vwURL(t, kcpClient, cfg, servicePath, apiExport.Name, userWorkspace, userPath)
 	serviceDynamicVWClient, err := kcpdynamic.NewForConfig(serviceAPIExportVWCfg)
 	require.NoError(t, err)
 
@@ -1074,16 +1056,18 @@ func TestRootAPIExportAuthorizers(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func vwURL(t *testing.T, kcpClusterClient kcpclientset.ClusterInterface, path logicalcluster.Path, export string, ws *tenancyv1alpha1.Workspace, wsPath logicalcluster.Path) string {
+func vwURL(t *testing.T, providerClusterClient kcpclientset.ClusterInterface, cfg *rest.Config, path logicalcluster.Path, export string, ws *tenancyv1alpha1.Workspace, wsPath logicalcluster.Path) string {
 	t.Helper()
 
 	var vwURL string
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
-		exportEndpointSlice, err := kcpClusterClient.Cluster(path).ApisV1alpha1().APIExportEndpointSlices().Get(t.Context(), export, metav1.GetOptions{})
-		require.NoError(t, err)
+		exportEndpointSlice, err := providerClusterClient.Cluster(path).ApisV1alpha1().APIExportEndpointSlices().Get(t.Context(), export, metav1.GetOptions{})
+		if kcptestinghelpers.TolerateOrFail(t, err, apierrors.IsNotFound) {
+			return false, err.Error()
+		}
 		urls := framework.ExportVirtualWorkspaceURLs(exportEndpointSlice)
 		var found bool
-		vwURL, found, err = framework.VirtualWorkspaceURL(t.Context(), kcpClusterClient, ws, urls)
+		vwURL, found, err = framework.VirtualWorkspaceURL(t.Context(), cfg, ws, urls)
 		require.NoError(t, err)
 		return found, fmt.Sprintf("waiting on virtual workspace URL for workspace %s, found: %v", wsPath, urls)
 	}, wait.ForeverTestTimeout, 100*time.Millisecond, "waiting on virtual workspace to be ready")

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -84,6 +84,7 @@ func updateAttr(obj, old *apiextensions.CustomResourceDefinition) admission.Attr
 }
 
 func TestValidate(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		attr        admission.Attributes
@@ -212,6 +213,7 @@ func TestValidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			o := &reservedCRDAnnotations{
 				Handler: admission.NewHandler(admission.Create, admission.Update),
 			}

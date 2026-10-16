@@ -1,0 +1,444 @@
+/*
+Copyright 2026 The kcp Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package mutatingadmissionpolicy
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"sync"
+
+	"golang.org/x/sync/singleflight"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/admission/initializer"
+	"k8s.io/apiserver/pkg/admission/plugin/policy/generic"
+	"k8s.io/apiserver/pkg/admission/plugin/policy/matching"
+	"k8s.io/apiserver/pkg/admission/plugin/policy/mutating"
+	"k8s.io/apiserver/pkg/admission/plugin/policy/mutating/patch"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/features"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/component-base/featuregate"
+	"k8s.io/klog/v2"
+
+	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
+	kcpkubernetesinformers "github.com/kcp-dev/client-go/informers"
+	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
+	"github.com/kcp-dev/logicalcluster/v3"
+	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
+	corev1alpha1informers "github.com/kcp-dev/sdk/client/informers/externalversions/core/v1alpha1"
+
+	"github.com/kcp-dev/kcp/pkg/admission/clusterannotation"
+	"github.com/kcp-dev/kcp/pkg/admission/initializers"
+	"github.com/kcp-dev/kcp/pkg/admission/kubequota"
+	"github.com/kcp-dev/kcp/pkg/contextmanager"
+	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
+	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
+)
+
+const PluginName = "KCPMutatingAdmissionPolicy"
+
+const systemBoundCRDsClusterName = logicalcluster.Name("system:bound-crds")
+
+func Register(plugins *admission.Plugins) {
+	plugins.Register(PluginName,
+		func(config io.Reader) (admission.Interface, error) {
+			if !kcpfeatures.DefaultFeatureGate.Enabled(features.MutatingAdmissionPolicy) {
+				return nil, nil
+			}
+			return NewKubeMutatingAdmissionPolicy(), nil
+		},
+	)
+}
+
+func NewKubeMutatingAdmissionPolicy() *KubeMutatingAdmissionPolicy {
+	return &KubeMutatingAdmissionPolicy{
+		Handler:   admission.NewHandler(admission.Connect, admission.Create, admission.Delete, admission.Update),
+		delegates: make(map[delegateKey]*stoppableMutatingAdmissionPolicy),
+	}
+}
+
+type delegateKey struct {
+	policyCluster logicalcluster.Name
+	targetCluster logicalcluster.Name
+}
+
+type KubeMutatingAdmissionPolicy struct {
+	*admission.Handler
+
+	// Injected/set via initializers
+	logicalClusterInformer          corev1alpha1informers.LogicalClusterClusterInformer
+	kubeClusterClient               kcpkubernetesclientset.ClusterInterface
+	dynamicClusterClient            kcpdynamic.ClusterInterface
+	localKubeSharedInformerFactory  kcpkubernetesinformers.SharedInformerFactory
+	globalKubeSharedInformerFactory kcpkubernetesinformers.SharedInformerFactory
+	serverDone                      <-chan struct{}
+	authorizer                      authorizer.Authorizer
+	cacheSyncOnce                   sync.Once
+
+	getAPIBindings func(clusterName logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error)
+
+	featureGates featuregate.FeatureGate
+
+	dynamicRESTMapper *dynamicrestmapper.DynamicRESTMapper
+
+	clusterContextManager *contextmanager.Manager[logicalcluster.Path]
+
+	delegatesLock sync.RWMutex
+	delegates     map[delegateKey]*stoppableMutatingAdmissionPolicy
+
+	typeConverterManagers     sync.Map
+	typeConverterManagerGroup singleflight.Group
+
+	logicalClusterDeletionMonitorStarter sync.Once
+}
+
+var _ admission.MutationInterface = &KubeMutatingAdmissionPolicy{}
+var _ = initializers.WantsKubeClusterClient(&KubeMutatingAdmissionPolicy{})
+var _ = initializers.WantsKubeInformers(&KubeMutatingAdmissionPolicy{})
+var _ = initializers.WantsKcpInformers(&KubeMutatingAdmissionPolicy{})
+var _ = initializers.WantsServerShutdownChannel(&KubeMutatingAdmissionPolicy{})
+var _ = initializers.WantsDynamicClusterClient(&KubeMutatingAdmissionPolicy{})
+var _ = initializers.WantsDynamicRESTMapper(&KubeMutatingAdmissionPolicy{})
+var _ = initializers.WantsClusterContextManager(&KubeMutatingAdmissionPolicy{})
+var _ = initializer.WantsAuthorizer(&KubeMutatingAdmissionPolicy{})
+var _ = initializer.WantsFeatures(&KubeMutatingAdmissionPolicy{})
+var _ = admission.InitializationValidator(&KubeMutatingAdmissionPolicy{})
+
+func (k *KubeMutatingAdmissionPolicy) SetKubeClusterClient(kubeClusterClient kcpkubernetesclientset.ClusterInterface) {
+	k.kubeClusterClient = kubeClusterClient
+}
+
+func (k *KubeMutatingAdmissionPolicy) SetKcpInformers(local, global kcpinformers.SharedInformerFactory) {
+	k.logicalClusterInformer = local.Core().V1alpha1().LogicalClusters()
+	k.getAPIBindings = func(clusterName logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error) {
+		return local.Apis().V1alpha2().APIBindings().Lister().Cluster(clusterName).List(labels.Everything())
+	}
+
+	_, _ = local.Core().V1alpha1().LogicalClusters().Informer().AddEventHandler(
+		cache.ResourceEventHandlerFuncs{
+			DeleteFunc: func(obj interface{}) {
+				cl, ok := obj.(*corev1alpha1.LogicalCluster)
+				if !ok {
+					return
+				}
+
+				clName := logicalcluster.Name(cl.Annotations[logicalcluster.AnnotationKey])
+
+				k.delegatesLock.Lock()
+				defer k.delegatesLock.Unlock()
+
+				// Remove all delegates that involve this cluster (either as policy or target)
+				for key, delegate := range k.delegates {
+					if key.policyCluster == clName || key.targetCluster == clName {
+						delete(k.delegates, key)
+						delegate.stop()
+					}
+				}
+
+				k.typeConverterManagers.Delete(clName)
+			},
+		},
+	)
+}
+
+func (k *KubeMutatingAdmissionPolicy) SetKubeInformers(local, global kcpkubernetesinformers.SharedInformerFactory) {
+	k.localKubeSharedInformerFactory = local
+	k.globalKubeSharedInformerFactory = global
+}
+
+func (k *KubeMutatingAdmissionPolicy) SetServerShutdownChannel(ch <-chan struct{}) {
+	k.serverDone = ch
+}
+
+func (k *KubeMutatingAdmissionPolicy) SetDynamicClusterClient(c kcpdynamic.ClusterInterface) {
+	k.dynamicClusterClient = c
+}
+
+func (k *KubeMutatingAdmissionPolicy) SetDynamicRESTMapper(dynRESTMapper *dynamicrestmapper.DynamicRESTMapper) {
+	k.dynamicRESTMapper = dynRESTMapper
+}
+
+func (k *KubeMutatingAdmissionPolicy) SetClusterContextManager(mgr *contextmanager.Manager[logicalcluster.Path]) {
+	k.clusterContextManager = mgr
+}
+
+func (k *KubeMutatingAdmissionPolicy) SetAuthorizer(authz authorizer.Authorizer) {
+	k.authorizer = authz
+}
+
+func (k *KubeMutatingAdmissionPolicy) InspectFeatureGates(featureGates featuregate.FeatureGate) {
+	k.featureGates = featureGates
+}
+
+func (k *KubeMutatingAdmissionPolicy) ValidateInitialization() error {
+	return nil
+}
+
+func (k *KubeMutatingAdmissionPolicy) Admit(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) error {
+	k.logicalClusterDeletionMonitorStarter.Do(func() {
+		m := kubequota.NewLogicalClusterDeletionMonitor("kubequota-logicalcluster-deletion-monitor", k.logicalClusterInformer, k.logicalClusterDeleted)
+		go m.Start(k.serverDone)
+	})
+
+	cluster, err := genericapirequest.ValidClusterFrom(ctx)
+	if err != nil {
+		return err
+	}
+
+	if cluster.Name == systemBoundCRDsClusterName {
+		return nil
+	}
+
+	sourceCluster, err := k.getSourceClusterForGroupResource(cluster.Name, a.GetResource().GroupResource())
+	if err != nil {
+		return err
+	}
+
+	// Only spin up a MAP delegate when needed, because MAP requires the
+	// TypeConverterManager, which polls the OpenAPI endpoint every 5s.
+	hasPolicies, err := k.hasMutatingPolicies(ctx, sourceCluster)
+	if err != nil {
+		return err
+	}
+	if !hasPolicies {
+		return nil
+	}
+
+	delegate, err := k.getOrCreateDelegate(sourceCluster, cluster.Name)
+	if err != nil {
+		return err
+	}
+
+	if undo := clusterannotation.Stamp(a, cluster.Name); undo != nil {
+		defer undo()
+	}
+
+	return delegate.Admit(ctx, a, o)
+}
+
+func (k *KubeMutatingAdmissionPolicy) getSourceClusterForGroupResource(clusterName logicalcluster.Name, groupResource schema.GroupResource) (logicalcluster.Name, error) {
+	objs, err := k.getAPIBindings(clusterName)
+	if err != nil {
+		return "", err
+	}
+
+	for _, apiBinding := range objs {
+		for _, br := range apiBinding.Status.BoundResources {
+			if br.Group == groupResource.Group && br.Resource == groupResource.Resource {
+				return logicalcluster.Name(apiBinding.Status.APIExportClusterName), nil
+			}
+		}
+	}
+
+	return clusterName, nil
+}
+
+// hasMutatingPolicies returns true if the given cluster has any MutatingAdmissionPolicy or MutatingAdmissionPolicyBinding.
+func (k *KubeMutatingAdmissionPolicy) hasMutatingPolicies(ctx context.Context, clusterName logicalcluster.Name) (bool, error) {
+	policyInformer := k.globalKubeSharedInformerFactory.Admissionregistration().V1().MutatingAdmissionPolicies().Informer()
+	bindingInformer := k.globalKubeSharedInformerFactory.Admissionregistration().V1().MutatingAdmissionPolicyBindings().Informer()
+
+	// Waiting here for the cache sync isn't great.
+	// However not starting would cause MAP/MAPB to not be applied until they are synced.
+	// And starting them can cause issues on shards with 1000s of LCs, causing 1000s of
+	// delegates to be started.
+	// The once ensures that during shard startup the informers were synced once before
+	// deciding to start a delegate for a cluster.
+	k.cacheSyncOnce.Do(func() {
+		cache.WaitForCacheSync(ctx.Done(), policyInformer.HasSynced, bindingInformer.HasSynced)
+	})
+
+	policies, err := k.globalKubeSharedInformerFactory.Admissionregistration().V1().MutatingAdmissionPolicies().Lister().Cluster(clusterName).List(labels.Everything())
+	if err != nil {
+		return false, err
+	}
+	if len(policies) > 0 {
+		return true, nil
+	}
+	bindings, err := k.globalKubeSharedInformerFactory.Admissionregistration().V1().MutatingAdmissionPolicyBindings().Lister().Cluster(clusterName).List(labels.Everything())
+	if err != nil {
+		return false, err
+	}
+	return len(bindings) > 0, nil
+}
+
+// getOrCreateDelegate creates an actual plugin for policyClusterName (where policies are defined).
+// targetClusterName is the cluster where the object being mutated resides.
+func (k *KubeMutatingAdmissionPolicy) getOrCreateDelegate(policyClusterName, targetClusterName logicalcluster.Name) (*stoppableMutatingAdmissionPolicy, error) {
+	key := delegateKey{
+		policyCluster: policyClusterName,
+		targetCluster: targetClusterName,
+	}
+
+	k.delegatesLock.RLock()
+	delegate := k.delegates[key]
+	k.delegatesLock.RUnlock()
+
+	if delegate != nil {
+		return delegate, nil
+	}
+
+	k.delegatesLock.Lock()
+	defer k.delegatesLock.Unlock()
+
+	delegate = k.delegates[key]
+	if delegate != nil {
+		return delegate, nil
+	}
+
+	// Set up a context that is cancelable and that is bounded by k.serverDone
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Wait for either the context or the server to be done. If it's the server, cancel the context.
+		select {
+		case <-ctx.Done():
+		case <-k.serverDone:
+			cancel()
+		}
+	}()
+
+	tcm := k.getOrCreateTypeConverterManager(targetClusterName)
+
+	handler := admission.NewHandler(admission.Create, admission.Update, admission.Connect)
+	plugin := &mutating.Plugin{
+		Plugin: generic.NewPlugin(
+			handler,
+			func(_ informers.SharedInformerFactory, _ kubernetes.Interface, dynamicClient dynamic.Interface, restMapper meta.RESTMapper, cn logicalcluster.Name) generic.Source[mutating.PolicyHook] {
+				return generic.NewPolicySource(
+					k.globalKubeSharedInformerFactory.Admissionregistration().V1().MutatingAdmissionPolicies().Informer().Cluster(cn),
+					k.globalKubeSharedInformerFactory.Admissionregistration().V1().MutatingAdmissionPolicyBindings().Informer().Cluster(cn),
+					mutating.NewMutatingAdmissionPolicyAccessor,
+					mutating.NewMutatingAdmissionPolicyBindingAccessor,
+					mutating.CompilePolicy,
+					&deferredInformerFactory{},
+					dynamicClient,
+					restMapper,
+					cn,
+				)
+			},
+			func(authz authorizer.Authorizer, m *matching.Matcher, _ kubernetes.Interface) generic.Dispatcher[mutating.PolicyHook] {
+				return mutating.NewDispatcher(authz, m, tcm)
+			},
+		),
+	}
+
+	// Default to enable MAP, but honour the feature gate if available.
+	plugin.SetEnabled(true)
+	if k.featureGates != nil {
+		plugin.InspectFeatureGates(k.featureGates)
+	}
+
+	delegate = &stoppableMutatingAdmissionPolicy{
+		Plugin: plugin,
+		stop:   cancel,
+	}
+
+	plugin.SetNamespaceInformer(k.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(targetClusterName))
+	plugin.SetExternalKubeClientSet(k.kubeClusterClient.Cluster(targetClusterName.Path()))
+
+	plugin.SetRESTMapper(k.dynamicRESTMapper.ForCluster(policyClusterName))
+
+	plugin.SetDynamicClient(k.dynamicClusterClient.Cluster(policyClusterName.Path()))
+	plugin.SetDrainedNotification(ctx.Done())
+	plugin.SetAuthorizer(k.authorizer)
+	plugin.SetClusterName(policyClusterName)
+
+	if err := plugin.ValidateInitialization(); err != nil {
+		cancel()
+		return nil, err
+	}
+
+	k.delegates[key] = delegate
+
+	return delegate, nil
+}
+
+func (k *KubeMutatingAdmissionPolicy) logicalClusterDeleted(clusterName logicalcluster.Name) {
+	k.delegatesLock.Lock()
+	defer k.delegatesLock.Unlock()
+
+	logger := klog.Background().WithValues("clusterName", clusterName)
+
+	// Remove all delegates that involve this cluster (either as policy or target)
+	found := false
+	for key, delegate := range k.delegates {
+		if key.policyCluster == clusterName || key.targetCluster == clusterName {
+			logger.V(2).Info("stopping mutating admission policy for logical cluster")
+			delete(k.delegates, key)
+			delegate.stop()
+			found = true
+		}
+	}
+
+	if !found {
+		logger.V(3).Info("received event to stop mutating admission policy for logical cluster, but it wasn't in the map")
+	}
+
+	k.typeConverterManagers.Delete(clusterName)
+}
+
+// getOrCreateTypeConverterManager returns the running TypeConverterManager for the given target cluster, starting one on first use.
+// The manager is shared by all delegates for the same cluster.
+func (k *KubeMutatingAdmissionPolicy) getOrCreateTypeConverterManager(clusterName logicalcluster.Name) patch.TypeConverterManager {
+	stored, loaded := k.typeConverterManagers.Load(clusterName)
+	if loaded {
+		return stored.(patch.TypeConverterManager)
+	}
+
+	created, _, _ := k.typeConverterManagerGroup.Do(clusterName.String(), func() (any, error) {
+		stored, loaded := k.typeConverterManagers.Load(clusterName)
+		if loaded {
+			return stored, nil
+		}
+
+		openapiClient := k.kubeClusterClient.Cluster(clusterName.Path()).Discovery().OpenAPIV3()
+		created := patch.NewTypeConverterManager(nil, openapiClient)
+		k.typeConverterManagers.Store(clusterName, created)
+
+		ctx, _ := k.clusterContextManager.Context(context.Background(), clusterName.Path())
+		go created.Run(ctx)
+
+		return created, nil
+	})
+
+	return created.(patch.TypeConverterManager)
+}
+
+type stoppableMutatingAdmissionPolicy struct {
+	*mutating.Plugin
+	stop func()
+}
+
+// deferredInformerFactory is exactly the same as in the validating admission policy.
+type deferredInformerFactory struct {
+	informers.SharedInformerFactory
+}
+
+func (d *deferredInformerFactory) ForResource(resource schema.GroupVersionResource) (informers.GenericInformer, error) {
+	return nil, fmt.Errorf("deferring creation to dynamic informer. This is expected")
+}

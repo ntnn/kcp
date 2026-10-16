@@ -1,5 +1,5 @@
 /*
-Copyright 2024 The KCP Authors.
+Copyright 2024 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 )
 
 func TestSortMappings(t *testing.T) {
+	t.Parallel()
 	mappings := HttpHandlerMappings{
 		{Weight: 3},
 		{Weight: 1},

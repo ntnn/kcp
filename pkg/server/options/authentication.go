@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -99,6 +99,8 @@ func (s *AdminAuthentication) ApplyTo(config *genericapiserver.Config) (volatile
 		shardAdminToken = uuid.New().String()
 		sum := sha256.Sum256([]byte(shardAdminToken))
 		shardAdminTokenHash = sum[:]
+
+		//nolint:gosec // G703 user-provided path is intentional
 		if err := os.WriteFile(s.ShardAdminTokenHashFilePath, shardAdminTokenHash, 0600); err != nil {
 			return "", "", "", nil, err
 		}
@@ -163,7 +165,7 @@ func (s *AdminAuthentication) WriteKubeConfig(config genericapiserver.CompletedC
 			if shardAdminAuth := existingExternalKubeConfig.AuthInfos[shardAdminUserName]; shardAdminAuth != nil {
 				kubeConfigTokenHash := sha256.Sum256([]byte(shardAdminAuth.Token))
 				if !bytes.Equal(kubeConfigTokenHash[:], shardAdminTokenHash) {
-					return fmt.Errorf("admin token in file %q is not valid anymore. Remove file %q and restart KCP", s.KubeConfigPath, s.ShardAdminTokenHashFilePath)
+					return fmt.Errorf("admin token in file %q is not valid anymore. Remove file %q and restart kcp", s.KubeConfigPath, s.ShardAdminTokenHashFilePath)
 				}
 
 				shardAdminToken = shardAdminAuth.Token

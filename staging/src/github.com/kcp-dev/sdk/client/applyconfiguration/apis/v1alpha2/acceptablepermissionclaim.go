@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,8 @@ import (
 
 // AcceptablePermissionClaimApplyConfiguration represents a declarative configuration of the AcceptablePermissionClaim type for use
 // with apply.
+//
+// AcceptablePermissionClaim is a PermissionClaim that records if the user accepts or rejects it.
 type AcceptablePermissionClaimApplyConfiguration struct {
 	ScopedPermissionClaimApplyConfiguration `json:",inline"`
 	State                                   *apisv1alpha2.AcceptablePermissionClaimState `json:"state,omitempty"`
@@ -66,6 +68,14 @@ func (b *AcceptablePermissionClaimApplyConfiguration) WithVerbs(values ...string
 // If called multiple times, the IdentityHash field is set to the value of the last call.
 func (b *AcceptablePermissionClaimApplyConfiguration) WithIdentityHash(value string) *AcceptablePermissionClaimApplyConfiguration {
 	b.PermissionClaimApplyConfiguration.IdentityHash = &value
+	return b
+}
+
+// WithDefaultSelector sets the DefaultSelector field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DefaultSelector field is set to the value of the last call.
+func (b *AcceptablePermissionClaimApplyConfiguration) WithDefaultSelector(value *PermissionClaimSelectorApplyConfiguration) *AcceptablePermissionClaimApplyConfiguration {
+	b.PermissionClaimApplyConfiguration.DefaultSelector = value
 	return b
 }
 

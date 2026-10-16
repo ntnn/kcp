@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,13 +22,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"os"
 
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	userinfo "k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/endpoints/request"
 
+	"github.com/kcp-dev/kcp/pkg/proxy/authheaders"
 	"github.com/kcp-dev/kcp/pkg/proxy/lookup"
 )
 
@@ -60,44 +59,29 @@ func newTransport(clientCert, clientKeyFile, caFile string) (*http.Transport, er
 func WithProxyAuthHeaders(delegate http.Handler, userHeader, groupHeader string, extraHeaderPrefix string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if u, ok := request.UserFrom(r.Context()); ok {
-			appendClientCertAuthHeaders(r.Header, u, userHeader, groupHeader, extraHeaderPrefix)
+			authheaders.SetAuthHeaders(r.Header, u, userHeader, groupHeader, extraHeaderPrefix)
+		} else {
+			authheaders.ClearAuthHeaders(r.Header, userHeader, groupHeader, extraHeaderPrefix)
 		}
 
 		delegate.ServeHTTP(w, r)
 	}
 }
 
-func appendClientCertAuthHeaders(header http.Header, user userinfo.Info, userHeader, groupHeader, extraHeaderPrefix string) {
-	header.Set(userHeader, user.GetName())
-
-	for _, group := range user.GetGroups() {
-		header.Add(groupHeader, group)
-	}
-
-	for k, values := range user.GetExtra() {
-		// Key must be encoded to enable e.g authentication.kcp.io/cluster-name
-		// This is decoded in the RequestHeader auth handler
-		encodedKey := url.PathEscape(k)
-		for _, v := range values {
-			header.Add(extraHeaderPrefix+encodedKey, v)
-		}
-	}
-}
-
 func newShardReverseProxy() *httputil.ReverseProxy {
-	director := func(req *http.Request) {
-		shardURL := lookup.ShardURLFrom(req.Context())
+	rewrite := func(pr *httputil.ProxyRequest) {
+		shardURL := lookup.ShardURLFrom(pr.In.Context())
 		if shardURL == nil {
 			// should not happen if wiring is correct
 			utilruntime.HandleError(fmt.Errorf("no shard URL found in request context"))
-			req.URL.Scheme = "https"
-			req.URL.Host = "notfound"
+			pr.Out.URL.Scheme = "https"
+			pr.Out.URL.Host = "notfound"
 			return
 		}
 
-		req.URL.Scheme = shardURL.Scheme
-		req.URL.Host = shardURL.Host
-		req.URL.Path = shardURL.Path
+		pr.Out.URL.Scheme = shardURL.Scheme
+		pr.Out.URL.Host = shardURL.Host
+		pr.Out.URL.Path = shardURL.Path
 	}
-	return &httputil.ReverseProxy{Director: director}
+	return &httputil.ReverseProxy{Rewrite: rewrite}
 }

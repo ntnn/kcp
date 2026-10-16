@@ -13,6 +13,7 @@ In kcp, a request has four different ways of being admitted:
 * It can be permitted by an external HTTPS webhook backend.
 
 They are related in the following way:
+
 ``` mermaid
 graph TD
     start(Request):::state --> main_alt[/one of\]:::or
@@ -77,13 +78,18 @@ The following authorizers work together to implement RBAC in kcp:
 #### Required Groups Authorizer
 
 A `authorization.kcp.io/required-groups` annotation can be added to a LogicalCluster
-to specify which groups a user must be a member of to access the workspace.
+by kcp-admin or kcp system identities to specify which groups a user must be a member of to access the workspace.
 The syntax uses semicolons (`;`) to separate OR conditions and commas (`,`) to separate AND conditions within each group set.
 
 For example, `<group1>,<group2>;<group3>` means that a user must be a member of both `<group1>` AND `<group2>`, OR be a member of `<group3>`.
 
 The annotation is copied onto sub-workspaces during workspace creation, but is then not updated
-automatically if it's changed.
+automatically if it's changed. On the LogicalCluster itself the annotation can only be modified
+by system identities.
+
+Service accounts of the accessed workspace itself are exempt from this check; service accounts
+from other workspaces (as well as tokens scoped to another workspace) are subject to it like
+any other user.
 
 #### Workspace Content Authorizer
 
@@ -125,30 +131,69 @@ roleRef:
   name: cluster-admin
 ```
 
+By default, workspaces are only accessible to a subject if they are in `Ready` phase. Workspaces that are initializing
+can be accessed only by subjects who are granted `admin` verb on the `workspaces/content` resource in the
+parent workspace.
+
+The authorizer also permits content access while the workspace is in the `Terminating` and `Deleting` phases so
+that terminator controllers and standard kube finalization (garbage collection, namespace deletion, finalizer
+removal) can complete cleanup. Permission is otherwise unchanged: subjects still need a matching binding inside
+the workspace.
+
+ServiceAccounts declared within a workspace don't have access to content of initializing workspaces.
+
+##### Lifecycle Synthetic Groups
+
+The initializing and terminating virtual workspace content proxies can forward requests with one of two synthetic
+groups attached to the controller's identity:
+
+* `system:kcp:initializer:<initializer-path>` (e.g. `system:kcp:initializer:root:tenant`)
+* `system:kcp:terminator:<terminator-path>` (e.g. `system:kcp:terminator:root:tenant`)
+
+The `<initializer-path>` / `<terminator-path>` segment is the fully qualified path of the
+WorkspaceType the controller is associated with (workspace path joined with the WST
+name), not just the short WST name.
+
+When the workspace content authorizer sees one of these groups it treats the request as **pre-authorized by the
+VW** and delegates to the next authorizer without re-evaluating workspace RBAC. This is what allows initializer
+and terminator controllers with scoped `initializerPermissions` / `terminatorPermissions` (see
+[Workspace Types](../workspaces/workspace-types.md#lifecycle-permissions)) to act with their own identity instead
+of impersonating the workspace owner.
+
+These groups cannot be self-asserted by clients: the front-proxy's `--authentication-drop-groups` defaults strip
+both prefixes (`system:kcp:initializer:*` and `system:kcp:terminator:*`) from every incoming request before any
+routing happens. The only code paths that can inject them are the VW content proxies, which run inside the
+front-proxy process and add the group **after** the in-process RBAC evaluation has already allowed the request.
+
 ##### Cross-Workspace
 
-Users from other workspaces can be authorized to perform actions using RBAC, e.g. to `bind` and APIExport.
+Subjects who do not originate from the workspace the request is being made to and are not global kcp
+users, are only visible as identity `system:anonymous` with groups `system:authenticated` and
+`system:cluster:<logical-cluster-id>`. The `<logical-cluster-id>` refers to the ID (not the human
+readable path) of the logical cluster, which is backing the workspace the identity originates from.
+This applies to all identities (e.g. Users, ServiceAccounts, oAuth, webhook, etc.).
 
-###### Service Accounts
+Returning to our previous example, if `user-1` is part of a workspace that is backed by the
+logical cluster `abcdefgh12345678`, we can create the following binding to give all subjects from
+that workspace a specific role.
 
-A service-account defined in a workspace implicitly is granted access to it.
-
-A service-account defined in a different workspace is NOT given access to it.
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: example-access
+subjects:
+- kind: Group
+  name: "system:cluster:abcdefgh12345678"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kcp:workspace:access
+```
 
 !!! note
-    By default, workspaces are only accessible to a user if they are in `Ready` phase. Workspaces that are initializing
-    can be accessed only by users that are granted `admin` verb on the `workspaces/content` resource in the
-    parent workspace.
-
-    Service accounts declared within a workspace don't have access to initializing workspaces.
-
-###### Foreign Users
-
-Users can either be global kcp users or users that originate from a specific workspace, e.g. through an OIDC provider configured for that workspace.
-
-Users that do not originate from the workspace the request is being made to and are not global kcp users are only visible as user `system:anonymous`
-with groups `system:authenticated` and `system:cluster:<logical-cluster>`, where `<logical-cluster>` is the name of the logical cluster backing
-the workspace they originated from.
+  As the example above targets Groups, it applies to all identities authenticated with the original workspace,
+  not just user-1.
 
 #### System CRD Authorizer
 
@@ -175,12 +220,12 @@ Using prefixed attributes prevents RBAC collisions i.e. if `user-1` is granted t
 
 For the given example RBAC request looks as follows:
 
-- Username: `apis.kcp.io:binding:user-1`
-- Groups: [`apis.kcp.io:binding:group-1`]
-- Resource: `foo`
-- Namespace: `default`
-- Workspace: `provider`
-- Verb: `create`
+* Username: `apis.kcp.io:binding:user-1`
+* Groups: [`apis.kcp.io:binding:group-1`]
+* Resource: `foo`
+* Namespace: `default`
+* Workspace: `provider`
+* Verb: `create`
 
 The following Role and RoleBinding declared within the `provider` workspace will grant access to the request:
 
@@ -313,6 +358,7 @@ The order in which authorizers are evaluated can be configured. This allows admi
 It can be done by setting `--authorization-order` flag in the kcp server. This flag accepts a comma-separated list of authorizer names, which will be evaluated in the specified order.
 
 Here is an example on how to enable the Webhook to be the first one in the authorizers chain:
+
 ```sh
 --authorization-order=Webhook,AlwaysAllowGroups,AlwaysAllowPaths,RBAC
 ```
@@ -331,11 +377,13 @@ extra:
   authentication.kcp.io/scopes:
   - cluster:logical-cluster-1
 ```
+
 This user will only be allowed to access resources in `logical-cluster-1`,
 falling back to be considered as user `system:anonymous` with groups
 `system:authenticated` and `system:cluster:logical-cluster-1` in all other logical clusters.
 
 Each extra field can contain multiple scopes, separated by a comma:
+
 ```yaml
 user: user1
 groups: ["group1"]
@@ -343,6 +391,7 @@ extra:
   authentication.kcp.io/scopes:
   - cluster:logical-cluster-1,cluster:logical-cluster-2
 ```
+
 This user is allowed to operate in both `logical-cluster-1` and
 `logical-cluster-2`, falling back to be considered as user
 `system:anonymous` with groups `system:authenticated`,
@@ -351,6 +400,7 @@ This user is allowed to operate in both `logical-cluster-1` and
 
 If multiple `authentication.kcp.io/scopes` values are set, the intersection is
 taken:
+
 ```yaml
 user: user1
 groups: ["group1"]
@@ -359,6 +409,7 @@ extra:
   - cluster:logical-cluster-1,cluster:logical-cluster-2
   - cluster:logical-cluster-2,cluster:logical-cluster-3
 ```
+
 This user is only allowed to operate in `logical-cluster-2`, falling
 back to be considered as user `system:anonymous` with groups
 `system:authenticated` and `cluster:logical-cluster-2` in all other
@@ -368,7 +419,15 @@ The intersection can be empty, in which case it falls back in every logical
 cluster.
 
 When impersonating a user in a logical cluster, the resulting user identity is
-scoped to the logical cluster the impersonation is happening in.
+scoped to the logical cluster the impersonation is happening in. Warrants (see
+next section) supplied through impersonation headers are scoped to that logical
+cluster as well, including nested warrants. A service account cluster name
+(`authentication.kcp.io/cluster-name`) supplied through impersonation, directly
+or inside a warrant, must name that same logical cluster, because the global
+service account identity derived from it is not subject to scopes. Only members
+of `system:masters` are exempt from these rules, and only they may impersonate
+`kcp.io` extra fields other than scopes, warrants and the service account
+cluster name.
 
 A scope mismatch does not invalidate the warrants (see next section) of a user.
 

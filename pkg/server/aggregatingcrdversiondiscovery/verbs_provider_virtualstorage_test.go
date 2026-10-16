@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@ import (
 )
 
 func Test_newVirtualStorageVerbsProvider(t *testing.T) {
+	t.Parallel()
 	res := schema.GroupVersionResource{
 		Group:    "wildwest.dev",
 		Version:  "v1alpha1",
@@ -105,7 +106,6 @@ func Test_newVirtualStorageVerbsProvider(t *testing.T) {
 										Kind:     vrSliceKind.Kind,
 										Name:     vrSliceName,
 									},
-									IdentityHash: "vr-identity-123",
 								},
 							},
 						},
@@ -152,7 +152,6 @@ func Test_newVirtualStorageVerbsProvider(t *testing.T) {
 										Kind:     vrSliceKind.Kind,
 										Name:     vrSliceName,
 									},
-									IdentityHash: "vr-identity-123",
 								},
 							},
 						},
@@ -223,7 +222,6 @@ func Test_newVirtualStorageVerbsProvider(t *testing.T) {
 										Kind:     vrSliceKind.Kind,
 										Name:     vrSliceName,
 									},
-									IdentityHash: "vr-identity-123",
 								},
 							},
 						},
@@ -240,7 +238,8 @@ func Test_newVirtualStorageVerbsProvider(t *testing.T) {
 	}
 	for tname, tt := range tests {
 		t.Run(tname, func(t *testing.T) {
-			p, err := newVirtualStorageVerbsProvider(context.Background(), res, "vr-identity-123", tt.apiExport, tt.opts)
+			t.Parallel()
+			p, err := newVirtualStorageVerbsProvider(context.Background(), res, tt.apiExport, tt.opts)
 			if tt.wantErr != nil {
 				require.Equal(t, tt.wantErr.Error(), err.Error())
 				return

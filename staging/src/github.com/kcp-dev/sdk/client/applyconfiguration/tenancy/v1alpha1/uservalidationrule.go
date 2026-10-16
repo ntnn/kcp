@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ package v1alpha1
 
 // UserValidationRuleApplyConfiguration represents a declarative configuration of the UserValidationRule type for use
 // with apply.
+//
+// UserValidationRule provides the configuration for a single user validation rule.
 type UserValidationRuleApplyConfiguration struct {
 	Expression *string `json:"expression,omitempty"`
 	Message    *string `json:"message,omitempty"`

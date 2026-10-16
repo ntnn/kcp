@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
@@ -33,13 +34,13 @@ import (
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	"github.com/kcp-dev/sdk/apis/apis/v1alpha2/permissionclaims"
+	"github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/apidefinition"
+	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
 
 	"github.com/kcp-dev/kcp/pkg/indexers"
 	"github.com/kcp-dev/kcp/pkg/logging"
 	"github.com/kcp-dev/kcp/pkg/virtual/apiexport/schemas"
 	apiexportbuiltin "github.com/kcp-dev/kcp/pkg/virtual/apiexport/schemas/builtin"
-	"github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/apidefinition"
-	dynamiccontext "github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/context"
 )
 
 func (c *APIReconciler) reconcile(ctx context.Context, apiExport *apisv1alpha2.APIExport, apiDomainKey dynamiccontext.APIDomainKey) error {
@@ -87,6 +88,11 @@ func (c *APIReconciler) reconcile(ctx context.Context, apiExport *apisv1alpha2.A
 		logger := logger.WithValues("claim", pc.String())
 		logger.V(4).Info("evaluating claim")
 
+		// claim references a subresource, the API comes from the parent resource claim
+		if strings.Contains(pc.Resource, "/") {
+			continue
+		}
+
 		// APIExport resources have priority over claimed resources
 		gr := schema.GroupResource{Group: pc.Group, Resource: pc.Resource}
 		if _, found := apiResourceSchemas[gr]; found {
@@ -100,17 +106,19 @@ func (c *APIReconciler) reconcile(ctx context.Context, apiExport *apisv1alpha2.A
 		}
 
 		if apiexportbuiltin.IsBuiltInAPI(pc.GroupResource) {
-			internalSchema, err := apiexportbuiltin.GetBuiltInAPISchema(pc.GroupResource)
-			if err != nil {
-				return err
+			for _, targetGR := range claimedBuiltInGroupResources(pc) {
+				if _, found := apiResourceSchemas[targetGR]; found {
+					continue
+				}
+
+				schemaForClaim, err := builtInSchemaWithClusterAnnotation(clusterName, targetGR)
+				if err != nil {
+					return err
+				}
+				apiResourceSchemas[targetGR] = schemaForClaim
+				claims[targetGR] = pc
 			}
-			shallow := *internalSchema
-			if shallow.Annotations == nil {
-				shallow.Annotations = make(map[string]string)
-			}
-			shallow.Annotations[logicalcluster.AnnotationKey] = clusterName.String()
-			apiResourceSchemas[gr] = &shallow
-			claims[gr] = pc
+
 			continue
 		}
 		if pc.Group == apis.GroupName {
@@ -208,7 +216,13 @@ func (c *APIReconciler) reconcile(ctx context.Context, apiExport *apisv1alpha2.A
 			}
 
 			var labelReqs labels.Requirements
+			apiExportIndexer := c.apiExportIndexer
 			if c, ok := claims[gvr.GroupResource()]; ok {
+				// normalize a pre-rotation identity alias to the canonical
+				// hash before hashing, mirroring the permissionclaim labeler,
+				// so claims on either side of a rotation produce identical
+				// filter labels.
+				c.IdentityHash = indexers.CanonicalIdentityHash(apiExportIndexer, c.IdentityHash)
 				key, label, err := permissionclaims.ToLabelKeyAndValue(clusterName, apiExport.Name, c)
 				if err != nil {
 					return fmt.Errorf("failed to convert permission claim %v to label key and value: %w", c, err)
@@ -315,4 +329,43 @@ func (c *APIReconciler) getSchemasFromAPIExport(ctx context.Context, apiExport *
 	}
 
 	return apiResourceSchemas, nil
+}
+
+// claimedBuiltInGroupResources returns all built-in group/resources to register for a claim.
+// For events, we intentionally register both API groups so both API paths are served:
+// - core/v1 events    (group "")
+// - events.k8s.io/v1  (group "events.k8s.io").
+func claimedBuiltInGroupResources(pc apisv1alpha2.PermissionClaim) []schema.GroupResource {
+	primary := schema.GroupResource{Group: pc.Group, Resource: pc.Resource}
+	if pc.Resource != "events" || (pc.Group != "" && pc.Group != "events.k8s.io") {
+		return []schema.GroupResource{primary}
+	}
+
+	otherGroup := "events.k8s.io"
+	if pc.Group == "events.k8s.io" {
+		otherGroup = ""
+	}
+
+	return []schema.GroupResource{
+		primary,
+		{Group: otherGroup, Resource: "events"},
+	}
+}
+
+func builtInSchemaWithClusterAnnotation(clusterName logicalcluster.Name, gr schema.GroupResource) (*apisv1alpha1.APIResourceSchema, error) {
+	internalSchema, err := apiexportbuiltin.GetBuiltInAPISchema(apisv1alpha1.GroupResource{
+		Group:    gr.Group,
+		Resource: gr.Resource,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	shallow := *internalSchema
+	if shallow.Annotations == nil {
+		shallow.Annotations = make(map[string]string)
+	}
+	shallow.Annotations[logicalcluster.AnnotationKey] = clusterName.String()
+
+	return &shallow, nil
 }

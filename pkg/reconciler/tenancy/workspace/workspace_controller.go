@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -45,6 +45,7 @@ import (
 	"github.com/kcp-dev/kcp/pkg/logging"
 	"github.com/kcp-dev/kcp/pkg/reconciler/committer"
 	"github.com/kcp-dev/kcp/pkg/reconciler/events"
+	kcpmetrics "github.com/kcp-dev/kcp/pkg/server/metrics"
 )
 
 const (
@@ -132,6 +133,7 @@ func NewController(
 	globalShardInformer corev1alpha1informers.ShardClusterInformer,
 	globalWorkspaceTypeInformer tenancyv1alpha1informers.WorkspaceTypeClusterInformer,
 	logicalClusterInformer corev1alpha1informers.LogicalClusterClusterInformer,
+	cacheLogicalClusterInformer corev1alpha1informers.LogicalClusterClusterInformer,
 ) (*Controller, error) {
 	c := &Controller{
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
@@ -151,8 +153,7 @@ func NewController(
 		workspaceIndexer: workspaceInformer.Informer().GetIndexer(),
 		workspaceLister:  workspaceInformer.Lister(),
 
-		globalShardIndexer: globalShardInformer.Informer().GetIndexer(),
-		globalShardLister:  globalShardInformer.Lister(),
+		globalShardLister: globalShardInformer.Lister(),
 
 		globalWorkspaceTypeIndexer: globalWorkspaceTypeInformer.Informer().GetIndexer(),
 		globalWorkspaceTypeLister:  globalWorkspaceTypeInformer.Lister(),
@@ -163,17 +164,47 @@ func NewController(
 		clientPool: newClientPool(logicalClusterAdminConfig),
 
 		commit: committer.NewCommitter[*tenancyv1alpha1.Workspace, tenancyv1alpha1client.WorkspaceInterface, *tenancyv1alpha1.WorkspaceSpec, *tenancyv1alpha1.WorkspaceStatus](kcpClusterClient.TenancyV1alpha1().Workspaces()),
+
+		countedWorkspaces: make(map[string]string),
 	}
 
 	_, _ = workspaceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { c.enqueue(obj) },
-		UpdateFunc: func(_, obj interface{}) { c.enqueue(obj) },
+		AddFunc: func(obj interface{}) {
+			c.enqueue(obj)
+			c.handleMetricsOnAdd(obj)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			c.enqueue(newObj)
+			c.handleMetricsOnUpdate(oldObj, newObj)
+		},
+		DeleteFunc: func(obj interface{}) {
+			c.enqueue(obj)
+			c.handleMetricsOnDelete(obj)
+		},
 	})
 
 	_, _ = globalShardInformer.Informer().AddEventHandler(events.WithoutSyncs(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj interface{}) { c.enqueueShard(obj) },
 		UpdateFunc: func(obj, _ interface{}) { c.enqueueShard(obj) },
 		DeleteFunc: func(obj interface{}) { c.enqueueShard(obj) },
+	}))
+
+	// Watch LogicalCluster deletions/updates so the owning Workspace is
+	// enqueued immediately, instead of waiting for the phase reconciler's
+	// backoff-based requeue (up to 5 min) to poll the LogicalCluster state.
+	// Handlers are attached to both the local and the cache (replicated)
+	// informers: the local one reacts without any replication lag when the
+	// Workspace and its LogicalCluster live on the same shard, while the
+	// cache one covers the cross-shard case where the LogicalCluster is
+	// only visible via replication.
+	_, _ = logicalClusterInformer.Informer().AddEventHandler(events.WithoutSyncs(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(_, obj interface{}) { c.enqueueLogicalCluster(obj) },
+		DeleteFunc: func(obj interface{}) { c.enqueueLogicalCluster(obj) },
+	}))
+
+	_, _ = cacheLogicalClusterInformer.Informer().AddEventHandler(events.WithoutSyncs(cache.ResourceEventHandlerFuncs{
+		UpdateFunc: func(_, obj interface{}) { c.enqueueLogicalCluster(obj) },
+		DeleteFunc: func(obj interface{}) { c.enqueueLogicalCluster(obj) },
 	}))
 
 	return c, nil
@@ -197,8 +228,7 @@ type Controller struct {
 	workspaceIndexer cache.Indexer
 	workspaceLister  tenancyv1alpha1listers.WorkspaceClusterLister
 
-	globalShardIndexer cache.Indexer
-	globalShardLister  corev1alpha1listers.ShardClusterLister
+	globalShardLister corev1alpha1listers.ShardClusterLister
 
 	globalWorkspaceTypeIndexer cache.Indexer
 	globalWorkspaceTypeLister  tenancyv1alpha1listers.WorkspaceTypeClusterLister
@@ -211,6 +241,9 @@ type Controller struct {
 
 	// commit creates a patch and submits it, if needed.
 	commit func(ctx context.Context, old, new *workspaceResource) error
+
+	mu                sync.Mutex
+	countedWorkspaces map[string]string
 }
 
 func (c *Controller) enqueue(obj interface{}) {
@@ -222,6 +255,39 @@ func (c *Controller) enqueue(obj interface{}) {
 	logger := logging.WithQueueKey(logging.WithReconciler(klog.Background(), ControllerName), key)
 	logger.V(4).Info("queueing Workspace")
 	c.queue.Add(key)
+}
+
+// enqueueLogicalCluster enqueues the Workspace (if any) whose spec.cluster
+// matches the LogicalCluster's logical cluster name. Used to react promptly to
+// LogicalCluster deletions so the Workspace does not linger waiting for the
+// phase reconciler's polling interval.
+func (c *Controller) enqueueLogicalCluster(obj interface{}) {
+	logger := logging.WithReconciler(klog.Background(), ControllerName)
+	key, err := kcpcache.DeletionHandlingMetaClusterNamespaceKeyFunc(obj)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	clusterName, _, _, err := kcpcache.SplitMetaClusterNamespaceKey(key)
+	if err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+
+	workspaces, err := c.workspaceIndexer.ByIndex(byLogicalCluster, clusterName.String())
+	if err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	for _, workspace := range workspaces {
+		wsKey, err := kcpcache.MetaClusterNamespaceKeyFunc(workspace)
+		if err != nil {
+			utilruntime.HandleError(err)
+			continue
+		}
+		logging.WithQueueKey(logger, wsKey).V(3).Info("queueing Workspace because of LogicalCluster event", "logicalCluster", clusterName)
+		c.queue.Add(wsKey)
+	}
 }
 
 func (c *Controller) enqueueShard(obj interface{}) {
@@ -358,12 +424,92 @@ func InstallIndexers(
 	globalWorkspaceTypeInformer tenancyv1alpha1informers.WorkspaceTypeClusterInformer,
 ) {
 	indexers.AddIfNotPresentOrDie(workspaceInformer.Informer().GetIndexer(), cache.Indexers{
-		unschedulable: indexUnschedulable,
-	})
-	indexers.AddIfNotPresentOrDie(globalShardInformer.Informer().GetIndexer(), cache.Indexers{
-		byBase36Sha224Name: indexByBase36Sha224Name,
+		unschedulable:    indexUnschedulable,
+		byLogicalCluster: indexWorkspaceByLogicalCluster,
 	})
 	indexers.AddIfNotPresentOrDie(globalWorkspaceTypeInformer.Informer().GetIndexer(), cache.Indexers{
 		indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
 	})
+}
+
+func (c *Controller) handleMetricsOnAdd(obj any) {
+	workspace, ok := obj.(*tenancyv1alpha1.Workspace)
+	if !ok {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(workspace)
+	if err != nil {
+		return
+	}
+	phase := string(workspace.Status.Phase)
+	if _, exists := c.countedWorkspaces[key]; !exists {
+		c.countedWorkspaces[key] = phase
+		if phase != "" {
+			kcpmetrics.IncrementWorkspaceCount(c.shardName, phase)
+		}
+	}
+}
+
+func (c *Controller) handleMetricsOnUpdate(oldObj, newObj any) {
+	oldWorkspace, ok := oldObj.(*tenancyv1alpha1.Workspace)
+	if !ok {
+		return
+	}
+
+	newWorkspace, ok := newObj.(*tenancyv1alpha1.Workspace)
+	if !ok {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(newWorkspace)
+	if err != nil {
+		return
+	}
+	oldPhase := string(oldWorkspace.Status.Phase)
+	newPhase := string(newWorkspace.Status.Phase)
+
+	if oldPhase != newPhase {
+		if oldPhase != "" {
+			kcpmetrics.DecrementWorkspaceCount(c.shardName, oldPhase)
+		}
+		if newPhase != "" {
+			kcpmetrics.IncrementWorkspaceCount(c.shardName, newPhase)
+		}
+		c.countedWorkspaces[key] = newPhase
+	}
+}
+
+func (c *Controller) handleMetricsOnDelete(obj any) {
+	workspace, ok := obj.(*tenancyv1alpha1.Workspace)
+	if !ok {
+		if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+			workspace, ok = tombstone.Obj.(*tenancyv1alpha1.Workspace)
+			if !ok {
+				return
+			}
+		} else {
+			return
+		}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	key, err := kcpcache.MetaClusterNamespaceKeyFunc(workspace)
+	if err != nil {
+		return
+	}
+	if phase, exists := c.countedWorkspaces[key]; exists {
+		delete(c.countedWorkspaces, key)
+		if phase != "" {
+			kcpmetrics.DecrementWorkspaceCount(c.shardName, phase)
+		}
+	}
 }

@@ -5,7 +5,6 @@ description: >
 
 # Workspace Types
 
-
 Workspaces have a type. A type is defined by a `WorkspaceType`. A type
 defines initializers. They are set on new Workspace objects and block the
 workspace from leaving the initializing phase. Both system components and
@@ -15,22 +14,14 @@ e.g. to bootstrap resources inside the workspace, or to set up permission in its
 kcp comes with a built-in set of workspace types, and the admin may create objects that
 define additional types.
 
-- **Root Workspace** is a singleton.  It holds some data that applies
+- **Root Workspace** is a singleton. It holds some data that applies
   to all workspaces, such as the set of defined workspace types
   (objects of type `WorkspaceType`).
-- **HomeRoot Workspace** is normally a singleton, holding the branch
-  of workspaces that contains the user home workspaces as descendants.
-  Can only be a child of the root workspace, and can only have
-  HomeBucket children.
-- **HomeBucket Workspace** are intermediate vertices in the hierarchy
-  between the HomeRoot and the user home workspaces.  Can be a child
-  of the root or another HomeBucket workspace.  Allowed children are
-  home and HomeBucket workspaces.
-- **Home Workspace** is a user's home workspace.  These hold user
-  resources such as applications with services, secrets, configmaps,
-  deployments, etc.  Can only be a child of a HomeBucket workspace.
+- **Home Workspace** is a user's private workspace, created on first
+  access. It holds user resources such as secrets, configmaps, etc.
+  See [User Home Workspaces](#user-home-workspaces) below.
 - **Universal Workspace** is a basic type of workspace with no
-  particular nature.  Has no restrictions on parent or child workspace
+  particular nature. Has no restrictions on parent or child workspace
   types.
 
 The following workspace types are created by kcp if the `workspace-types` battery
@@ -48,66 +39,31 @@ applied).
 
 !!! note
     In order to create workspaces of a given type (including `Universal`)
-    you must have `use` permissions against the `workspacetypes` resources with the
-    lower-case name of the cluster workspace type (e.g. `universal`). All `system:authenticated`
+    you must have `use` permissions against the `workspacetypes` resource with the
+    lower-case name of the workspace type (e.g. `universal`). All `system:authenticated`
     users inherit this permission automatically for type `Universal`.
 
 The different workspace types are discussed below.
 
 ## User Home Workspaces
 
-User home workspaces are an optional feature of kcp. If enabled (through `--enable-home-workspaces`), there is a special
-virtual `Workspace` called `~` in the root workspace. It is used by `kubectl ws` to derive the full path to the user
-home workspace, similar to how Unix `cd ~` move the users to their home.
+User home workspaces are an optional feature of kcp, enabled with `--enable-home-workspaces`.
+Each user gets a private workspace where they are cluster-admin.
 
-The full path for a user's home workspace has a number of parts: `<prefix>(:<bucket>)+:<user-name>`. Buckets are used to
-ensure that at most ~1000 sub-buckets or users exist in any bucket, for scaling reasons. The bucket names are deterministically
-derived from the user name (via some hash). Example for user `adam` when using default configuration:
-`root:users:a8:f1:adam`.
+There is a special virtual workspace called `~` in the root workspace. Accessing it
+(e.g. `kubectl ws ~`) resolves to the current user's home workspace. The home workspace
+is created on first access, so users only cost resources once they actually use it. Only
+users in the configured creator groups (`--home-workspaces-home-creator-groups`, default
+`system:authenticated`) get one.
 
-User home workspaces are created on-demand when they are first accessed, but this is not visible to the user, allowing
-the system to only incur the cost of these workspaces when they are needed. Only users of the configured
-home-creator-groups (default `system:authenticated`) will have a home workspace.
+Home workspaces are not part of a `root:users:...` path hierarchy. Each one is a
+standalone logical cluster whose name is derived from the user name, reachable via the
+path `user:<user-name>`.
 
-### Bucket Configuration Options
-
-The `kcp` administrator can configure:
-
-- `<prefix>`, which defaults to `root:users`
-- bucket depth, which defaults to 2
-- bucket name length, in characters, which defaults to 2
-
-The following outlines valid configuration options. With the default setup, ~5 users or ~700 sub-buckets will be in
-any bucket.
-
-!!! warning
-    DO NOT set the bucket size to be longer than 2, as this will adversely impact performance.
-
-User-names have `(26 * [(26 + 10 + 2) * 61] * 36 = 2169648)` permutations, and buckets are made up of lowercase-alpha
-chars.  Invalid configurations break the scale limit in sub-buckets or users. Valid configurations should target
-having not more than ~1000 sub-buckets per bucket and at least 5 users per bucket.
-
-### Valid Configurations
-
-|length|depth|sub-buckets|users|
-|------|-----|-----------|-----|
-|1     |3    |26 * 1 = 26|2169648 / (26)^3 = 124 |
-|1     |4    |26 * 1 = 26|2169648 / (26)^4 = 5 |
-|2     |2    |26 * 26 = 676|2169648 / (26*26)^2 = 5 |
-
-### Invalid Configurations
-
-These are examples of invalid configurations and are for illustrative purposes only. In nearly all cases, the default values
-will be sufficient.
-
-|length|depth|sub-buckets|users|
-|------|-----|-----------|-----|
-|1     |1    |26 * 1 = 26|2169648 / (26) = 83448 |
-|1     |2    |26 * 1 = 26|2169648 / (26)^2 = 3209 |
-|2     |1    |26 * 26 = 676|2169648 / (26*26) = 3209 |
-|2     |3    |26 * 26 = 676|2169648 / (26*26)^3 = .007 |
-|3     |1    |26 *26* 26 = 17576|2169648 / (26*26*26) = 124 |
-|3     |2    |26 *26* 26 = 17576|2169648 / (26*26*26)^2 = .007 |
+!!! note
+    Older kcp versions arranged home workspaces under a bucketed path such as
+    `root:users:a8:f1:adam`. Those "bucket-style" home workspaces are still resolved if
+    they exist, but new ones are no longer created that way.
 
 ## Organization Workspaces
 
@@ -143,16 +99,10 @@ workspace content is to be persisted.
 ## System Workspaces
 
 System workspaces are local to a shard and are named in the pattern `system:<system-workspace-name>`.
+See the dedicated [System Workspaces](./system-workspaces.md) page for details.
 
-System workspace are only accessible to a shard-local admin user, and there is
-neither a definition via a Workspace, nor is there any validation of requests
-that the system workspace exists.
+## Workspace Type Extensions and Constraints
 
-As an example, the `system:admin` workspace exists for administrative objects
-that are scoped to the local shard (e.g. `lease` objects for kcp internal controllers if
-leader election is enabled). It is accessible via `/clusters/system:admin`.
-
-# Workspace Type Extensions and Constraints
 kcp offers extensions and constraints that enable you inherit functionality from other
 workspace types and create custom workspace hierarchies for your organizational structure.
 
@@ -160,6 +110,7 @@ A `WorkspaceType` can extend one or more other `WorkspaceTypes` using the `spec.
 field.
 
 **Example**
+
 ```yaml
 apiVersion: tenancy.kcp.io/v1alpha1
 kind: WorkspaceType
@@ -171,7 +122,9 @@ spec:
     - name: universal
     - name: custom
 ```
+
 In this example, the `sample` workspace type:
+
 * inherits [initializers](./workspace-initialization.md) from the extended types
 * is considered as an extended type during type constraint evaluation
 
@@ -188,8 +141,57 @@ spec:
     - name: standard
       path: root:base
 ```
-## Workspace Constraint Mechanisms
-KCP provides two primary constraint mechanisms for workspace types:
+
+!!! note
+    A type reference with a `path` points at a type in another workspace. To use it, you
+    need `use` permission on that `workspacetypes` resource in the target workspace,
+    not just in your own. The same applies when a `Workspace`'s `spec.type` references a
+    type by path.
+
+### Lifecycle Permissions
+
+A `WorkspaceType` can declare the RBAC rules its initializer and terminator controllers are
+allowed to use against the content of workspaces of this type:
+
+* `spec.initializerPermissions` — `[]rbacv1.PolicyRule` evaluated by the initializing
+  virtual workspace content proxy on every request, before forwarding to the shard.
+* `spec.terminatorPermissions` — same, for the terminating virtual workspace.
+
+When set, the VW forwards allowed requests with the controller's **own identity** plus a
+synthetic group (`system:kcp:initializer:<name>` / `system:kcp:terminator:<name>`) that the
+shard's workspace content authorizer trusts as a "pre-authorized by VW" marker. When unset,
+the VW falls back to impersonating the workspace owner (`spec.createdBy` on the `LogicalCluster`).
+
+```yaml
+apiVersion: tenancy.kcp.io/v1alpha1
+kind: WorkspaceType
+metadata:
+  name: tenant
+spec:
+  initializer: true
+  terminator: true
+  initializerPermissions:
+    - apiGroups: [""]
+      resources: ["configmaps", "namespaces"]
+      verbs: ["get", "list", "create", "update"]
+    - apiGroups: ["apis.kcp.io"]
+      resources: ["apibindings"]
+      verbs: ["get", "list", "create"]
+  terminatorPermissions:
+    - apiGroups: [""]
+      resources: ["*"]
+      verbs: ["get", "list", "delete"]
+```
+
+See [Workspace Initialization](./workspace-initialization.md#scoping-initializer-content-access)
+and [Workspace Termination](./workspace-termination.md#scoping-terminator-content-access) for
+the complete model, including how synthetic groups are protected from forgery and how
+extended `WorkspaceType`s evaluate independently.
+
+### Workspace Constraint Mechanisms
+
+kcp provides two primary constraint mechanisms for workspace types:
+
 * `limitAllowedChildren`: Controls which workspace types can be created as children.
 * `limitAllowedParents`: Controls which workspace types can serve as parents.
 
@@ -205,7 +207,9 @@ spec:
     - name: custom
       path: root
 ```
+
 You can also block all types from being used as children:
+
 ```yaml
 apiVersion: tenancy.kcp.io/v1alpha1
 kind: WorkspaceType
@@ -215,4 +219,5 @@ spec:
   limitAllowedChildren:
     none: true
 ```
+
 This ensures that no other workspace type can be created as a child of `leaf-workspace`.

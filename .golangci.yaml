@@ -28,9 +28,11 @@ linters:
     - noctx
     - nolintlint
     - nosprintfhostport
+    - paralleltest
     - prealloc
     - revive
     - staticcheck
+    - testifylint
     - unconvert
     - unused
     - usestdlibvars
@@ -71,6 +73,10 @@ linters:
         - G404 # Use of weak random number generator (use crypto/rand)
         - G101 # Potential hardcoded credentials (returns false positives)
         - G306 # Expect WriteFile permissions to be 0600 or less
+        # gosec is currently producing a lot of false-positives on taint analysis.
+        # see https://github.com/securego/gosec/issues/1500
+        - G704
+        - G705
     misspell:
       ignore-rules:
         - creater
@@ -108,6 +114,8 @@ linters:
       # - name: indent-error-flow # I think @ncdc prefers explicit else statements, remove?
       # - name: redefines-builtin-id
       # - name: dot-imports
+    paralleltest:
+      check-cleanup: true
   exclusions:
     generated: lax
     presets:
@@ -119,6 +127,9 @@ linters:
       - linters:
           - gosec
         path: test/e2e/*
+      - linters:
+          - gosec
+        path: test/upgrade/*
       - linters:
           - staticcheck
         text: QF1008 # "could remove embedded field" often impedes readability and clarity

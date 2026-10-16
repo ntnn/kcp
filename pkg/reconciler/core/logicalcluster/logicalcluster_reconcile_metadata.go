@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,17 +31,13 @@ import (
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 )
 
-type metaDataReconciler struct {
-}
+type metaDataReconciler struct{}
 
 func (r *metaDataReconciler) reconcile(ctx context.Context, logicalCluster *corev1alpha1.LogicalCluster) (reconcileStatus, error) {
 	logger := klog.FromContext(ctx)
 	changed := false
 
 	expected := string(logicalCluster.Status.Phase)
-	if !logicalCluster.DeletionTimestamp.IsZero() {
-		expected = string(corev1alpha1.LogicalClusterPhaseDeleting)
-	}
 	if got := logicalCluster.Labels[tenancyv1alpha1.WorkspacePhaseLabel]; got != expected {
 		if logicalCluster.Labels == nil {
 			logicalCluster.Labels = map[string]string{}

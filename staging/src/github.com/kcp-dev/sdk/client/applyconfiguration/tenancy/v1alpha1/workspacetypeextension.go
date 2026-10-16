@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,7 +20,12 @@ package v1alpha1
 
 // WorkspaceTypeExtensionApplyConfiguration represents a declarative configuration of the WorkspaceTypeExtension type for use
 // with apply.
+//
+// WorkspaceTypeExtension defines how other WorkspaceTypes are
+// composed together to add functionality to the owning WorkspaceType.
 type WorkspaceTypeExtensionApplyConfiguration struct {
+	// with are WorkspaceTypes whose initializers are added to the list
+	// for the owning type, and for whom the owning type becomes an alias.
 	With []WorkspaceTypeReferenceApplyConfiguration `json:"with,omitempty"`
 }
 

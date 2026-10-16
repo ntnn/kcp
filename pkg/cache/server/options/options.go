@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@ import (
 
 	genericoptions "k8s.io/apiserver/pkg/server/options"
 	"k8s.io/apiserver/pkg/storage/storagebackend"
+	"k8s.io/component-base/logs"
+	logsapiv1 "k8s.io/component-base/logs/api/v1"
 	kubeoptions "k8s.io/kubernetes/pkg/kubeapiserver/options"
 
 	etcdoptions "github.com/kcp-dev/embeddedetcd/options"
@@ -32,10 +34,11 @@ type Options struct {
 	ServerRunOptions *genericoptions.ServerRunOptions
 	Etcd             *genericoptions.EtcdOptions
 	SecureServing    *genericoptions.SecureServingOptionsWithLoopback
-	Authentication   *genericoptions.DelegatingAuthenticationOptions
-	Authorization    *genericoptions.DelegatingAuthorizationOptions
+	Authentication   *Authentication
+	Authorization    *Authorization
 	APIEnablement    *genericoptions.APIEnablementOptions
 	EmbeddedEtcd     etcdoptions.Options
+	Logs             *logs.Options
 	SyntheticDelay   time.Duration
 }
 
@@ -43,10 +46,11 @@ type completedOptions struct {
 	ServerRunOptions *genericoptions.ServerRunOptions
 	Etcd             *genericoptions.EtcdOptions
 	SecureServing    *genericoptions.SecureServingOptionsWithLoopback
-	Authentication   *genericoptions.DelegatingAuthenticationOptions
-	Authorization    *genericoptions.DelegatingAuthorizationOptions
+	Authentication   *Authentication
+	Authorization    *Authorization
 	APIEnablement    *genericoptions.APIEnablementOptions
 	EmbeddedEtcd     etcdoptions.CompletedOptions
+	Logs             *logs.Options
 	SyntheticDelay   time.Duration
 }
 
@@ -55,7 +59,7 @@ type CompletedOptions struct {
 }
 
 func (o *CompletedOptions) Validate() []error {
-	errors := []error{}
+	errors := []error{} //nolint:prealloc
 	errors = append(errors, o.ServerRunOptions.Validate()...)
 	errors = append(errors, o.Etcd.Validate()...)
 	errors = append(errors, o.SecureServing.Validate()...)
@@ -72,10 +76,11 @@ func NewOptions(rootDir string) *Options {
 		ServerRunOptions: genericoptions.NewServerRunOptions(),
 		Etcd:             genericoptions.NewEtcdOptions(storagebackend.NewDefaultConfig(kubeoptions.DefaultEtcdPathPrefix, nil)),
 		SecureServing:    genericoptions.NewSecureServingOptions().WithLoopback(),
-		Authentication:   genericoptions.NewDelegatingAuthenticationOptions(),
-		Authorization:    genericoptions.NewDelegatingAuthorizationOptions(),
+		Authentication:   NewAuthentication(),
+		Authorization:    NewAuthorization(),
 		APIEnablement:    genericoptions.NewAPIEnablementOptions(),
 		EmbeddedEtcd:     *etcdoptions.NewOptions(rootDir),
+		Logs:             logs.NewOptions(),
 	}
 
 	o.SecureServing.ServerCert.CertDirectory = rootDir
@@ -94,10 +99,6 @@ func (o *Options) Complete() (*CompletedOptions, error) {
 		o.EmbeddedEtcd.Enabled = true
 	}
 
-	// TODO: enable authN/Z stack
-	o.Authentication = nil
-	o.Authorization = nil
-
 	if err := o.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, nil); err != nil {
 		return nil, err
 	}
@@ -110,6 +111,7 @@ func (o *Options) Complete() (*CompletedOptions, error) {
 		Authorization:    o.Authorization,
 		APIEnablement:    o.APIEnablement,
 		EmbeddedEtcd:     o.EmbeddedEtcd.Complete(o.Etcd),
+		Logs:             o.Logs,
 	}}, nil
 }
 
@@ -117,5 +119,8 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	o.Etcd.AddFlags(fs)
 	o.EmbeddedEtcd.AddFlags(fs)
 	o.SecureServing.AddFlags(fs)
+	o.Authentication.AddFlags(fs)
+	o.Authorization.AddFlags(fs)
+	logsapiv1.AddFlags(o.Logs, fs)
 	fs.DurationVar(&o.SyntheticDelay, "synthetic-delay", 0, "The duration of time the cache server will inject a delay for to all inbound requests. Useful for testing.")
 }

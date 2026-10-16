@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 )
 
 func TestWorkspaceCELValidation(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name         string
 		current, old string
@@ -40,7 +41,7 @@ func TestWorkspaceCELValidation(t *testing.T) {
 			old:     `{"spec":{"URL": "abc"}}`,
 			current: `{"spec":{}}`,
 			wantErrs: []string{
-				"spec: Invalid value: \"object\": URL cannot be unset",
+				"spec: Invalid value: URL cannot be unset",
 			},
 		},
 		{
@@ -48,7 +49,7 @@ func TestWorkspaceCELValidation(t *testing.T) {
 			old:     `{"spec":{"cluster": "abc"}}`,
 			current: `{"spec":{}}`,
 			wantErrs: []string{
-				"spec: Invalid value: \"object\": cluster cannot be unset",
+				"spec: Invalid value: cluster cannot be unset",
 			},
 		},
 		{
@@ -56,7 +57,7 @@ func TestWorkspaceCELValidation(t *testing.T) {
 			old:     `{"spec":{"cluster": "abc"}}`,
 			current: `{"spec":{"cluster": "def"}}`,
 			wantErrs: []string{
-				"spec.cluster: Invalid value: \"string\": cluster is immutable",
+				"spec.cluster: Invalid value: \"def\": cluster is immutable",
 			},
 		},
 		{
@@ -71,6 +72,7 @@ func TestWorkspaceCELValidation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var current interface{}
 			err := yaml.Unmarshal([]byte(tc.current), &current)
 			require.NoError(t, err)

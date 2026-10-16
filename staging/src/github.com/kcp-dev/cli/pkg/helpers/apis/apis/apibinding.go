@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
@@ -36,6 +37,24 @@ type APIBinding interface {
 
 type APIBindingList interface {
 	PrintPermissionClaims(out io.Writer) error
+}
+
+type PermissionClaimsOptions struct {
+	IdentityHash  string
+	ResourceGroup string
+}
+
+func parseResourceGroup(resourceGroupOption string) *apisv1alpha2.GroupResource {
+	s := strings.SplitN(resourceGroupOption, ".", 2)
+	resource := s[0]
+	group := ""
+	if len(s) == 2 {
+		group = s[1]
+	}
+	if group == "core" {
+		group = ""
+	}
+	return &apisv1alpha2.GroupResource{Group: group, Resource: resource}
 }
 
 func GetAPIBinding(ctx context.Context, client kcpclientset.Interface, preferredVersion string, name string) (APIBinding, error) {
@@ -64,6 +83,28 @@ func ListAPIBindings(ctx context.Context, client kcpclientset.Interface, preferr
 	}
 }
 
+func AcceptAPIBindingPermissionClaims(ctx context.Context, client kcpclientset.Interface, preferredVersion string, name string, options PermissionClaimsOptions) (APIBinding, error) {
+	switch preferredVersion {
+	case "v1alpha2":
+		return updatePermissionClaimsStateV1alpha2(ctx, client, name, apisv1alpha2.ClaimAccepted, options)
+	case "v1alpha1":
+		return updatePermissionClaimsStateV1alpha1(ctx, client, name, apisv1alpha1.ClaimAccepted, options)
+	default:
+		return nil, fmt.Errorf("version %q is not supported by this plugin", preferredVersion)
+	}
+}
+
+func RejectAPIBindingPermissionClaims(ctx context.Context, client kcpclientset.Interface, preferredVersion string, name string, options PermissionClaimsOptions) (APIBinding, error) {
+	switch preferredVersion {
+	case "v1alpha2":
+		return updatePermissionClaimsStateV1alpha2(ctx, client, name, apisv1alpha2.ClaimRejected, options)
+	case "v1alpha1":
+		return updatePermissionClaimsStateV1alpha1(ctx, client, name, apisv1alpha1.ClaimRejected, options)
+	default:
+		return nil, fmt.Errorf("version %q is not supported by this plugin", preferredVersion)
+	}
+}
+
 func NewAPIBinding(nativeBinding any) APIBinding {
 	switch asserted := nativeBinding.(type) {
 	case *apisv1alpha1.APIBinding:
@@ -77,11 +118,10 @@ func NewAPIBinding(nativeBinding any) APIBinding {
 
 func NewAPIBindingList(nativeBinding any) APIBindingList {
 	switch asserted := nativeBinding.(type) {
-	case *apisv1alpha1.APIBinding:
-		return &apiBindingListV1alpha1{bindings: []*apisv1alpha1.APIBinding{asserted}}
-	case *apisv1alpha2.APIBinding:
-		return &apiBindingListV1alpha2{bindings: []*apisv1alpha2.APIBinding{asserted}}
+	case *apiBindingV1alpha2:
+		return &apiBindingListV1alpha2{bindings: []*apisv1alpha2.APIBinding{asserted.binding}}
+	case *apiBindingV1alpha1:
+		return &apiBindingListV1alpha1{bindings: []*apisv1alpha1.APIBinding{asserted.binding}}
 	}
-
 	panic("Unsupported APIBinding version provided.")
 }

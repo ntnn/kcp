@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,9 +24,12 @@ import (
 	kcpdynamic "github.com/kcp-dev/client-go/dynamic"
 	kcpkubernetesinformers "github.com/kcp-dev/client-go/informers"
 	kcpkubernetesclientset "github.com/kcp-dev/client-go/kubernetes"
+	"github.com/kcp-dev/logicalcluster/v3"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
+	"github.com/kcp-dev/kcp/pkg/contextmanager"
+	"github.com/kcp-dev/kcp/pkg/objectcount"
 	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
 )
 
@@ -197,5 +200,37 @@ func NewDynamicRESTMapperInitializer(dynamicRESTMapper *dynamicrestmapper.Dynami
 func (i *dynamicRESTMapperInitializer) Initialize(plugin admission.Interface) {
 	if wants, ok := plugin.(WantsDynamicRESTMapper); ok {
 		wants.SetDynamicRESTMapper(i.dynamicRESTMapper)
+	}
+}
+
+// NewObjectCountRegistryInitializer returns an admission plugin initializer that
+// injects the per-logical-cluster object count registry into admission plugins.
+func NewObjectCountRegistryInitializer(registry *objectcount.Registry) *objectCountRegistryInitializer {
+	return &objectCountRegistryInitializer{
+		registry: registry,
+	}
+}
+
+type objectCountRegistryInitializer struct {
+	registry *objectcount.Registry
+}
+
+func (i *objectCountRegistryInitializer) Initialize(plugin admission.Interface) {
+	if wants, ok := plugin.(WantsObjectCountRegistry); ok {
+		wants.SetObjectCountRegistry(i.registry)
+	}
+}
+
+type clusterContextManagerInitializer struct {
+	clusterContextManager *contextmanager.Manager[logicalcluster.Path]
+}
+
+func NewClusterContextManagerInitializer(mgr *contextmanager.Manager[logicalcluster.Path]) *clusterContextManagerInitializer {
+	return &clusterContextManagerInitializer{clusterContextManager: mgr}
+}
+
+func (i *clusterContextManagerInitializer) Initialize(plugin admission.Interface) {
+	if wants, ok := plugin.(WantsClusterContextManager); ok {
+		wants.SetClusterContextManager(i.clusterContextManager)
 	}
 }

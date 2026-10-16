@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 	v1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	migrationv1alpha1 "github.com/kcp-dev/sdk/apis/migration/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	conditionsv1alpha1 "github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1"
 	topologyv1alpha1 "github.com/kcp-dev/sdk/apis/topology/v1alpha1"
@@ -39,6 +40,7 @@ import (
 	applyconfigurationcorev1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/core/v1alpha1"
 	internal "github.com/kcp-dev/sdk/client/applyconfiguration/internal"
 	applyconfigurationmetav1 "github.com/kcp-dev/sdk/client/applyconfiguration/meta/v1"
+	applyconfigurationmigrationv1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/migration/v1alpha1"
 	applyconfigurationtenancyv1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/tenancy/v1alpha1"
 	applyconfigurationtopologyv1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/topology/v1alpha1"
 )
@@ -64,8 +66,6 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apisv1alpha1.APIConversionSpecApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("APIExport"):
 		return &apisv1alpha1.APIExportApplyConfiguration{}
-	case v1alpha1.SchemeGroupVersion.WithKind("APIExportEndpoint"):
-		return &apisv1alpha1.APIExportEndpointApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("APIExportEndpointSlice"):
 		return &apisv1alpha1.APIExportEndpointSliceApplyConfiguration{}
 	case v1alpha1.SchemeGroupVersion.WithKind("APIExportEndpointSliceSpec"):
@@ -156,26 +156,22 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apisv1alpha2.VirtualWorkspaceApplyConfiguration{}
 
 		// Group=cache.kcp.io, Version=v1alpha1
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedObject"):
-		return &applyconfigurationcachev1alpha1.CachedObjectApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedObjectSpec"):
-		return &applyconfigurationcachev1alpha1.CachedObjectSpecApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedResource"):
-		return &applyconfigurationcachev1alpha1.CachedResourceApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedResourceEndpoint"):
-		return &applyconfigurationcachev1alpha1.CachedResourceEndpointApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedResourceEndpointSlice"):
-		return &applyconfigurationcachev1alpha1.CachedResourceEndpointSliceApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedResourceEndpointSliceSpec"):
-		return &applyconfigurationcachev1alpha1.CachedResourceEndpointSliceSpecApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedResourceEndpointSliceStatus"):
-		return &applyconfigurationcachev1alpha1.CachedResourceEndpointSliceStatusApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedResourceReference"):
-		return &applyconfigurationcachev1alpha1.CachedResourceReferenceApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedResourceSpec"):
-		return &applyconfigurationcachev1alpha1.CachedResourceSpecApplyConfiguration{}
-	case cachev1alpha1.SchemeGroupVersion.WithKind("CachedResourceStatus"):
-		return &applyconfigurationcachev1alpha1.CachedResourceStatusApplyConfiguration{}
+	case cachev1alpha1.SchemeGroupVersion.WithKind("ClusterCachedResource"):
+		return &applyconfigurationcachev1alpha1.ClusterCachedResourceApplyConfiguration{}
+	case cachev1alpha1.SchemeGroupVersion.WithKind("ClusterCachedResourceEndpointSlice"):
+		return &applyconfigurationcachev1alpha1.ClusterCachedResourceEndpointSliceApplyConfiguration{}
+	case cachev1alpha1.SchemeGroupVersion.WithKind("ClusterCachedResourceEndpointSliceSpec"):
+		return &applyconfigurationcachev1alpha1.ClusterCachedResourceEndpointSliceSpecApplyConfiguration{}
+	case cachev1alpha1.SchemeGroupVersion.WithKind("ClusterCachedResourceEndpointSliceStatus"):
+		return &applyconfigurationcachev1alpha1.ClusterCachedResourceEndpointSliceStatusApplyConfiguration{}
+	case cachev1alpha1.SchemeGroupVersion.WithKind("ClusterCachedResourceReference"):
+		return &applyconfigurationcachev1alpha1.ClusterCachedResourceReferenceApplyConfiguration{}
+	case cachev1alpha1.SchemeGroupVersion.WithKind("ClusterCachedResourceSpec"):
+		return &applyconfigurationcachev1alpha1.ClusterCachedResourceSpecApplyConfiguration{}
+	case cachev1alpha1.SchemeGroupVersion.WithKind("ClusterCachedResourceStatus"):
+		return &applyconfigurationcachev1alpha1.ClusterCachedResourceStatusApplyConfiguration{}
+	case cachev1alpha1.SchemeGroupVersion.WithKind("ExportBindingReference"):
+		return &applyconfigurationcachev1alpha1.ExportBindingReferenceApplyConfiguration{}
 	case cachev1alpha1.SchemeGroupVersion.WithKind("GroupVersionResource"):
 		return &applyconfigurationcachev1alpha1.GroupVersionResourceApplyConfiguration{}
 	case cachev1alpha1.SchemeGroupVersion.WithKind("Identity"):
@@ -188,6 +184,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationconditionsv1alpha1.ConditionApplyConfiguration{}
 
 		// Group=core.kcp.io, Version=v1alpha1
+	case corev1alpha1.SchemeGroupVersion.WithKind("Endpoint"):
+		return &applyconfigurationcorev1alpha1.EndpointApplyConfiguration{}
+	case corev1alpha1.SchemeGroupVersion.WithKind("EndpointSelector"):
+		return &applyconfigurationcorev1alpha1.EndpointSelectorApplyConfiguration{}
 	case corev1alpha1.SchemeGroupVersion.WithKind("LogicalCluster"):
 		return &applyconfigurationcorev1alpha1.LogicalClusterApplyConfiguration{}
 	case corev1alpha1.SchemeGroupVersion.WithKind("LogicalClusterOwner"):
@@ -196,8 +196,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationcorev1alpha1.LogicalClusterSpecApplyConfiguration{}
 	case corev1alpha1.SchemeGroupVersion.WithKind("LogicalClusterStatus"):
 		return &applyconfigurationcorev1alpha1.LogicalClusterStatusApplyConfiguration{}
+	case corev1alpha1.SchemeGroupVersion.WithKind("OwnerUserInfo"):
+		return &applyconfigurationcorev1alpha1.OwnerUserInfoApplyConfiguration{}
 	case corev1alpha1.SchemeGroupVersion.WithKind("Shard"):
 		return &applyconfigurationcorev1alpha1.ShardApplyConfiguration{}
+	case corev1alpha1.SchemeGroupVersion.WithKind("ShardResourceLimits"):
+		return &applyconfigurationcorev1alpha1.ShardResourceLimitsApplyConfiguration{}
 	case corev1alpha1.SchemeGroupVersion.WithKind("ShardSpec"):
 		return &applyconfigurationcorev1alpha1.ShardSpecApplyConfiguration{}
 	case corev1alpha1.SchemeGroupVersion.WithKind("ShardStatus"):
@@ -220,6 +224,26 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationmetav1.OwnerReferenceApplyConfiguration{}
 	case v1.SchemeGroupVersion.WithKind("TypeMeta"):
 		return &applyconfigurationmetav1.TypeMetaApplyConfiguration{}
+
+		// Group=migration.kcp.io, Version=v1alpha1
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("AliasRetirement"):
+		return &applyconfigurationmigrationv1alpha1.AliasRetirementApplyConfiguration{}
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("APIExportIdentityRotation"):
+		return &applyconfigurationmigrationv1alpha1.APIExportIdentityRotationApplyConfiguration{}
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("APIExportIdentityRotationSpec"):
+		return &applyconfigurationmigrationv1alpha1.APIExportIdentityRotationSpecApplyConfiguration{}
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("APIExportIdentityRotationStatus"):
+		return &applyconfigurationmigrationv1alpha1.APIExportIdentityRotationStatusApplyConfiguration{}
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("ExportReference"):
+		return &applyconfigurationmigrationv1alpha1.ExportReferenceApplyConfiguration{}
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("LogicalClusterMigration"):
+		return &applyconfigurationmigrationv1alpha1.LogicalClusterMigrationApplyConfiguration{}
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("LogicalClusterMigrationSpec"):
+		return &applyconfigurationmigrationv1alpha1.LogicalClusterMigrationSpecApplyConfiguration{}
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("LogicalClusterMigrationStatus"):
+		return &applyconfigurationmigrationv1alpha1.LogicalClusterMigrationStatusApplyConfiguration{}
+	case migrationv1alpha1.SchemeGroupVersion.WithKind("ShardMigrationProgress"):
+		return &applyconfigurationmigrationv1alpha1.ShardMigrationProgressApplyConfiguration{}
 
 		// Group=tenancy.kcp.io, Version=v1alpha1
 	case tenancyv1alpha1.SchemeGroupVersion.WithKind("APIExportReference"):

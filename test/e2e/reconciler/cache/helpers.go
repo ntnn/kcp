@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,10 +28,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apiserver/pkg/authentication/user"
 	kubernetesscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -40,6 +42,7 @@ import (
 	"github.com/kcp-dev/embeddedetcd"
 	kcptestinghelpers "github.com/kcp-dev/sdk/testing/helpers"
 	kcptestingserver "github.com/kcp-dev/sdk/testing/server"
+	"github.com/kcp-dev/sdk/testing/third_party/library-go/crypto"
 
 	cacheclient "github.com/kcp-dev/kcp/pkg/cache/client"
 	"github.com/kcp-dev/kcp/pkg/cache/client/shard"
@@ -64,6 +67,22 @@ func StartStandaloneCacheServer(ctx context.Context, t *testing.T, dataDir strin
 	require.NoError(t, err)
 	cacheServerOptions.EmbeddedEtcd.ClientPort = cacheServerEmbeddedEtcdClientPort
 	cacheServerOptions.EmbeddedEtcd.PeerPort = cacheServerEmbeddedEtcdPeerPort
+
+	clientCA, _, err := crypto.EnsureCA(
+		path.Join(dataDir, "cache", "client-ca.crt"),
+		path.Join(dataDir, "cache", "client-ca.key"),
+		path.Join(dataDir, "cache", "client-ca-serial.txt"),
+		"cache-test-client-ca", 365,
+	)
+	require.NoError(t, err)
+	_, _, err = clientCA.EnsureClientCertificate(
+		path.Join(dataDir, "cache", "test-client.crt"),
+		path.Join(dataDir, "cache", "test-client.key"),
+		&user.DefaultInfo{Name: "cache-test-client", Groups: []string{"system:masters"}},
+		365,
+	)
+	require.NoError(t, err)
+	cacheServerOptions.Authentication.ClientCAFile = path.Join(dataDir, "cache", "client-ca.crt")
 	cacheServerCompletedOptions, err := cacheServerOptions.Complete()
 	require.NoError(t, err)
 	if errs := cacheServerCompletedOptions.Validate(); len(errs) > 0 {
@@ -74,19 +93,56 @@ func StartStandaloneCacheServer(ctx context.Context, t *testing.T, dataDir strin
 	cacheServerCompletedConfig, err := cacheServerConfig.Complete()
 	require.NoError(t, err)
 
+	// When the test ends the cache server is stopped.
+	// For the cache server to stop gracefully etcd must be available until it is shut down.
+	// For etcd to then gracefully stop the files on disk must be present until etcd is shut down.
+	// If the cache server/etcd are bounded by the context the server
+	// will shut down in parallel while the test harness is deleting
+	// files, which leads to spurious opaque test errors (sometimes in
+	// _other_ tests).
+	// So the shutdown _must_ be:
+	// 1. Stop cache server
+	// 2. Stop etcd
+	// 3. Let test cleanup run
+	serverCtx, serverCancel := context.WithCancel(ctx)
+	etcdCtx, etcdCancel := context.WithCancel(context.Background())
+
 	if cacheServerCompletedConfig.EmbeddedEtcd.Config != nil {
 		t.Logf("Starting embedded etcd for the cache server")
-		require.NoError(t, embeddedetcd.NewServer(cacheServerCompletedConfig.EmbeddedEtcd).Run(ctx))
+
+		etcdserver := embeddedetcd.NewServer(cacheServerCompletedConfig.EmbeddedEtcd)
+
+		if err := etcdserver.Run(etcdCtx); err != nil {
+			etcdCancel()
+			t.Fatalf("failed to start embedded etcd: %v", err)
+		}
+
+		t.Cleanup(func() {
+			<-etcdCtx.Done()
+			if err := wait.PollUntilContextTimeout(context.Background(), time.Second, wait.ForeverTestTimeout, true,
+				func(ctx context.Context) (bool, error) {
+					return etcdserver.Stopped(), nil
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
+
 	cacheServer, err := cacheserver.NewServer(cacheServerCompletedConfig)
 	require.NoError(t, err)
-	preparedCachedServer, err := cacheServer.PrepareRun(ctx)
+	preparedCachedServer, err := cacheServer.PrepareRun(serverCtx)
 	require.NoError(t, err)
 	start := time.Now()
+
 	t.Logf("Starting the cache server")
 	go func() {
-		require.NoError(t, preparedCachedServer.Run(ctx))
+		// stop etcd server after cache server is done shutting down
+		defer etcdCancel()
+		assert.NoError(t, preparedCachedServer.Run(serverCtx))
 	}()
+	// Stop cache server before starting other cleanup functions
+	t.Cleanup(serverCancel)
 
 	cacheServerCertificatePath := path.Join(dataDir, "cache", "apiserver.crt")
 	kcptestinghelpers.Eventually(t, func() (bool, string) {
@@ -106,9 +162,16 @@ func StartStandaloneCacheServer(ctx context.Context, t *testing.T, dataDir strin
 				CertificateAuthorityData: cacheServerCert,
 			},
 		},
+		AuthInfos: map[string]*clientcmdapi.AuthInfo{
+			"cache": {
+				ClientCertificate: path.Join(dataDir, "cache", "test-client.crt"),
+				ClientKey:         path.Join(dataDir, "cache", "test-client.key"),
+			},
+		},
 		Contexts: map[string]*clientcmdapi.Context{
 			"cache": {
-				Cluster: "cache",
+				Cluster:  "cache",
+				AuthInfo: "cache",
 			},
 		},
 		CurrentContext: "cache",

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,8 +17,6 @@ limitations under the License.
 package authentication
 
 import (
-	"context"
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -41,11 +39,8 @@ func TestCrossShardWorkspaceType(t *testing.T) {
 		teamCluster = "logicalteamcluster"
 	)
 
-	ctx, cancel := context.WithCancelCause(context.Background())
-	defer cancel(errors.New("test has ended"))
-
 	clusterIndex := index.New(nil)
-	authIndex := NewIndex(ctx, nil)
+	authIndex := NewIndex(t.Context(), nil)
 
 	// setup
 	clusterIndex.UpsertShard("root", "https://root.io")

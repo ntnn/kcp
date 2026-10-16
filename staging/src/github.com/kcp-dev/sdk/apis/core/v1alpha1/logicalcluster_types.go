@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -55,11 +56,35 @@ const (
 	// LogicalClusterFinalizerName attached to the owner of the LogicalCluster resource (usually a Workspace) so that we can control
 	// deletion of LogicalCluster resources.
 	LogicalClusterFinalizerName = "core.kcp.io/logicalcluster"
+
+	// LogicalClusterInactiveAnnotationKey is the annotation denoting a logical
+	// cluster should be deemed unreachable. When set to "true" the
+	// active connections for the logical cluster will be cancelled and
+	// requests will be rejected.
+	// The phase of a logical cluster with this annotation is set to
+	// LogicalClusterPhaseInactive.
+	LogicalClusterInactiveAnnotationKey = "core.kcp.io/inactive"
+
+	// LogicalClusterInactiveAnnotationKeyLegacy is the previous
+	// inactive annotation key and honoured for backwards compatibility.
+	//
+	// Deprecated: use LogicalClusterInactiveAnnotationKey.
+	LogicalClusterInactiveAnnotationKeyLegacy = "internal.kcp.io/inactive"
+
+	// LogicalClusterShardAnnotationKey is the shard name the LogicalCluster is scheduled on.
+	// This annotation is set on both the LogicalCluster and its owner, if the owner is set.
+	LogicalClusterShardAnnotationKey = "core.kcp.io/shard"
+
+	// LogicalClusterMaxTotalObjectsAnnotationKey overrides the shard-wide default
+	// limit on the total number of objects in this logical cluster. A value <= 0
+	// disables the limit for this logical cluster. The annotation is protected by
+	// the ReservedMetadata admission plugin, i.e. only system users may set it.
+	LogicalClusterMaxTotalObjectsAnnotationKey = "core.kcp.io/max-total-objects"
 )
 
 // LogicalClusterPhaseType is the type of the current phase of the logical cluster.
 //
-// +kubebuilder:validation:Enum=Scheduling;Initializing;Ready;Unavailable
+// +kubebuilder:validation:Enum=Scheduling;Initializing;Ready;Unavailable;Inactive;Terminating;Deleting
 type LogicalClusterPhaseType string
 
 const (
@@ -72,7 +97,20 @@ const (
 	// This should be used when we really can't serve the logical cluster content and not some
 	// temporary flakes, like readiness probe failing.
 	LogicalClusterPhaseUnavailable LogicalClusterPhaseType = "Unavailable"
-	LogicalClusterPhaseDeleting    LogicalClusterPhaseType = "Deleting"
+	// LogicalClusterPhaseInactive phase indicates that the logical cluster has been
+	// intentionally taken offline (for example, during maintenance).
+	// This phase is driven by the LogicalClusterInactiveAnnotationKey annotation.
+	// This is distinct from Unavailable in so far that Inactive is an
+	// intentional admin decision, while Unavailable is caused by an error.
+	LogicalClusterPhaseInactive LogicalClusterPhaseType = "Inactive"
+	// LogicalClusterPhaseTerminating phase is used to indicate that the logical cluster has a
+	// DeletionTimestamp set and is waiting on terminator controllers to clean up workspace
+	// content. The cluster is still served (the workspace content authorizer permits access)
+	// so that terminator controllers can act on resources before deletion.
+	LogicalClusterPhaseTerminating LogicalClusterPhaseType = "Terminating"
+	// LogicalClusterPhaseDeleting phase is used to indicate that all terminators have completed
+	// and the logical cluster is being deleted. No content access is permitted in this phase.
+	LogicalClusterPhaseDeleting LogicalClusterPhaseType = "Deleting"
 )
 
 // LogicalClusterInitializer is a unique string corresponding to a logical cluster
@@ -105,6 +143,12 @@ type LogicalClusterSpec struct {
 	//
 	// +optional
 	Owner *LogicalClusterOwner `json:"owner,omitempty"`
+
+	// createdBy is the user who owns this logical cluster. This is the user who
+	// created the workspace.
+	//
+	// +optional
+	CreatedBy *OwnerUserInfo `json:"createdBy,omitempty"`
 
 	// initializers are set on creation by the system and copied to status when
 	// initialization starts.
@@ -161,6 +205,29 @@ type LogicalClusterOwner struct {
 	UID types.UID `json:"uid"`
 }
 
+// OwnerUserInfo is the user who owns a LogicalCluster.
+type OwnerUserInfo struct {
+	// username is the name of the user.
+	//
+	// +optional
+	Username string `json:"username,omitempty"`
+
+	// groups is the list of groups the user belongs to.
+	//
+	// +optional
+	Groups []string `json:"groups,omitempty"`
+
+	// uid is a unique identifier for the user.
+	//
+	// +optional
+	UID string `json:"uid,omitempty"`
+
+	// extra contains additional information provided by the authenticator.
+	//
+	// +optional
+	Extra map[string]authenticationv1.ExtraValue `json:"extra,omitempty"`
+}
+
 // LogicalClusterStatus communicates the observed state of the Workspace.
 type LogicalClusterStatus struct {
 	// url is the address under which the Kubernetes-cluster-like endpoint
@@ -188,7 +255,7 @@ type LogicalClusterStatus struct {
 
 	// Terminators are set on creation by the system and must be cleared
 	// by a controller before the logical cluster can be deleted. The LogicalCluster object
-	// will stay in the phase "Deleting" until all terminator are cleared.
+	// will stay in the phase "Terminating" until all terminator are cleared.
 	//
 	// +optional
 	Terminators []LogicalClusterTerminator `json:"terminators,omitempty"`
@@ -204,6 +271,15 @@ func (in *LogicalCluster) GetConditions() conditionsv1alpha1.Conditions {
 
 var _ conditions.Getter = &LogicalCluster{}
 var _ conditions.Setter = &LogicalCluster{}
+
+// IsLogicalClusterInactive reports whether the given annotations mark a
+// LogicalCluster as inactive. It accepts both the canonical
+// LogicalClusterInactiveAnnotationKey and the deprecated
+// LogicalClusterInactiveAnnotationKeyLegacy.
+func IsLogicalClusterInactive(annotations map[string]string) bool {
+	return annotations[LogicalClusterInactiveAnnotationKey] == "true" ||
+		annotations[LogicalClusterInactiveAnnotationKeyLegacy] == "true"
+}
 
 // LogicalClusterList is a list of LogicalCluster
 //

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -36,13 +37,20 @@ import (
 	kcpcache "github.com/kcp-dev/apimachinery/v2/pkg/cache"
 	kcpmetadata "github.com/kcp-dev/client-go/metadata"
 	"github.com/kcp-dev/logicalcluster/v3"
+	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	conditionsv1alpha1 "github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/third_party/conditions/util/conditions"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 	apisv1alpha2client "github.com/kcp-dev/sdk/client/clientset/versioned/typed/apis/v1alpha2"
+	apisv1alpha1informers "github.com/kcp-dev/sdk/client/informers/externalversions/apis/v1alpha1"
 	apisv1alpha2informers "github.com/kcp-dev/sdk/client/informers/externalversions/apis/v1alpha2"
+	corev1alpha1informers "github.com/kcp-dev/sdk/client/informers/externalversions/core/v1alpha1"
+	apisv1alpha1listers "github.com/kcp-dev/sdk/client/listers/apis/v1alpha1"
 
+	"github.com/kcp-dev/kcp/pkg/indexers"
+	"github.com/kcp-dev/kcp/pkg/informer"
 	"github.com/kcp-dev/kcp/pkg/logging"
 	"github.com/kcp-dev/kcp/pkg/reconciler/committer"
 	"github.com/kcp-dev/kcp/pkg/reconciler/core/logicalclusterdeletion/deletion"
@@ -66,12 +74,24 @@ const (
 	// ResourceFinalizersRemainReason is the reason for condition BindingResourceDeleteSuccess that finalizers on some
 	// CRs still exist.
 	ResourceFinalizersRemainReason = "SomeFinalizersRemain"
+
+	// PermissionClaimLabelsRemainReason is the reason for condition BindingResourceDeleteSuccess that the
+	// permission claim labels of this APIBinding have not been withdrawn from the claimed resources yet.
+	PermissionClaimLabelsRemainReason = "PermissionClaimLabelsRemain"
+
+	// WaitingForSuccessorReason is the reason for condition BindingResourceDeleteSuccess that instances of some
+	// bound resources are intentionally kept per deletionPolicy=WaitForSuccessor, holding the finalizer until a
+	// successor APIBinding adopts them.
+	WaitingForSuccessorReason = "WaitingForSuccessor"
 )
 
 func NewController(
 	metadataClient kcpmetadata.ClusterInterface,
 	kcpClusterClient kcpclientset.ClusterInterface,
 	apiBindingInformer apisv1alpha2informers.APIBindingClusterInformer,
+	apiExportInformer, globalAPIExportInformer apisv1alpha2informers.APIExportClusterInformer,
+	apiResourceSchemaInformer, globalAPIResourceSchemaInformer apisv1alpha1informers.APIResourceSchemaClusterInformer,
+	logicalClusterInformer corev1alpha1informers.LogicalClusterClusterInformer,
 ) *Controller {
 	c := &Controller{
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
@@ -91,8 +111,27 @@ func NewController(
 		getAPIBinding: func(cluster logicalcluster.Name, name string) (*apisv1alpha2.APIBinding, error) {
 			return apiBindingInformer.Lister().Cluster(cluster).Get(name)
 		},
+		listAPIBindings: func(cluster logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error) {
+			return apiBindingInformer.Lister().Cluster(cluster).List(labels.Everything())
+		},
+		getAPIExportByPath: func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error) {
+			return indexers.ByPathAndNameWithFallback[*apisv1alpha2.APIExport](apisv1alpha2.Resource("apiexports"), apiExportInformer.Informer().GetIndexer(), globalAPIExportInformer.Informer().GetIndexer(), path, name)
+		},
+		getAPIResourceSchema: informer.NewScopedGetterWithFallback[*apisv1alpha1.APIResourceSchema, apisv1alpha1listers.APIResourceSchemaLister](apiResourceSchemaInformer.Lister(), globalAPIResourceSchemaInformer.Lister()),
+		getLogicalCluster: func(cluster logicalcluster.Name) (*corev1alpha1.LogicalCluster, error) {
+			return logicalClusterInformer.Lister().Cluster(cluster).Get(corev1alpha1.LogicalClusterName)
+		},
 		commit: committer.NewCommitter[*APIBinding, Patcher, *APIBindingSpec, *APIBindingStatus](kcpClusterClient.ApisV1alpha2().APIBindings()),
 	}
+
+	// Ensure the index used by getAPIExportByPath exists. AddIfNotPresentOrDie is
+	// idempotent across the controllers sharing these informer instances.
+	indexers.AddIfNotPresentOrDie(apiExportInformer.Informer().GetIndexer(), cache.Indexers{
+		indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
+	})
+	indexers.AddIfNotPresentOrDie(globalAPIExportInformer.Informer().GetIndexer(), cache.Indexers{
+		indexers.ByLogicalClusterPathAndName: indexers.IndexByLogicalClusterPathAndName,
+	})
 
 	_, _ = apiBindingInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
 		FilterFunc: func(obj interface{}) bool {
@@ -125,8 +164,13 @@ type Controller struct {
 	listResources   func(ctx context.Context, cluster logicalcluster.Path, gvr schema.GroupVersionResource) (*metav1.PartialObjectMetadataList, error)
 	deleteResources func(ctx context.Context, cluster logicalcluster.Path, gvr schema.GroupVersionResource, namespace string) error
 
-	getAPIBinding func(cluster logicalcluster.Name, name string) (*apisv1alpha2.APIBinding, error)
-	commit        CommitFunc
+	getAPIBinding        func(cluster logicalcluster.Name, name string) (*apisv1alpha2.APIBinding, error)
+	listAPIBindings      func(cluster logicalcluster.Name) ([]*apisv1alpha2.APIBinding, error)
+	getAPIExportByPath   func(path logicalcluster.Path, name string) (*apisv1alpha2.APIExport, error)
+	getAPIResourceSchema func(cluster logicalcluster.Name, name string) (*apisv1alpha1.APIResourceSchema, error)
+	getLogicalCluster    func(cluster logicalcluster.Name) (*corev1alpha1.LogicalCluster, error)
+
+	commit CommitFunc
 }
 
 func (c *Controller) enqueue(obj interface{}) {
@@ -261,7 +305,34 @@ func (c *Controller) process(ctx context.Context, key string) error {
 		return remainingErr
 	}
 
-	apibindingCopy = apibinding.DeepCopy()
+	// The permissionclaimlabel controller withdraws the claim labels of a deleting APIBinding from
+	// the claimed resources and clears status.appliedPermissionClaims once that is done. Hold the
+	// finalizer until then: the labels are the only thing scoping wildcard access to claimed
+	// resources in the APIExport virtual workspace, so they must not outlive the binding.
+	if remaining := len(apibindingCopy.Status.AppliedPermissionClaims); remaining > 0 {
+		conditions.MarkFalse(
+			apibindingCopy,
+			apisv1alpha2.BindingResourceDeleteSuccess,
+			PermissionClaimLabelsRemainReason,
+			conditionsv1alpha1.ConditionSeverityError,
+			"waiting for %d permission claim(s) to be withdrawn from the claimed resources",
+			remaining,
+		)
+		newResource := &Resource{ObjectMeta: apibindingCopy.ObjectMeta, Spec: &apibindingCopy.Spec, Status: &apibindingCopy.Status}
+		if err := c.commit(ctx, oldResource, newResource); err != nil {
+			return err
+		}
+		return fmt.Errorf("%d permission claim(s) of APIBinding %s|%s still applied", remaining, clusterName, name)
+	}
+
+	// Commit the status update from mutateResourceRemainingStatus first.
+	// The committer rejects simultaneous spec/metadata + status changes, so the
+	// finalizer removal below must go in a separate patch.
+	statusResource := &Resource{ObjectMeta: apibindingCopy.ObjectMeta, Spec: &apibindingCopy.Spec, Status: &apibindingCopy.Status}
+	if err := c.commit(ctx, oldResource, statusResource); err != nil {
+		return err
+	}
+
 	filtered := make([]string, 0, len(apibindingCopy.Finalizers))
 	for i := range apibindingCopy.Finalizers {
 		if apibindingCopy.Finalizers[i] == APIBindingFinalizer {
@@ -272,9 +343,11 @@ func (c *Controller) process(ctx context.Context, key string) error {
 	if len(apibindingCopy.Finalizers) == len(filtered) {
 		return nil
 	}
-	apibindingCopy.Finalizers = filtered
+	finalizersCopy := apibindingCopy.DeepCopy()
+	finalizersCopy.Finalizers = filtered
 	logger.V(2).Info("finalizing APIBinding")
-	newResource := &Resource{ObjectMeta: apibindingCopy.ObjectMeta, Spec: &apibindingCopy.Spec, Status: &apibindingCopy.Status}
+	oldResource = &Resource{ObjectMeta: apibindingCopy.ObjectMeta, Spec: &apibindingCopy.Spec, Status: &apibindingCopy.Status}
+	newResource := &Resource{ObjectMeta: finalizersCopy.ObjectMeta, Spec: &finalizersCopy.Spec, Status: &finalizersCopy.Status}
 	return c.commit(ctx, oldResource, newResource)
 }
 
@@ -302,6 +375,30 @@ func (c *Controller) mutateResourceRemainingStatus(resourceRemaining gvrDeletion
 		return apibinding, &deletion.ResourcesRemainingError{
 			Estimate: DeletionRecheckEstimateSeconds,
 			Message:  fmt.Sprintf("finalizers %s remaining", strings.Join(remainingByFinalizer, ", ")),
+		}
+	}
+
+	if resourceRemaining.gvrsWaitingForSuccessor.Len() != 0 {
+		// requeue until a successor APIBinding adopts the retained resources
+		waiting := []string{}
+		for gvr := range resourceRemaining.gvrsWaitingForSuccessor {
+			waiting = append(waiting, fmt.Sprintf("%s.%s has %d resource instances", gvr.Resource, gvr.Group, resourceRemaining.gvrToNumRemaining[gvr]))
+		}
+		// sort for stable updates
+		sort.Strings(waiting)
+
+		conditions.MarkFalse(
+			apibinding,
+			apisv1alpha2.BindingResourceDeleteSuccess,
+			WaitingForSuccessorReason,
+			conditionsv1alpha1.ConditionSeverityInfo,
+			"Per deletionPolicy=WaitForSuccessor, instances are kept until a successor APIBinding adopts them: %s",
+			strings.Join(waiting, ", "),
+		)
+
+		return apibinding, &deletion.ResourcesRemainingError{
+			Estimate: DeletionRecheckEstimateSeconds,
+			Message:  fmt.Sprintf("waiting for successor to adopt %s", strings.Join(waiting, ", ")),
 		}
 	}
 

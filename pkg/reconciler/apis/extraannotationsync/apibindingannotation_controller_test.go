@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import (
 )
 
 func TestSyncExtraAnnotationPatch(t *testing.T) {
+	t.Parallel()
 	scenarios := []struct {
 		name                  string
 		apiExportAnnotations  map[string]string
@@ -56,10 +57,17 @@ func TestSyncExtraAnnotationPatch(t *testing.T) {
 			apiBindingAnnotations: map[string]string{"key2": "value2", apisv1alpha1.AnnotationAPIExportExtraKeyPrefix + "test": "test1"},
 			wantPatch:             fmt.Sprintf(`{"metadata":{"annotations":{%q:"test"}}}`, apisv1alpha1.AnnotationAPIExportExtraKeyPrefix+"test"),
 		},
+		{
+			name:                  "strip extra annotations when export is gone",
+			apiExportAnnotations:  nil,
+			apiBindingAnnotations: map[string]string{"key2": "value2", apisv1alpha1.AnnotationAPIExportExtraKeyPrefix + "test": "test"},
+			wantPatch:             fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, apisv1alpha1.AnnotationAPIExportExtraKeyPrefix+"test"),
+		},
 	}
 
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
 			patch, err := syncExtraAnnotationPatch(scenario.apiExportAnnotations, scenario.apiBindingAnnotations)
 			require.NoError(t, err)
 			require.Equal(t, scenario.wantPatch, string(patch))

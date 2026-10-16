@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 
@@ -45,6 +46,15 @@ import (
 	"github.com/kcp-dev/kcp/test/e2e/framework"
 )
 
+// nestedDeletionTimeout is a longer timeout for nested workspace deletion tests.
+// nested workspace deletion can take longer to propagate and the
+// default wait.ForeverTestTimeout can be too short, leading to flaking
+// tests.
+//
+// For more detail see this issue:
+// https://github.com/kcp-dev/kcp/issues/4072
+var nestedDeletionTimeout = 3 * wait.ForeverTestTimeout
+
 func TestWorkspaceDeletion(t *testing.T) {
 	t.Parallel()
 	framework.Suite(t, "control-plane")
@@ -62,26 +72,35 @@ func TestWorkspaceDeletion(t *testing.T) {
 		{
 			name: "create and clean workspace",
 			work: func(ctx context.Context, t *testing.T, server runningServer) {
-				orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
+				// The kcptesting.WithRootShard was added due to the
+				// test flaking in CI, it is not actually required for
+				// the test execution. However we observed that this
+				// subtest was flaking while the next subtest - which is
+				// pinning the workspaces to the root shard - was not.
+				orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithRootShard(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
 
 				t.Logf("Create a workspace with a shard")
-				workspace, err := server.kcpClusterClient.Cluster(orgPath).TenancyV1alpha1().Workspaces().Create(ctx, &tenancyv1alpha1.Workspace{
-					ObjectMeta: metav1.ObjectMeta{Name: "ws-cleanup"},
-					Spec: tenancyv1alpha1.WorkspaceSpec{
-						Type: &tenancyv1alpha1.WorkspaceTypeReference{
-							Name: "universal",
-							Path: "root",
-						},
-						Location: &tenancyv1alpha1.WorkspaceLocation{
-							Selector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{
-									"name": corev1alpha1.RootShard,
+				var workspace *tenancyv1alpha1.Workspace
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					var err error
+					workspace, err = server.kcpClusterClient.Cluster(orgPath).TenancyV1alpha1().Workspaces().Create(ctx, &tenancyv1alpha1.Workspace{
+						ObjectMeta: metav1.ObjectMeta{Name: "ws-cleanup"},
+						Spec: tenancyv1alpha1.WorkspaceSpec{
+							Type: &tenancyv1alpha1.WorkspaceTypeReference{
+								Name: "universal",
+								Path: "root",
+							},
+							Location: &tenancyv1alpha1.WorkspaceLocation{
+								Selector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{
+										"name": corev1alpha1.RootShard,
+									},
 								},
 							},
 						},
-					},
-				}, metav1.CreateOptions{})
-				require.NoError(t, err, "failed to create workspace")
+					}, metav1.CreateOptions{})
+					require.NoError(c, err, "failed to create workspace")
+				}, wait.ForeverTestTimeout, 100*time.Millisecond)
 
 				t.Logf("Workspace should be scheduled")
 				kcptestinghelpers.EventuallyCondition(t, func() (conditions.Getter, error) {
@@ -110,7 +129,18 @@ func TestWorkspaceDeletion(t *testing.T) {
 					return workspace.Status.Phase == corev1alpha1.LogicalClusterPhaseReady, fmt.Sprintf("workspace phase is %s", workspace.Status.Phase)
 				}, wait.ForeverTestTimeout, time.Millisecond*100, "failed to wait for workspace %s to become ready", orgPath.Join(workspace.Name))
 
+				// Re-fetch the workspace so we have an up-to-date Spec.Cluster
+				// (the cluster hash). We need the hash to address the logical
+				// cluster *after* the workspace is hard-deleted: at that point
+				// the workspace path is no longer resolvable via the shard's
+				// local index, but single-segment cluster-name paths still
+				// short-circuit without an index lookup.
+				workspace, err := server.kcpClusterClient.Cluster(orgPath).TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
+				require.NoError(t, err, "failed to get workspace %s", workspace.Name)
+				require.NotEmpty(t, workspace.Spec.Cluster, "workspace %s has no spec.cluster set", workspace.Name)
+
 				workspaceCluster := orgPath.Join(workspace.Name)
+				workspaceClusterPath := logicalcluster.Name(workspace.Spec.Cluster).Path()
 
 				t.Logf("Wait for default namespace to be created")
 				kcptestinghelpers.Eventually(t, func() (bool, string) {
@@ -179,21 +209,33 @@ func TestWorkspaceDeletion(t *testing.T) {
 
 				t.Logf("Finally check if all resources has been removed")
 
-				// Note: we have to access the shard direction to access a logical cluster without workspace
+				// Note: we have to access the shard directly to access a
+				// logical cluster without a workspace. We must address it by
+				// the cluster hash (single-segment path), not the workspace
+				// path: once the workspace is hard-deleted, the shard's index
+				// has removed the path -> hash mapping, so path-based access
+				// would be rejected by the local proxy (404).
 				rootShardKubeClusterClient, err := kcpkubernetesclientset.NewForConfig(server.RunningServer.RootShardSystemMasterBaseConfig(t))
+				require.NoError(t, err, "failed to construct root shard client")
 
-				nslist, err := rootShardKubeClusterClient.Cluster(workspaceCluster).CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+				nslist, err := rootShardKubeClusterClient.Cluster(workspaceClusterPath).CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 				require.NoError(t, err, "failed to list namespaces in workspace %s", workspace.Name)
-				require.Equal(t, 0, len(nslist.Items))
+				require.Empty(t, nslist.Items)
 
-				cmlist, err := rootShardKubeClusterClient.Cluster(workspaceCluster).CoreV1().ConfigMaps(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+				cmlist, err := rootShardKubeClusterClient.Cluster(workspaceClusterPath).CoreV1().ConfigMaps(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 				require.NoError(t, err, "failed to list configmaps in workspace %s", workspace.Name)
-				require.Equal(t, 0, len(cmlist.Items))
+				require.Empty(t, cmlist.Items)
 			},
 		},
 		{
 			name: "nested workspace cleanup when an org workspace is deleted",
 			work: func(ctx context.Context, t *testing.T, server runningServer) {
+				// On the - kcptesting.WithRootShard the test doesn't
+				// need the root shard explicitly, it just needs to know
+				// the shard to get the client for the shard.
+				// In a future refactor the placement on the root shard
+				// could be removed and the client for the correct
+				// shards be build dynamically.
 				orgPath, _ := kcptesting.NewWorkspaceFixture(t, server, core.RootCluster.Path(), kcptesting.WithRootShard(), kcptesting.WithType(core.RootCluster.Path(), "organization"))
 
 				t.Logf("Should have finalizer in org workspace")
@@ -247,10 +289,13 @@ func TestWorkspaceDeletion(t *testing.T) {
 					if apierrors.IsNotFound(err) {
 						return true, err.Error()
 					}
-					require.NoError(t, err, "failed to list namespaces in sub-workspace")
+					// Any other error (e.g. 504 under CI load) is transient: keep polling.
+					if err != nil {
+						return false, fmt.Sprintf("failed to list namespaces in sub-workspace: %v", err)
+					}
 
 					return len(nslist.Items) == 0, toYAML(t, nslist)
-				}, wait.ForeverTestTimeout, 100*time.Millisecond)
+				}, nestedDeletionTimeout, 100*time.Millisecond)
 
 				t.Logf("Ensure namespace %q in the org workspace is deleted", ns.Name)
 				kcptestinghelpers.Eventually(t, func() (bool, string) {
@@ -259,10 +304,13 @@ func TestWorkspaceDeletion(t *testing.T) {
 					if apierrors.IsNotFound(err) {
 						return true, err.Error()
 					}
-					require.NoError(t, err, "failed to list namespaces in org workspace")
+					// Any other error (e.g. 504 under CI load) is transient: keep polling.
+					if err != nil {
+						return false, fmt.Sprintf("failed to list namespaces in org workspace: %v", err)
+					}
 
 					return len(nslist.Items) == 0, toYAML(t, nslist)
-				}, wait.ForeverTestTimeout, 100*time.Millisecond)
+				}, nestedDeletionTimeout, 100*time.Millisecond)
 
 				t.Logf("Ensure workspace in the org workspace is deleted")
 				kcptestinghelpers.Eventually(t, func() (bool, string) {
@@ -271,16 +319,19 @@ func TestWorkspaceDeletion(t *testing.T) {
 					if apierrors.IsNotFound(err) {
 						return true, err.Error()
 					}
-					require.NoError(t, err, "failed to list workspaces in org workspace")
+					// Any other error (e.g. 504 under CI load) is transient: keep polling.
+					if err != nil {
+						return false, fmt.Sprintf("failed to list workspaces in org workspace: %v", err)
+					}
 
 					return len(wslist.Items) == 0, toYAML(t, wslist)
-				}, wait.ForeverTestTimeout, 100*time.Millisecond)
+				}, nestedDeletionTimeout, 100*time.Millisecond)
 
 				t.Logf("Ensure the org workspace is deleted")
 				require.Eventually(t, func() bool {
 					_, err := rootShardKcpClusterClient.Cluster(core.RootCluster.Path()).TenancyV1alpha1().Workspaces().Get(ctx, orgPath.Base(), metav1.GetOptions{})
 					return apierrors.IsNotFound(err)
-				}, wait.ForeverTestTimeout, 100*time.Millisecond)
+				}, nestedDeletionTimeout, 100*time.Millisecond)
 			},
 		},
 	}

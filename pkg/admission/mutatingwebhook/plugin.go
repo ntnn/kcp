@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import (
 	"io"
 	"sync"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -42,8 +41,8 @@ import (
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
+	"github.com/kcp-dev/kcp/pkg/admission/clusterannotation"
 	kcpinitializers "github.com/kcp-dev/kcp/pkg/admission/initializers"
-	"github.com/kcp-dev/kcp/pkg/admission/validatingwebhook"
 )
 
 const (
@@ -123,22 +122,14 @@ func (p *Plugin) Admit(ctx context.Context, attr admission.Attributes, o admissi
 
 	plugin.SetExternalKubeClientSet(p.kubeClusterClient.Cluster(clusterName.Path()))
 	plugin.SetNamespaceInformer(p.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(clusterName))
-	plugin.SetHookSource(hookSource)
-	plugin.SetReadyFuncFromKCP(p.localKubeSharedInformerFactory.Core().V1().Namespaces().Cluster(clusterName))
+	plugin.SetAPISource(hookSource)
 
 	if err := plugin.ValidateInitialization(); err != nil {
 		return fmt.Errorf("error validating MutatingWebhook initialization: %w", err)
 	}
 
-	// Add cluster annotation on create
-	if attr.GetOperation() == admission.Create {
-		u, ok := attr.GetObject().(metav1.Object)
-		if !ok {
-			return fmt.Errorf("unexpected type %T", attr.GetObject())
-		}
-		if undo := validatingwebhook.SetClusterAnnotation(u, clusterName); undo != nil {
-			defer undo()
-		}
+	if undo := clusterannotation.Stamp(attr, clusterName); undo != nil {
+		defer undo()
 	}
 
 	return plugin.Admit(ctx, attr, o)

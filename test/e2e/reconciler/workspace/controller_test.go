@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,15 +18,18 @@ package workspace
 
 import (
 	"context"
-	"fmt"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/rest"
 
 	"github.com/kcp-dev/sdk/apis/core"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
@@ -41,6 +44,19 @@ import (
 	"github.com/kcp-dev/kcp/test/e2e/framework"
 )
 
+// adminWorkspaceClient returns a client against the Admin workspace
+// (/services/admin) of the server behind cfg.
+func adminWorkspaceClient(cfg *rest.Config) (kcpclientset.Interface, error) {
+	vwCfg := rest.CopyConfig(cfg)
+	u, err := url.Parse(cfg.Host)
+	if err != nil {
+		return nil, err
+	}
+	u.Path = "/services/admin"
+	vwCfg.Host = u.String()
+	return kcpclientset.NewForConfig(vwCfg)
+}
+
 func TestWorkspaceController(t *testing.T) {
 	t.Parallel()
 	framework.Suite(t, "control-plane")
@@ -48,6 +64,10 @@ func TestWorkspaceController(t *testing.T) {
 	type runningServer struct {
 		kcptestingserver.RunningServer
 		rootWorkspaceKcpClient, orgWorkspaceKcpClient kcpclientset.Interface
+		// cfg carries the client credentials, used to build a client against
+		// the Admin workspace (/services/admin): the unschedulable annotation
+		// is cache-owned and can only be changed through it.
+		cfg *rest.Config
 	}
 	var testCases = []struct {
 		name        string
@@ -59,8 +79,13 @@ func TestWorkspaceController(t *testing.T) {
 			work: func(ctx context.Context, t *testing.T, server runningServer) {
 				t.Helper()
 
-				wShard, err := server.rootWorkspaceKcpClient.CoreV1alpha1().Shards().Get(ctx, "root", metav1.GetOptions{})
-				require.NoError(t, err, "did not see root workspace shard")
+				adminClient, err := adminWorkspaceClient(server.cfg)
+				require.NoError(t, err)
+				var wShard *corev1alpha1.Shard
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					wShard, err = adminClient.CoreV1alpha1().Shards().Get(ctx, "root", metav1.GetOptions{})
+					require.NoError(c, err, "did not see root shard in the Admin workspace")
+				}, wait.ForeverTestTimeout, 100*time.Millisecond)
 
 				require.True(t, strings.HasPrefix(wShard.Spec.BaseURL, "https://"), "expected https:// root shard base URL, got=%q", wShard.Spec.BaseURL)
 				require.True(t, strings.HasPrefix(wShard.Spec.ExternalURL, "https://"), "expected https:// root shard external URL, got=%q", wShard.Spec.ExternalURL)
@@ -73,8 +98,12 @@ func TestWorkspaceController(t *testing.T) {
 				// note that the root shard always exists if not deleted
 
 				t.Logf("Create a workspace with a shard")
-				workspace, err := server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Create(ctx, &tenancyv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "steve"}}, metav1.CreateOptions{})
-				require.NoError(t, err, "failed to create workspace")
+				var workspace *tenancyv1alpha1.Workspace
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					var err error
+					workspace, err = server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Create(ctx, &tenancyv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "steve"}}, metav1.CreateOptions{})
+					require.NoError(c, err, "failed to create workspace")
+				}, wait.ForeverTestTimeout, 100*time.Millisecond)
 				server.RunningServer.Artifact(t, func() (runtime.Object, error) {
 					return server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
 				})
@@ -82,64 +111,6 @@ func TestWorkspaceController(t *testing.T) {
 				kcptestinghelpers.EventuallyCondition(t, func() (utilconditions.Getter, error) {
 					return server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
 				}, kcptestinghelpers.Is(tenancyv1alpha1.WorkspaceScheduled))
-			},
-		},
-		{
-			name:        "add a shard after a workspace is unschedulable, expect it to be scheduled",
-			destructive: true,
-			work: func(ctx context.Context, t *testing.T, server runningServer) {
-				t.Helper()
-				var previouslyValidShard corev1alpha1.Shard
-				t.Logf("Get a list of current shards so that we can schedule onto a valid shard later")
-				shards, err := server.rootWorkspaceKcpClient.CoreV1alpha1().Shards().List(ctx, metav1.ListOptions{})
-				require.NoError(t, err)
-				if len(shards.Items) == 0 {
-					t.Fatalf("expected to get some shards but got none")
-				}
-				previouslyValidShard = shards.Items[0]
-				t.Logf("Delete all pre-configured shards, we have to control the creation of the workspace shards in this test")
-				err = server.rootWorkspaceKcpClient.CoreV1alpha1().Shards().DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{})
-				require.NoError(t, err)
-
-				t.Logf("Create a workspace without shards")
-				workspace, err := server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Create(ctx, &tenancyv1alpha1.Workspace{ObjectMeta: metav1.ObjectMeta{Name: "steve"}}, metav1.CreateOptions{})
-				require.NoError(t, err, "failed to create workspace")
-				server.RunningServer.Artifact(t, func() (runtime.Object, error) {
-					return server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
-				})
-
-				t.Logf("Expect workspace to be unschedulable")
-				kcptestinghelpers.EventuallyCondition(t, func() (utilconditions.Getter, error) {
-					return server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
-				}, kcptestinghelpers.IsNot(tenancyv1alpha1.WorkspaceScheduled).WithReason(tenancyv1alpha1.WorkspaceReasonUnschedulable))
-
-				t.Logf("Add previously removed shard %q", previouslyValidShard.Name)
-				newShard, err := server.rootWorkspaceKcpClient.CoreV1alpha1().Shards().Create(ctx, &corev1alpha1.Shard{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   previouslyValidShard.Name,
-						Labels: previouslyValidShard.Labels,
-					},
-					Spec: corev1alpha1.ShardSpec{
-						BaseURL:     previouslyValidShard.Spec.BaseURL,
-						ExternalURL: previouslyValidShard.Spec.ExternalURL,
-					},
-				}, metav1.CreateOptions{})
-				require.NoError(t, err, "failed to create workspace shard")
-				server.RunningServer.Artifact(t, func() (runtime.Object, error) {
-					return server.rootWorkspaceKcpClient.CoreV1alpha1().Shards().Get(ctx, newShard.Name, metav1.GetOptions{})
-				})
-
-				t.Logf("Expect workspace to be scheduled to the shard and show the external URL")
-				kcptestinghelpers.EventuallyCondition(t, func() (utilconditions.Getter, error) {
-					return server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
-				}, kcptestinghelpers.Is(tenancyv1alpha1.WorkspaceScheduled))
-
-				workspace, err = server.orgWorkspaceKcpClient.TenancyV1alpha1().Workspaces().Get(ctx, workspace.Name, metav1.GetOptions{})
-				require.NoError(t, err)
-				orgLogicalCluster, err := server.orgWorkspaceKcpClient.CoreV1alpha1().LogicalClusters().Get(ctx, corev1alpha1.LogicalClusterName, metav1.GetOptions{})
-				require.NoError(t, err)
-				path := fmt.Sprintf("%s:%s", orgLogicalCluster.Annotations[core.LogicalClusterPathAnnotationKey], workspace.Name)
-				require.Emptyf(t, cmp.Diff(previouslyValidShard.Spec.BaseURL+"/clusters/"+path, workspace.Spec.URL), "incorrect URL")
 			},
 		},
 	}
@@ -155,9 +126,6 @@ func TestWorkspaceController(t *testing.T) {
 
 			server := sharedServer
 			if testCase.destructive {
-				// Destructive tests require their own server
-				//
-				// TODO(marun) Could the testing currently requiring destructive e2e be performed with less cost?
 				server = kcptesting.PrivateKcpServer(t)
 			}
 
@@ -173,6 +141,7 @@ func TestWorkspaceController(t *testing.T) {
 				RunningServer:          server,
 				rootWorkspaceKcpClient: kcpClient.Cluster(core.RootCluster.Path()),
 				orgWorkspaceKcpClient:  kcpClient.Cluster(orgPath),
+				cfg:                    cfg,
 			})
 		})
 	}

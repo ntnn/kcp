@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,6 +20,9 @@ package v1alpha2
 
 // ScopedPermissionClaimApplyConfiguration represents a declarative configuration of the ScopedPermissionClaim type for use
 // with apply.
+//
+// ScopedPermissionClaim embeds a PermissionClaim and adds a selector to
+// scope down access to objects of the claimed resource.
 type ScopedPermissionClaimApplyConfiguration struct {
 	PermissionClaimApplyConfiguration `json:",inline"`
 	Selector                          *PermissionClaimSelectorApplyConfiguration `json:"selector,omitempty"`
@@ -62,6 +65,14 @@ func (b *ScopedPermissionClaimApplyConfiguration) WithVerbs(values ...string) *S
 // If called multiple times, the IdentityHash field is set to the value of the last call.
 func (b *ScopedPermissionClaimApplyConfiguration) WithIdentityHash(value string) *ScopedPermissionClaimApplyConfiguration {
 	b.PermissionClaimApplyConfiguration.IdentityHash = &value
+	return b
+}
+
+// WithDefaultSelector sets the DefaultSelector field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DefaultSelector field is set to the value of the last call.
+func (b *ScopedPermissionClaimApplyConfiguration) WithDefaultSelector(value *PermissionClaimSelectorApplyConfiguration) *ScopedPermissionClaimApplyConfiguration {
+	b.PermissionClaimApplyConfiguration.DefaultSelector = value
 	return b
 }
 

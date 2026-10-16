@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,10 @@ import (
 
 // PartitionSpecApplyConfiguration represents a declarative configuration of the PartitionSpec type for use
 // with apply.
+//
+// PartitionSpec records the values defining the partition along multiple dimensions.
 type PartitionSpecApplyConfiguration struct {
+	// selector (optional) is a label selector that filters shard targets.
 	Selector *v1.LabelSelectorApplyConfiguration `json:"selector,omitempty"`
 }
 

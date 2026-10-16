@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -40,16 +40,12 @@ func (c *CacheV1alpha1ClusterClient) Cluster(clusterPath logicalcluster.Path) ca
 	return &CacheV1alpha1Client{Fake: c.Fake, ClusterPath: clusterPath}
 }
 
-func (c *CacheV1alpha1ClusterClient) CachedObjects() kcpcachev1alpha1.CachedObjectClusterInterface {
-	return newFakeCachedObjectClusterClient(c)
+func (c *CacheV1alpha1ClusterClient) ClusterCachedResources() kcpcachev1alpha1.ClusterCachedResourceClusterInterface {
+	return newFakeClusterCachedResourceClusterClient(c)
 }
 
-func (c *CacheV1alpha1ClusterClient) CachedResources() kcpcachev1alpha1.CachedResourceClusterInterface {
-	return newFakeCachedResourceClusterClient(c)
-}
-
-func (c *CacheV1alpha1ClusterClient) CachedResourceEndpointSlices() kcpcachev1alpha1.CachedResourceEndpointSliceClusterInterface {
-	return newFakeCachedResourceEndpointSliceClusterClient(c)
+func (c *CacheV1alpha1ClusterClient) ClusterCachedResourceEndpointSlices() kcpcachev1alpha1.ClusterCachedResourceEndpointSliceClusterInterface {
+	return newFakeClusterCachedResourceEndpointSliceClusterClient(c)
 }
 
 type CacheV1alpha1Client struct {
@@ -57,16 +53,12 @@ type CacheV1alpha1Client struct {
 	ClusterPath logicalcluster.Path
 }
 
-func (c *CacheV1alpha1Client) CachedObjects() cachev1alpha1.CachedObjectInterface {
-	return newFakeCachedObjectClient(c.Fake, c.ClusterPath)
+func (c *CacheV1alpha1Client) ClusterCachedResources() cachev1alpha1.ClusterCachedResourceInterface {
+	return newFakeClusterCachedResourceClient(c.Fake, c.ClusterPath)
 }
 
-func (c *CacheV1alpha1Client) CachedResources() cachev1alpha1.CachedResourceInterface {
-	return newFakeCachedResourceClient(c.Fake, c.ClusterPath)
-}
-
-func (c *CacheV1alpha1Client) CachedResourceEndpointSlices() cachev1alpha1.CachedResourceEndpointSliceInterface {
-	return newFakeCachedResourceEndpointSliceClient(c.Fake, c.ClusterPath)
+func (c *CacheV1alpha1Client) ClusterCachedResourceEndpointSlices() cachev1alpha1.ClusterCachedResourceEndpointSliceInterface {
+	return newFakeClusterCachedResourceEndpointSliceClient(c.Fake, c.ClusterPath)
 }
 
 // RESTClient returns a RESTClient that is used to communicate

@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -54,13 +54,13 @@ func TestServerCreateConfigMap(t *testing.T) {
 		ConfigMaps(metav1.NamespaceDefault)
 
 	_, err := cmi.Create(context.Background(), configmap, metav1.CreateOptions{})
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	cm, err := cmi.Get(context.Background(), configmap.ObjectMeta.Name, metav1.GetOptions{})
-	require.Nil(t, err)
+	require.NoError(t, err)
 	require.NotNil(t, cm)
 	require.Equal(t, configmap.Data, cm.Data)
 
 	err = cmi.Delete(context.Background(), configmap.ObjectMeta.Name, metav1.DeleteOptions{})
-	require.Nil(t, err)
+	require.NoError(t, err)
 }

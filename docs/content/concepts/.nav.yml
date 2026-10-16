@@ -1,0 +1,10 @@
+nav:
+    - index.md
+    - terminology.md
+    - quickstart-tenancy-and-apis.md
+    - Workspaces: workspaces
+    - APIs: apis
+    - Authentication: authentication
+    - Authorization: authorization
+    - Sharding: sharding
+    - "*"

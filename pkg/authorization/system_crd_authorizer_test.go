@@ -29,9 +29,13 @@ import (
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 
 	"github.com/kcp-dev/logicalcluster/v3"
+
+	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
 )
 
 func TestSystemCRDAuthorizerIdentityStatus(t *testing.T) {
+	t.Parallel()
+
 	ctx := genericapirequest.WithCluster(context.Background(), genericapirequest.Cluster{Name: logicalcluster.Name("workspace")})
 	for _, resource := range []struct {
 		group, version, resource string
@@ -40,10 +44,12 @@ func TestSystemCRDAuthorizerIdentityStatus(t *testing.T) {
 		{"apis.kcp.io", "v1alpha2", "apiexports"},
 		{"apis.kcp.io", "v1alpha1", "apibindings"},
 		{"apis.kcp.io", "v1alpha2", "apibindings"},
-		{"cache.kcp.io", "v1alpha1", "cachedresources"},
+		{"cache.kcp.io", "v1alpha1", "clustercachedresources"},
 	} {
 		for _, verb := range []string{"get", "update", "patch"} {
 			t.Run(resource.resource+"/"+resource.version+"/"+verb, func(t *testing.T) {
+				t.Parallel()
+
 				called := false
 				delegate := authorizer.AuthorizerFunc(func(context.Context, authorizer.Attributes) (authorizer.Decision, string, error) {
 					called = true
@@ -90,16 +96,20 @@ func TestSystemCRDAuthorizerIdentityStatus(t *testing.T) {
 }
 
 func TestSystemCRDAuthorizerDelegation(t *testing.T) {
+	t.Parallel()
+
 	ctx := genericapirequest.WithCluster(context.Background(), genericapirequest.Cluster{Name: logicalcluster.Name("workspace")})
 	for _, resource := range []struct {
 		group, resource string
 	}{
-		{"cache.kcp.io", "cachedresourceendpointslices"},
+		{"cache.kcp.io", "clustercachedresourceendpointslices"},
 		{"apis.kcp.io", "apiexportendpointslices"},
 		{"example.org", "cachedresources"},
 		{"example.org", "apiexports"},
 	} {
 		t.Run(resource.group+"/"+resource.resource, func(t *testing.T) {
+			t.Parallel()
+
 			called := false
 			guard := NewSystemCRDAuthorizer(authorizer.AuthorizerFunc(func(context.Context, authorizer.Attributes) (authorizer.Decision, string, error) {
 				called = true
@@ -110,6 +120,46 @@ func TestSystemCRDAuthorizerDelegation(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, authorizer.DecisionAllow, decision)
 			require.True(t, called)
+		})
+	}
+}
+
+func TestSystemCRDAuthorizerCrossShardRotation(t *testing.T) {
+	t.Parallel()
+
+	ctx := genericapirequest.WithCluster(context.Background(), genericapirequest.Cluster{Name: logicalcluster.Name("workspace")})
+	for _, tc := range []struct {
+		group, resource string
+		delegated       bool
+	}{
+		{"apis.kcp.io", "apiexports", true},
+		{"apis.kcp.io", "apibindings", false},
+		{"cache.kcp.io", "clustercachedresources", false},
+	} {
+		t.Run(tc.resource, func(t *testing.T) {
+			t.Parallel()
+
+			for _, decision := range []authorizer.Decision{authorizer.DecisionAllow, authorizer.DecisionDeny} {
+				called := false
+				guard := NewSystemCRDAuthorizer(authorizer.AuthorizerFunc(func(context.Context, authorizer.Attributes) (authorizer.Decision, string, error) {
+					called = true
+					return decision, "RBAC", nil
+				}))
+				attr := authorizer.AttributesRecord{
+					User: &user.DefaultInfo{
+						Name: "shard-controller", Groups: []string{bootstrap.SystemExternalLogicalClusterAdmin},
+					},
+					APIGroup: tc.group, Resource: tc.resource, Subresource: "status", Verb: "update", ResourceRequest: true,
+				}
+				got, _, err := guard.Authorize(ctx, attr)
+				require.NoError(t, err)
+				require.Equal(t, tc.delegated, called)
+				if tc.delegated {
+					require.Equal(t, decision, got, "cross-shard status access must still require RBAC")
+				} else {
+					require.Equal(t, authorizer.DecisionDeny, got)
+				}
+			}
 		})
 	}
 }

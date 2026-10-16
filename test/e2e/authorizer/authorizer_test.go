@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -368,8 +368,14 @@ func TestAuthorizer(t *testing.T) {
 				}
 
 				t.Logf("checking if review response includes permissions granted by system:admin ClusterRole bound in %s", ws)
-				return assert.Contains(t, review.Status.ResourceRules, authorizationv1.ResourceRule{Verbs: []string{"*"}, APIGroups: []string{""}, Resources: []string{"namespaces"}}), "returned resource rules do not contain '*' verb for namespaces."
-			}, wait.ForeverTestTimeout, time.Millisecond*100, "SelfSubjectRulesReview response in %s should contain resource rule for namespaces", org2.Join("workspace1"))
+				expected := authorizationv1.ResourceRule{Verbs: []string{"*"}, APIGroups: []string{""}, Resources: []string{"namespaces"}}
+				for _, rule := range review.Status.ResourceRules {
+					if assert.ObjectsAreEqual(expected, rule) {
+						return true, ""
+					}
+				}
+				return false, fmt.Sprintf("returned resource rules %v do not contain '*' verb for namespaces", review.Status.ResourceRules)
+			}, wait.ForeverTestTimeout, time.Millisecond*100, "SelfSubjectRulesReview response in %s should contain resource rule for namespaces", ws)
 		}},
 	}
 

@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,3 +21,5 @@ package v1beta1
 type CertificateSigningRequestClusterExpansion interface{}
 
 type ClusterTrustBundleClusterExpansion interface{}
+
+type PodCertificateRequestClusterExpansion interface{}

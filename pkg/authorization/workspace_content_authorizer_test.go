@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -66,6 +66,7 @@ func (r *recordingAuthorizer) Authorize(ctx context.Context, a authorizer.Attrib
 }
 
 func TestWorkspaceContentAuthorizer(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		testName              string
 		requestedWorkspace    string
@@ -73,6 +74,8 @@ func TestWorkspaceContentAuthorizer(t *testing.T) {
 		wantReason, wantError string
 		wantDecision          authorizer.Decision
 		deepSARHeader         bool
+		path                  string
+		resourceRequest       bool
 	}{
 		{
 			testName: "unknown requested workspace",
@@ -226,11 +229,33 @@ func TestWorkspaceContentAuthorizer(t *testing.T) {
 			wantDecision:       authorizer.DecisionAllow,
 			wantReason:         "delegating due to deep SAR request",
 		},
+		{
+			testName: "shard-level /metrics path bypasses verb=access gate",
+
+			requestedWorkspace: "root:ready",
+			requestingUser:     &user.DefaultInfo{Name: "metrics-scraper"},
+			path:               "/metrics",
+			resourceRequest:    false,
+			wantDecision:       authorizer.DecisionAllow,
+			wantReason:         "delegating due to shard-level path",
+		},
+		{
+			testName: "resource request to /metrics does NOT bypass (defense in depth)",
+
+			requestedWorkspace: "root:ready",
+			requestingUser:     &user.DefaultInfo{Name: "user-unknown"},
+			path:               "/metrics",
+			resourceRequest:    true,
+			wantDecision:       authorizer.DecisionNoOpinion,
+			wantReason:         "no verb=access permission on /",
+		},
 	} {
 		t.Run(tt.testName, func(t *testing.T) {
-			ctx := context.Background()
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
 
-			localKubeClient := kcpfakeclient.NewSimpleClientset(
+			localKubeClient := kcpfakeclient.NewSimpleClientset( //nolint:staticcheck
 				&v1.ClusterRole{
 					ObjectMeta: metav1.ObjectMeta{
 						Annotations: map[string]string{
@@ -326,16 +351,17 @@ func TestWorkspaceContentAuthorizer(t *testing.T) {
 					},
 				},
 			)
-			globalKubeClient := kcpfakeclient.NewSimpleClientset() // TODO(sttts): add some global fixtures
+			globalKubeClient := kcpfakeclient.NewSimpleClientset() //nolint:staticcheck // TODO(sttts): add some global fixtures
 			local := kcpkubernetesinformers.NewSharedInformerFactory(localKubeClient, controller.NoResyncPeriodFunc())
 			global := kcpkubernetesinformers.NewSharedInformerFactory(globalKubeClient, controller.NoResyncPeriodFunc())
-			var syncs []cache.InformerSynced
-			for _, inf := range []cache.SharedIndexInformer{
+			informers := []cache.SharedIndexInformer{
 				local.Rbac().V1().ClusterRoles().Informer(),
 				local.Rbac().V1().ClusterRoleBindings().Informer(),
 				global.Rbac().V1().ClusterRoles().Informer(),
 				global.Rbac().V1().ClusterRoleBindings().Informer(),
-			} {
+			}
+			syncs := make([]cache.InformerSynced, 0, len(informers))
+			for _, inf := range informers {
 				go inf.Run(ctx.Done())
 				syncs = append(syncs, inf.HasSynced)
 			}
@@ -376,7 +402,9 @@ func TestWorkspaceContentAuthorizer(t *testing.T) {
 			}
 			ctx = request.WithCluster(ctx, requestedCluster)
 			attr := authorizer.AttributesRecord{
-				User: tt.requestingUser,
+				User:            tt.requestingUser,
+				Path:            tt.path,
+				ResourceRequest: tt.resourceRequest,
 			}
 			if tt.deepSARHeader {
 				ctx = context.WithValue(ctx, deepSARKey, true)

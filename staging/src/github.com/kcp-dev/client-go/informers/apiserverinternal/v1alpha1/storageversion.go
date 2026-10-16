@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ func NewStorageVersionClusterInformer(client kcpkubernetes.ClusterInterface, res
 // one. This reduces memory footprint and number of connections to the server.
 func NewFilteredStorageVersionClusterInformer(client kcpkubernetes.ClusterInterface, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions kcpinternalinterfaces.TweakListOptionsFunc) kcpcache.ScopeableSharedIndexInformer {
 	return kcpinformers.NewSharedIndexInformer(
-		&cache.ListWatch{
+		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
 			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
@@ -77,7 +77,7 @@ func NewFilteredStorageVersionClusterInformer(client kcpkubernetes.ClusterInterf
 				}
 				return client.InternalV1alpha1().StorageVersions().Watch(context.Background(), options)
 			},
-		},
+		}, client),
 		&apiapiserverinternalv1alpha1.StorageVersion{},
 		resyncPeriod,
 		indexers,

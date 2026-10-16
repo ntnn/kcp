@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -37,6 +37,22 @@ const (
 
 	IdentityVerificationFailedReason = "IdentityVerificationFailed"
 	IdentityGenerationFailedReason   = "IdentityGenerationFailed"
+
+	// IdentityShared is an informational condition set when this export's
+	// identity secret is referenced by more than one APIExport, listing the
+	// co-owners in the message. Shared identities are rotation candidates.
+	IdentityShared conditionsv1alpha1.ConditionType = "IdentityShared"
+
+	// IdentityRotationInProgress is an informational condition set while an
+	// APIExportIdentityRotation is active for this export, pointing at the
+	// rotation object in the message.
+	IdentityRotationInProgress conditionsv1alpha1.ConditionType = "IdentityRotationInProgress"
+
+	// ClaimIdentityRotated is an informational condition set on a claiming
+	// APIExport whose permission claims reference an alias (pre-rotation)
+	// identity hash of another export; the message names the canonical hash
+	// to migrate to and, if set, the alias retirement deadline.
+	ClaimIdentityRotated conditionsv1alpha1.ConditionType = "ClaimIdentityRotated"
 
 	APIExportVirtualWorkspaceURLsReady conditionsv1alpha1.ConditionType = "VirtualWorkspaceURLsReady"
 
@@ -200,9 +216,6 @@ type ResourceSchemaStorageVirtual struct {
 	// in a "url" field in its status. The object can be of any kind.
 	Reference corev1.TypedLocalObjectReference `json:"reference"`
 
-	// IdentityHash is the identity of the virtual resource.
-	IdentityHash string `json:"identityHash"`
-
 	// Resource selector TBD.
 	// We are not sure if it belongs here.
 }
@@ -233,6 +246,8 @@ type LocalAPIExportPolicy struct{}
 // PermissionClaim identifies an object by GR and identity hash.
 // Its purpose is to determine the added permissions that a service provider may
 // request and that a consumer may accept and allow the service provider access to.
+//
+// +kubebuilder:validation:XValidation:rule="!self.resource.contains('/') || !has(self.defaultSelector)",message="defaultSelector is not allowed on subresource claims"
 type PermissionClaim struct {
 	GroupResource `json:",inline"`
 
@@ -248,11 +263,23 @@ type PermissionClaim struct {
 	// This is the identity for a given APIExport that the APIResourceSchema belongs to.
 	// The hash can be found on APIExport and APIResourceSchema's status.
 	// It will be empty for core types.
-	// Note that one must look this up for a particular KCP instance.
+	// Note that one must look this up for a particular kcp instance.
 	//
 	// +kubebuilder:default:=""
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
+
+	// defaultSelector is the default selector to use when creating APIBindings
+	// via WorkspaceType's defaultAPIBindings. If not set, the APIBinding will
+	// default to matchAll: true.
+	//
+	// This allows API providers to suggest a default scope for permission claims
+	// that will be used when workspaces are automatically created with default
+	// APIBindings. Users can always override the default selector by accepting the
+	// claim with a different selector or by manually creating APIBindings with a custom selector.
+	//
+	// +optional
+	DefaultSelector *PermissionClaimSelector `json:"defaultSelector,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.__namespace__) || has(self.name)",message="at least one field must be set"
@@ -310,10 +337,13 @@ type GroupResource struct {
 	Group string `json:"group,omitempty"`
 
 	// resource is the name of the resource.
+	// A subresource may be claimed as "resource/subresource",
+	// e.g. "serviceaccounts/token", in the style of RBAC rules.
 	// Note: it is worth noting that you can not ask for permissions for resource provided by a CRD
 	// not provided by an api export.
 	//
-	// +kubebuilder:validation:Pattern=`^[a-z][-a-z0-9]*[a-z0-9]$`
+	// +kubebuilder:validation:Pattern=`^[a-z][-a-z0-9]*[a-z0-9](/[a-z][-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=127
 	// +required
 	// +kubebuilder:validation:Required
 	Resource string `json:"resource"`
@@ -342,6 +372,17 @@ type APIExportStatus struct {
 	// +optional
 	// +listType=set
 	IdentityKeyHashes []string `json:"identityKeyHashes,omitempty"`
+
+	// identityAliasHashes lists previous identity hashes of this APIExport
+	// that are still honored as equivalents of the current identityHash
+	// while a rotation's alias window is active. Permission claims and
+	// wildcard consumers referencing an alias hash keep resolving to this
+	// export until the alias is retired. Managed by the identity rotation
+	// controller.
+	//
+	// +optional
+	// +listType=set
+	IdentityAliasHashes []string `json:"identityAliasHashes,omitempty"`
 
 	// conditions is a list of conditions that apply to the APIExport.
 	//

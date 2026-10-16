@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import (
 )
 
 func CreateWorkspaceType(t *testing.T, ctx context.Context, client kcpclientset.ClusterInterface, workspace logicalcluster.Path, name string, authConfigNames ...string) string {
-	configs := []tenancyv1alpha1.AuthenticationConfigurationReference{}
+	configs := make([]tenancyv1alpha1.AuthenticationConfigurationReference, 0, len(authConfigNames))
 	for _, name := range authConfigNames {
 		configs = append(configs, tenancyv1alpha1.AuthenticationConfigurationReference{
 			Name: name,

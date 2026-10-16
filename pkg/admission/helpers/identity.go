@@ -24,10 +24,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apiserver/pkg/admission"
 	"k8s.io/apiserver/pkg/authentication/user"
+
+	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
 )
 
 // ValidateIdentityStatus reserves identity assignment and key publication for
-// trusted system controllers, which use the privileged loopback credentials.
+// trusted system controllers. Assignment requires privileged loopback credentials;
+// cross-shard rotation credentials may update an existing APIExport's keys.
 // Once assigned, the identity cannot change, even for privileged callers.
 func ValidateIdentityStatus(a admission.Attributes) error {
 	if a.GetOperation() != admission.Create && a.GetOperation() != admission.Update {
@@ -55,7 +58,10 @@ func ValidateIdentityStatus(a admission.Attributes) error {
 		if identity != oldIdentity {
 			return admission.NewForbidden(a, field.Forbidden(field.NewPath("status", "identityHash"), "may only be assigned by a trusted system controller"))
 		}
-		if !slices.Equal(keys, oldKeys) {
+		rotationController := oldIdentity != "" &&
+			a.GetResource().Group == "apis.kcp.io" && a.GetResource().Resource == "apiexports" &&
+			a.GetUserInfo() != nil && slices.Contains(a.GetUserInfo().GetGroups(), bootstrap.SystemExternalLogicalClusterAdmin)
+		if !slices.Equal(keys, oldKeys) && !rotationController {
 			return admission.NewForbidden(a, field.Forbidden(field.NewPath("status", "identityKeyHashes"), "may only be changed by a trusted system controller"))
 		}
 	}

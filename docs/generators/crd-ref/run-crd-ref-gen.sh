@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2021 The KCP Authors.
+# Copyright 2021 The kcp Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -51,13 +51,13 @@ for file in ${DESTINATION}/*.md; do
     mv "${file}" "${DESTINATION}/${apigroup}/${crdname}.md"
 done
 
-# Generate a .pages config file to override title case being applied to
+# Generate a .nav.yml config file to override title case being applied to
 # folder names by default (https://github.com/mkdocs/mkdocs/issues/2086)
-echo "nav:" > ${DESTINATION}/.pages
+echo "nav:" > ${DESTINATION}/.nav.yml
 for dir in ${DESTINATION}/*/; do
     if [ -d "${dir}" ]; then
         echo ${dir}
     fi
     apigroup=$(basename $dir)
-    echo "  - ${apigroup}: ${apigroup}" >> ${DESTINATION}/.pages
+    echo "  - ${apigroup}: ${apigroup}" >> ${DESTINATION}/.nav.yml
 done

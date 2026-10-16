@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/component-base/featuregate"
 	logsapi "k8s.io/component-base/logs/api/v1"
+	kubefeatures "k8s.io/kubernetes/pkg/features"
 )
 
 const (
@@ -60,6 +61,31 @@ const (
 	// users into workspaces from foreign OIDC issuers. This feature can be individually enabled on each shard and
 	// the front-proxy.
 	WorkspaceAuthentication featuregate.Feature = "WorkspaceAuthentication"
+
+	// owner: @ntnn
+	// alpha: v0.1
+	// Enables migrating logical clusters between shards.
+	LogicalClusterMigration featuregate.Feature = "LogicalClusterMigration"
+
+	// owner: @mjudeikis
+	// alpha: v0.1
+	// Enables rotating APIExport identities via APIExportIdentityRotation
+	// objects: the rotation controller flips the export identity and
+	// publishes the old one as an alias, and the per-shard identity migrator
+	// drains bound resource instances onto the new identity.
+	APIExportIdentityRotation featuregate.Feature = "APIExportIdentityRotation"
+)
+
+// Re-export upstream feature gates used by kcp server logic so callers import
+// only this package instead of mixing kcp and upstream feature imports.
+// Mirrored from k8s.io/apiserver/pkg/features.
+const (
+	// StorageVersionAPI enables the storage version API (alpha since k8s 1.20, off by default).
+	// When enabled in kcp, WithStorageVersionPrecondition is applied in the handler chain to
+	// block write requests to resources whose storage versions have not yet converged across
+	// all kcp shards during a rolling upgrade.
+	// See: https://github.com/kcp-dev/kubernetes/pull/185
+	StorageVersionAPI = genericfeatures.StorageVersionAPI
 )
 
 // DefaultFeatureGate exposes the upstream feature gate, but with our gate setting applied.
@@ -106,7 +132,7 @@ func featureSpecAtEmulationVersion(v featuregate.VersionedSpecs, emulationVersio
 }
 
 func (f *kcpFeatureGate) String() string {
-	pairs := []string{}
+	pairs := make([]string, 0, len(defaultVersionedGenericControlPlaneFeatureGates))
 	emulatedVersion := utilfeature.DefaultMutableFeatureGate.EmulationVersion()
 
 	for featureName, versionedSpecs := range defaultVersionedGenericControlPlaneFeatureGates {
@@ -141,6 +167,17 @@ var defaultVersionedGenericControlPlaneFeatureGates = map[featuregate.Feature]fe
 	WorkspaceAuthentication: {
 		{Version: version.MustParse("1.32"), Default: false, PreRelease: featuregate.Alpha},
 	},
+	LogicalClusterMigration: {
+		{Version: version.MustParse("1.32"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	APIExportIdentityRotation: {
+		{Version: version.MustParse("1.32"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	// StorageVersionAPI mirrors the upstream k8s gate; kcp keeps it Alpha/off-by-default.
+	// Must be listed here so kcp's feature gate machinery tracks it and exposes it via --feature-gates.
+	genericfeatures.StorageVersionAPI: {
+		{Version: version.MustParse("1.20"), Default: false, PreRelease: featuregate.Alpha},
+	},
 	// inherited features from generic apiserver, relisted here to get a conflict if it is changed
 	// unintentionally on either side:
 	genericfeatures.APIResponseCompression: {
@@ -148,9 +185,37 @@ var defaultVersionedGenericControlPlaneFeatureGates = map[featuregate.Feature]fe
 		{Version: version.MustParse("1.16"), Default: true, PreRelease: featuregate.Beta},
 	},
 
+	genericfeatures.ConsistentListFromCache: {
+		{Version: version.MustParse("1.28"), Default: false, PreRelease: featuregate.Alpha},
+		{Version: version.MustParse("1.31"), Default: true, PreRelease: featuregate.Beta},
+		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+	},
+
+	genericfeatures.ListFromCacheSnapshot: {
+		{Version: version.MustParse("1.33"), Default: false, PreRelease: featuregate.Alpha},
+		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.Beta},
+	},
+
 	genericfeatures.OpenAPIEnums: {
 		{Version: version.MustParse("1.23"), Default: false, PreRelease: featuregate.Alpha},
 		{Version: version.MustParse("1.24"), Default: true, PreRelease: featuregate.Beta},
+	},
+
+	genericfeatures.StreamingCollectionEncodingToJSON: {
+		{Version: version.MustParse("1.33"), Default: true, PreRelease: featuregate.Beta},
+		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+	},
+
+	genericfeatures.StreamingCollectionEncodingToProtobuf: {
+		{Version: version.MustParse("1.33"), Default: true, PreRelease: featuregate.Beta},
+		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.GA, LockToDefault: true},
+	},
+
+	genericfeatures.WatchList: {
+		{Version: version.MustParse("1.27"), Default: false, PreRelease: featuregate.Alpha},
+		{Version: version.MustParse("1.32"), Default: true, PreRelease: featuregate.Beta},
+		{Version: version.MustParse("1.33"), Default: false, PreRelease: featuregate.Beta},
+		{Version: version.MustParse("1.34"), Default: true, PreRelease: featuregate.Beta},
 	},
 
 	logsapi.LoggingBetaOptions: {
@@ -168,6 +233,23 @@ func disableFeatures() error {
 		// We disable SizeBasedListCostEstimate by default in kcp as stats collector does not have cluster awarness yet.
 		// We add this here to track changes in future k8s releases.
 		genericfeatures.SizeBasedListCostEstimate: false,
+
+		// UnknownVersionInteroperabilityProxy causes the apiserver to
+		// connect to etcd before starting up - including before
+		// embeddedetcd is started. The feature allows an apiserver to
+		// proxy to another apiserver in the fleet in case a request
+		// cannot be handled due to the version not being known by the
+		// apiserver.
+		genericfeatures.UnknownVersionInteroperabilityProxy: false,
+
+		// DynamicResourceAllocation is irrelevant in kcp.
+		kubefeatures.DRAExtendedResource: false,
+
+		// WatchCacheInitializationPostStartHook blocks /readyz until
+		// all built-in APIs report ready. This isn't a problem for kcp
+		// but causes the e2e home workspace tests to fail.
+		// Disabling the feature gate for now and fixing the tests later.
+		genericfeatures.WatchCacheInitializationPostStartHook: false,
 	}
 	for f, v := range toDisable {
 		err := utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("%s=%v", f, v))

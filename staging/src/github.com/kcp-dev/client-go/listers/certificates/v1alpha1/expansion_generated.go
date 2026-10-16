@@ -1,5 +1,5 @@
 /*
-Copyright The KCP Authors.
+Copyright The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,7 +21,3 @@ package v1alpha1
 // ClusterTrustBundleClusterListerExpansion allows custom methods to be added to
 // ClusterTrustBundleClusterLister.
 type ClusterTrustBundleClusterListerExpansion interface{}
-
-// PodCertificateRequestClusterListerExpansion allows custom methods to be added to
-// PodCertificateRequestClusterLister.
-type PodCertificateRequestClusterListerExpansion interface{}

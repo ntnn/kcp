@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 )
 
 func TestIndexAPIBindingByAPIExport(t *testing.T) {
+	t.Parallel()
 	tests := map[string]struct {
 		obj     interface{}
 		want    []string
@@ -80,6 +81,7 @@ func TestIndexAPIBindingByAPIExport(t *testing.T) {
 
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			got, err := IndexAPIBindingByAPIExport(tt.obj)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("IndexAPIBindingByAPIExport() error = %v, wantErr %v", err, tt.wantErr)

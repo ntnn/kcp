@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The KCP Authors.
+Copyright 2021 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,11 +33,10 @@ func init() {
 		panic(err)
 	}
 
-	DefaultTokenAuthFile = filepath.Join(repo, "test", "e2e", "framework", "auth-tokens.csv")
+	DefaultTokenAuthFile = filepath.Join(repo, "staging", "src", "github.com", "kcp-dev", "sdk", "testing", "auth-tokens.csv")
 
-	var args []string
-	args = append(args, "--token-auth-file", DefaultTokenAuthFile) //nolint:gocritic // no.
-	args = append(args, "--feature-gates=WorkspaceMounts=true,CacheAPIs=true,WorkspaceAuthentication=true")
-
-	kcptesting.InitSharedKcpServer(kcptestingserver.WithCustomArguments(args...))
+	kcptesting.InitSharedKcpServer(kcptestingserver.WithCustomArguments(
+		"--token-auth-file", DefaultTokenAuthFile,
+		"--feature-gates=WorkspaceMounts=true,CacheAPIs=true,WorkspaceAuthentication=true,LogicalClusterMigration=true,APIExportIdentityRotation=true",
+	))
 }

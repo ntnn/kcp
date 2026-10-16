@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,8 +18,11 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"text/tabwriter"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -34,6 +37,7 @@ import (
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned/cluster"
 )
@@ -55,9 +59,14 @@ type TreeOptions struct {
 
 	Full        bool
 	Interactive bool
+	Wide        bool
+	Watch       bool
 
 	kcpClusterClient kcpclientset.ClusterInterface
 }
+
+// treeWatchInterval is how often the tree is re-rendered in watch mode.
+const treeWatchInterval = 2 * time.Second
 
 // NewTreeOptions returns a new TreeOptions.
 func NewTreeOptions(streams genericclioptions.IOStreams) *TreeOptions {
@@ -68,9 +77,21 @@ func NewTreeOptions(streams genericclioptions.IOStreams) *TreeOptions {
 
 // BindFlags binds fields to cmd's flagset.
 func (o *TreeOptions) BindFlags(cmd *cobra.Command) {
+	// "-w" is the watch shorthand here, so --workspace is bound without a shorthand.
+	o.Options.OptOutOfWorkspaceFlagShorthand = true
 	o.Options.BindFlags(cmd)
 	cmd.Flags().BoolVarP(&o.Full, "full", "f", o.Full, "Show full workspace names")
 	cmd.Flags().BoolVarP(&o.Interactive, "interactive", "i", o.Interactive, "Interactive workspace tree browser")
+	cmd.Flags().BoolVar(&o.Wide, "wide", o.Wide, "Show workspace and logical cluster status for each node")
+	cmd.Flags().BoolVarP(&o.Watch, "watch", "w", o.Watch, "Re-render the workspace tree every "+treeWatchInterval.String()+" until interrupted")
+}
+
+// Validate validates the TreeOptions.
+func (o *TreeOptions) Validate() error {
+	if o.Watch && o.Interactive {
+		return errors.New("--watch and --interactive are mutually exclusive")
+	}
+	return o.Options.Validate()
 }
 
 // Complete ensures all dynamically populated fields are initialized.
@@ -96,27 +117,92 @@ func (o *TreeOptions) Run(ctx context.Context) error {
 	}
 	_, current, err := pluginhelpers.ParseClusterURL(config.Host)
 	if err != nil {
-		return fmt.Errorf("current config context URL %q does not point to workspace", config.Host)
+		// The current context URL does not follow the /clusters/ pattern — the
+		// user may be pointing at a mount, a rootless cluster, or a workspace
+		// they do not have access to. Do not assume root exists or is accessible.
+		// Intentionally returning nil: a non-kcp URL is not an error for the tree
+		// command; we surface an informational message and exit cleanly.
+		fmt.Fprintf(o.Out, "current context URL %q does not point directly to a kcp workspace\n", config.Host)
+		return nil //nolint:nilerr
 	}
 
 	if o.Interactive {
 		return o.runInteractive(ctx, current)
 	}
 
+	if o.Watch {
+		return o.runWatch(ctx, current)
+	}
+
+	return o.printTree(ctx, current)
+}
+
+// runWatch re-renders the tree on a fixed interval until the context is cancelled.
+func (o *TreeOptions) runWatch(ctx context.Context, current logicalcluster.Path) error {
+	ticker := time.NewTicker(treeWatchInterval)
+	defer ticker.Stop()
+
+	for {
+		// Move the cursor home and clear the screen so each render replaces the previous one.
+		fmt.Fprint(o.Out, "\033[H\033[2J")
+		if err := o.printTree(ctx, current); err != nil {
+			return err
+		}
+		fmt.Fprintf(o.Out, "watching every %s, press Ctrl+C to exit\n", treeWatchInterval)
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+// printTree renders the workspace tree rooted at current once.
+func (o *TreeOptions) printTree(ctx context.Context, current logicalcluster.Path) error {
 	tree := treeprint.New()
 	// NOTE(hasheddan): the cluster URL can be used for only the tree root as
 	// the friendly name is used in kubeconfig.
 	name := current.String()
-	if !o.Full {
+	if o.Full {
+		// Absolute workspace paths are prefixed with ":" so they can be passed
+		// straight to `kubectl ws <path>`.
+		name = ":" + name
+	} else {
 		name = name[strings.LastIndex(name, ":")+1:]
 	}
-	branch := tree.AddBranch(name)
+	label := name
+	if o.Wide {
+		label = o.formatWideName(ctx, name, current, "")
+	}
+	branch := tree.AddBranch(label)
 	if err := o.populateBranch(ctx, branch, current, name); err != nil {
 		return err
 	}
 
-	fmt.Println(tree.String())
+	if o.Wide {
+		w := tabwriter.NewWriter(o.Out, 0, 0, 2, ' ', 0)
+		fmt.Fprint(w, tree.String())
+		return w.Flush()
+	}
+	fmt.Fprintln(o.Out, tree.String())
 	return nil
+}
+
+// formatWideName appends workspace and logical cluster status to the name.
+// workspacePhase is the Phase read from the parent's Workspace list ("" when unknown, e.g. for the root).
+func (o *TreeOptions) formatWideName(ctx context.Context, name string, path logicalcluster.Path, workspacePhase corev1alpha1.LogicalClusterPhaseType) string {
+	lcPhase := corev1alpha1.LogicalClusterPhaseType("Unknown")
+	lc, err := o.kcpClusterClient.Cluster(path).CoreV1alpha1().LogicalClusters().Get(ctx, corev1alpha1.LogicalClusterName, metav1.GetOptions{})
+	if err == nil && lc.Status.Phase != "" {
+		lcPhase = lc.Status.Phase
+	}
+
+	wsPart := "-"
+	if workspacePhase != "" {
+		wsPart = string(workspacePhase)
+	}
+	return fmt.Sprintf("%s\tws=%s\tlc=%s", name, wsPart, lcPhase)
 }
 
 // runInteractive starts the interactive workspace tree browser.
@@ -131,7 +217,9 @@ func (o *TreeOptions) runInteractive(ctx context.Context, currentWorkspace logic
 	}
 
 	rootName := rootWorkspace.String()
-	if !o.Full {
+	if o.Full {
+		rootName = ":" + rootName
+	} else {
 		rootName = rootName[strings.LastIndex(rootName, ":")+1:]
 	}
 
@@ -222,28 +310,74 @@ func (o *TreeOptions) populateInteractiveNodeBubble(ctx context.Context, node *t
 	node.hasChildren = len(results.Items) > 0
 	node.childrenLoaded = false
 
-	shouldLoadChildren := node.expanded
-	if !shouldLoadChildren {
-		if workspace == currentWorkspace {
-			shouldLoadChildren = true
-		} else if currentWorkspace.HasPrefix(workspace) {
-			shouldLoadChildren = true
-		}
-	}
+	shouldLoadChildren := node.expanded || currentWorkspace.HasPrefix(workspace)
 
 	if shouldLoadChildren {
-		loadAllChildren := node.expanded
-
 		for _, ws := range results.Items {
+			// Skip workspaces that are being deleted, as they may no longer be
+			// accessible and listing their children could result in a 403.
+			if ws.DeletionTimestamp != nil {
+				continue
+			}
+			// A mounted workspace's content is served by the mount provider, not
+			// by recursive Workspace listing. Represent it as a non-selectable leaf
+			// regardless of whether its proxy URL happens to contain a /clusters/
+			// segment — when it does, that segment typically points back at the
+			// parent cluster, which would cause this recursion to loop forever.
+			if ws.Spec.Mount != nil {
+				childName := ws.Name
+				if o.Full {
+					childName = workspaceName + ":" + childName
+				}
+				// Use the logical parent path + workspace name as an approximation.
+				mountPath := workspace.Join(ws.Name)
+				childWorkspaceInfo := &workspaceInfo{
+					Path:    mountPath,
+					Type:    ws.Spec.Type,
+					Cluster: ws.Spec.Cluster,
+				}
+				childNode := &treeNode{
+					name:           childName + " [m]",
+					path:           mountPath,
+					info:           childWorkspaceInfo,
+					selectable:     false,
+					parent:         node,
+					childrenLoaded: true,
+					apiInfoLoaded:  false,
+					hasChildren:    false,
+				}
+				node.children = append(node.children, childNode)
+				node.hasChildren = true
+				continue
+			}
+			// Not scheduled onto a shard yet, so there is nothing to enter: show
+			// it with its phase and move on rather than failing the whole tree.
+			// This can persist, e.g. while every shard is at its hard workspace
+			// limit.
+			if ws.Spec.URL == "" {
+				childName := ws.Name
+				if o.Full {
+					childName = workspaceName + ":" + childName
+				}
+				phase := string(ws.Status.Phase)
+				if phase == "" {
+					phase = "Unknown"
+				}
+				node.children = append(node.children, &treeNode{
+					name:           fmt.Sprintf("%s [%s]", childName, phase),
+					info:           &workspaceInfo{Type: ws.Spec.Type, Cluster: ws.Spec.Cluster},
+					selectable:     false,
+					parent:         node,
+					childrenLoaded: true,
+					apiInfoLoaded:  false,
+					hasChildren:    false,
+				})
+				node.hasChildren = true
+				continue
+			}
 			_, childPath, err := pluginhelpers.ParseClusterURL(ws.Spec.URL)
 			if err != nil {
-				return fmt.Errorf("workspace URL %q does not point to valid workspace", ws.Spec.URL)
-			}
-
-			if !loadAllChildren {
-				if !currentWorkspace.HasPrefix(childPath) && childPath != currentWorkspace {
-					continue
-				}
+				return fmt.Errorf("workspace %q has URL %q, which does not point to a valid workspace", ws.Name, ws.Spec.URL)
 			}
 
 			childName := ws.Name
@@ -273,7 +407,7 @@ func (o *TreeOptions) populateInteractiveNodeBubble(ctx context.Context, node *t
 
 			node.children = append(node.children, childNode)
 
-			if !loadAllChildren {
+			if currentWorkspace.HasPrefix(childPath) {
 				if err := o.populateInteractiveNodeBubble(ctx, childNode, childPath, childName, currentWorkspace, currentNode); err != nil {
 					return err
 				}
@@ -317,9 +451,41 @@ func (o *TreeOptions) populateBranch(ctx context.Context, tree treeprint.Tree, p
 	}
 
 	for _, workspace := range results.Items {
+		if workspace.DeletionTimestamp != nil {
+			continue
+		}
+		// A mounted workspace's content is served by the mount provider, not by
+		// recursive Workspace listing. Render it as a leaf regardless of whether
+		// its proxy URL happens to contain a /clusters/<name>/ segment — when it
+		// does, that segment typically points back at the parent cluster, which
+		// would cause this recursion to loop forever.
+		if workspace.Spec.Mount != nil {
+			name := workspace.Name
+			if o.Full {
+				name = parentName + ":" + name
+			}
+			tree.AddBranch(name + " [m]")
+			continue
+		}
+		// A workspace that has not been scheduled onto a shard yet has no URL
+		// and no content to recurse into - it may stay that way indefinitely,
+		// e.g. while every shard is at its hard workspace limit. Render it as a
+		// leaf instead of failing the whole tree.
+		if workspace.Spec.URL == "" {
+			name := workspace.Name
+			if o.Full {
+				name = parentName + ":" + name
+			}
+			phase := string(workspace.Status.Phase)
+			if phase == "" {
+				phase = "Unknown"
+			}
+			tree.AddBranch(fmt.Sprintf("%s [%s]", name, phase))
+			continue
+		}
 		_, current, err := pluginhelpers.ParseClusterURL(workspace.Spec.URL)
 		if err != nil {
-			return fmt.Errorf("current config context URL %q does not point to workspace", workspace.Spec.URL)
+			return fmt.Errorf("workspace %q has URL %q, which does not point to a workspace", workspace.Name, workspace.Spec.URL)
 		}
 		// NOTE(hasheddan): the cluster URL from the Workspace does not use the
 		// friendly name, so we use the Workspace name instead.
@@ -327,7 +493,11 @@ func (o *TreeOptions) populateBranch(ctx context.Context, tree treeprint.Tree, p
 		if o.Full {
 			name = parentName + ":" + name
 		}
-		branch := tree.AddBranch(name)
+		label := name
+		if o.Wide {
+			label = o.formatWideName(ctx, name, current, workspace.Status.Phase)
+		}
+		branch := tree.AddBranch(label)
 		if err := o.populateBranch(ctx, branch, current, name); err != nil {
 			return err
 		}

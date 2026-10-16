@@ -1,5 +1,5 @@
 /*
-Copyright 2025 The KCP Authors.
+Copyright 2025 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xrstf/mockoidc"
 
@@ -42,6 +43,7 @@ import (
 )
 
 func TestWorkspaceOIDC(t *testing.T) {
+	t.Parallel()
 	framework.Suite(t, "control-plane")
 
 	// start kcp and setup clients
@@ -57,13 +59,13 @@ func TestWorkspaceOIDC(t *testing.T) {
 
 	// start two mock OIDC servers that will listen on random ports
 	// (only for discovery and keyset handling, no actual login workflows)
-	mockA, ca := authfixtures.StartMockOIDC(t, server)
-	mockB, _ := authfixtures.StartMockOIDC(t, server)
+	mockA, caA := authfixtures.StartMockOIDC(t, server)
+	mockB, caB := authfixtures.StartMockOIDC(t, server)
 
 	// setup a new workspace auth config that uses mockoidc's server, one for
 	// each of our mockoidc servers
-	authConfigA := authfixtures.CreateWorkspaceOIDCAuthentication(t, t.Context(), kcpClusterClient, baseWsPath, mockA, ca, nil)
-	authConfigB := authfixtures.CreateWorkspaceOIDCAuthentication(t, t.Context(), kcpClusterClient, baseWsPath, mockB, ca, nil)
+	authConfigA := authfixtures.CreateWorkspaceOIDCAuthentication(t, t.Context(), kcpClusterClient, baseWsPath, mockA, caA, nil)
+	authConfigB := authfixtures.CreateWorkspaceOIDCAuthentication(t, t.Context(), kcpClusterClient, baseWsPath, mockB, caB, nil)
 
 	// use these configs in new WorkspaceTypes and create one extra workspace type that allows
 	// both mockoidc issuers
@@ -249,6 +251,7 @@ func TestWorkspaceOIDC(t *testing.T) {
 }
 
 func TestUserScope(t *testing.T) {
+	t.Parallel()
 	framework.Suite(t, "control-plane")
 
 	// start kcp and setup clients
@@ -289,7 +292,7 @@ func TestUserScope(t *testing.T) {
 		userName       = "peter"
 		userEmail      = "peter@example.com"
 		userGroups     = []string{"developers", "admins"}
-		expectedGroups = []string{"system:authenticated"}
+		expectedGroups = []string{"system:authenticated"} //nolint:prealloc
 		expectedExtras = map[string]authenticationv1.ExtraValue{
 			// authentication.kcp.io/scopes from the extra mapping has
 			// been scrubbed and only the expected cluster:<id> is set
@@ -336,6 +339,7 @@ func TestUserScope(t *testing.T) {
 }
 
 func TestForbiddenSystemAccess(t *testing.T) {
+	t.Parallel()
 	framework.Suite(t, "control-plane")
 
 	// start kcp and setup clients
@@ -433,6 +437,7 @@ func TestForbiddenSystemAccess(t *testing.T) {
 }
 
 func TestAcceptableWorkspaceAuthenticationConfigurations(t *testing.T) {
+	t.Parallel()
 	framework.Suite(t, "control-plane")
 
 	// start kcp and setup clients
@@ -562,14 +567,11 @@ func TestAcceptableWorkspaceAuthenticationConfigurations(t *testing.T) {
 }
 
 func TestWorkspaceOIDCTokenReview(t *testing.T) {
+	t.Parallel()
 	framework.Suite(t, "control-plane")
 
 	// start kcp and setup clients
 	server := kcptesting.SharedKcpServer(t)
-
-	if len(server.ShardNames()) > 1 {
-		t.Skip("This feature currently does not support multi shards because AuthConfigs are not replicated yet.")
-	}
 
 	baseWsPath, _ := kcptesting.NewWorkspaceFixture(t, server, logicalcluster.NewPath("root"), kcptesting.WithNamePrefix("workspace-auth-token-review"))
 
@@ -585,13 +587,13 @@ func TestWorkspaceOIDCTokenReview(t *testing.T) {
 
 	// create a new workspace with our new type
 	t.Log("Creating Workspaces...")
-	teamPath, _ := kcptesting.NewWorkspaceFixture(t, server, baseWsPath, kcptesting.WithName("team-a"), kcptesting.WithType(baseWsPath, tenancyv1alpha1.WorkspaceTypeName(wsType)))
+	teamPath, teamWs := kcptesting.NewWorkspaceFixture(t, server, baseWsPath, kcptesting.WithName("team-a"), kcptesting.WithType(baseWsPath, tenancyv1alpha1.WorkspaceTypeName(wsType)))
 
 	var (
 		userName       = "peter"
 		userEmail      = "peter@example.com"
 		userGroups     = []string{"developers", "admins"}
-		expectedGroups = []string{"system:authenticated"}
+		expectedGroups = []string{"system:authenticated"} //nolint:prealloc
 	)
 
 	for _, group := range userGroups {
@@ -619,15 +621,21 @@ func TestWorkspaceOIDCTokenReview(t *testing.T) {
 		},
 	}
 
-	var response *authenticationv1.TokenReview
-	require.Eventually(t, func() bool {
-		var err error
+	// This check cannot happen in an .Eventually - when a valid request
+	// comes in it must succeed on the first try.
+	response, err := kubeClusterClient.Cluster(teamPath).AuthenticationV1().TokenReviews().Create(t.Context(), review, metav1.CreateOptions{})
+	require.NoError(t, err)
 
-		response, err = kubeClusterClient.Cluster(teamPath).AuthenticationV1().TokenReviews().Create(t.Context(), review, metav1.CreateOptions{})
-		require.NoError(t, err)
-
-		return response.Status.Authenticated
-	}, wait.ForeverTestTimeout, 500*time.Millisecond)
-
-	require.Contains(t, response.Status.Audiences, kcpDefaultAudience)
+	// Ensure the token is valid and has the right audience
+	assert.True(t, response.Status.Authenticated, "token was not authenticated: %s", response.Status.Error)
+	assert.Contains(t, response.Status.Audiences, kcpDefaultAudience)
+	// Ensure the correct clusters are mentioned in the TokenReview.
+	assert.Equal(t,
+		authenticationv1.ExtraValue{teamWs.Spec.Cluster},
+		response.Status.User.Extra["authentication.kcp.io/cluster-name"],
+	)
+	assert.Contains(t,
+		response.Status.User.Extra["authentication.kcp.io/scopes"],
+		fmt.Sprintf("cluster:%s", teamWs.Spec.Cluster),
+	)
 }

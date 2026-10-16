@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -58,6 +58,9 @@ type reconciler interface {
 
 func (c *controller) reconcile(ctx context.Context, apiBinding *apisv1alpha2.APIBinding) (bool, error) {
 	reconcilers := []reconciler{
+		// Runs first so that an annotation-only change can preempt the status changes from
+		// bindingReconciler.
+		&permissionClaimMaterialiserReconciler{controller: c},
 		&phaseReconciler{
 			newReconciler:     &newReconciler{controller: c},
 			bindingReconciler: &bindingReconciler{controller: c},
@@ -134,7 +137,7 @@ func (r *newReconciler) reconcile(ctx context.Context, apiBinding *apisv1alpha2.
 		"Waiting for API(s) to be established",
 	)
 
-	return reconcileStatusContinue, nil
+	return reconcileStatusStopAndRequeue, nil
 }
 
 type bindingReconciler struct {
@@ -277,6 +280,7 @@ func (r *bindingReconciler) reconcile(ctx context.Context, apiBinding *apisv1alp
 		// TODO(sttts): removed schemas never get unlocked. We need a distinguishable way
 		//              for intentional removal of schemas, versus movement of schemas
 		//              to another APIExport.
+		previousResourceBindings := lc.Annotations[ResourceBindingsAnnotationKey]
 		lc, _, skipped, err = WithLockedResources(crds, time.Now(), lc, grs.UnsortedList(), ExpirableLock{
 			Lock: Lock{Name: apiBinding.Name},
 		})
@@ -307,8 +311,10 @@ func (r *bindingReconciler) reconcile(ctx context.Context, apiBinding *apisv1alp
 			return err
 		}
 
-		if err := r.updateLogicalCluster(ctx, lc); err != nil {
-			return err
+		if lc.Annotations[ResourceBindingsAnnotationKey] != previousResourceBindings {
+			if err := r.updateLogicalCluster(ctx, lc); err != nil {
+				return err
+			}
 		}
 
 		if len(skipped) > 0 {
@@ -382,7 +388,7 @@ func (r *bindingReconciler) reconcile(ctx context.Context, apiBinding *apisv1alp
 		}
 
 		// Try to get the bound CRD
-		existingCRD, err := r.getCRD(SystemBoundCRDsClusterName, boundCRDName(sch))
+		existingCRD, err := r.getCRD(SystemBoundCRDsClusterName, BoundCRDName(sch))
 		if err != nil && !apierrors.IsNotFound(err) {
 			conditions.MarkFalse(
 				apiBinding,
@@ -394,7 +400,7 @@ func (r *bindingReconciler) reconcile(ctx context.Context, apiBinding *apisv1alp
 
 			return reconcileStatusContinue, fmt.Errorf(
 				"error getting CRD %s|%s for APIBinding %s|%s, APIExport %s|%s, APIResourceSchema %s|%s: %w",
-				SystemBoundCRDsClusterName, boundCRDName(sch),
+				SystemBoundCRDsClusterName, BoundCRDName(sch),
 				logicalcluster.From(apiBinding), apiBinding.Name,
 				apiExportPath, apiExport.Name,
 				apiExportPath, resourceSchema.Schema,
@@ -414,8 +420,18 @@ func (r *bindingReconciler) reconcile(ctx context.Context, apiBinding *apisv1alp
 				continue
 			}
 		} else {
+			// While the binding is mid identity-migration the identity migrator
+			// owns the bound CRD lifecycle: it recreates the CRD to force the
+			// serving storage to be rebuilt against the rotated identity.
+			// Creating it here would race that rebuild.
+			if conditions.IsFalse(apiBinding, apisv1alpha2.IdentityMigrationCompleted) {
+				logger.V(4).Info("not creating bound CRD: binding is mid identity-migration", "schema", resourceSchema.Schema)
+				needToWaitForRequeueWhenEstablished = append(needToWaitForRequeueWhenEstablished, resourceSchema.Schema)
+				continue
+			}
+
 			// Need to create bound CRD
-			crd, err := generateCRD(sch)
+			crd, err := GenerateBoundCRD(sch)
 			if err != nil {
 				logger.Error(err, "error generating CRD")
 
@@ -530,11 +546,33 @@ func (r *bindingReconciler) reconcile(ctx context.Context, apiBinding *apisv1alp
 				IdentityHash: apiExport.Status.IdentityHash,
 			},
 			StorageVersions: sortedStorageVersions,
+			IdentityHashes:  []string{apiExport.Status.IdentityHash},
 		}
 
 		found := false
 		for i, r := range apiBinding.Status.BoundResources {
 			if r.Group == sch.Spec.Group && r.Resource == sch.Spec.Names.Plural {
+				// The identity hash keys the etcd prefix of the bound
+				// instances, so an identity change (rotation) must never flip
+				// serving in place: existing data lives under the old prefix.
+				// Keep serving the previous identity and record both hashes;
+				// the identity migrator drains the storage, flips and prunes.
+				if r.Schema.IdentityHash != "" && r.Schema.IdentityHash != apiExport.Status.IdentityHash {
+					newBoundResource.Schema.IdentityHash = r.Schema.IdentityHash
+					newBoundResource.IdentityHashes = sets.List(sets.New(r.IdentityHashes...).
+						Insert(r.Schema.IdentityHash, apiExport.Status.IdentityHash))
+					conditions.MarkFalse(
+						apiBinding,
+						apisv1alpha2.IdentityMigrationCompleted,
+						apisv1alpha2.IdentityMigrationInProgressReason,
+						conditionsv1alpha1.ConditionSeverityInfo,
+						"bound resources are being drained onto the rotated identity of APIExport %s",
+						apiExport.Name,
+					)
+				} else if len(r.IdentityHashes) > 0 {
+					// preserve drain bookkeeping written by the migrator.
+					newBoundResource.IdentityHashes = sets.List(sets.New(r.IdentityHashes...).Insert(apiExport.Status.IdentityHash))
+				}
 				apiBinding.Status.BoundResources[i] = newBoundResource
 				found = true
 				break
@@ -598,14 +636,145 @@ func (r *bindingReconciler) reconcile(ctx context.Context, apiBinding *apisv1alp
 	return reconcileStatusContinue, nil
 }
 
-func boundCRDName(schema *apisv1alpha1.APIResourceSchema) string {
+// BoundCRDName returns the name used for a bound CRD in system:bound-crds.
+func BoundCRDName(schema *apisv1alpha1.APIResourceSchema) string {
 	return string(schema.UID)
 }
 
-func generateCRD(schema *apisv1alpha1.APIResourceSchema) (*apiextensionsv1.CustomResourceDefinition, error) {
+// permissionClaimMaterialiserReconciler ensures that, for each accepted permission claim
+// with a non-empty identity hash, the bound CRD for the claimed resource exists in the
+// system:bound-crds workspace on this shard. Without this, the permissionclaimlabel
+// controller fails with "unable to find informer for <group>.<resource>" on shards where
+// no other APIBinding has bound the producing APIExport (issue #4087 for future reference).
+//
+// This is a pure side effect on a different object (system:bound-crds CRDs); it does not
+// mutate the APIBinding. The bound CRD's lifecycle is governed by CRDCleanup, which uses
+// indexers.APIBindingByAcceptedClaimIdentityAndGR to discover APIBindings still
+// referencing the CRD via permission claims (in addition to the existing BoundResources
+// reference path).
+type permissionClaimMaterialiserReconciler struct {
+	*controller
+}
+
+// reconcile materialises bound CRDs for accepted permission claims on a best-effort
+// basis. Errors are logged and the loop continues rather than returning, by design:
+//
+//   - Per-claim independence: a failure resolving one claim must not skip subsequent
+//     claims that are perfectly resolvable on this pass.
+//   - Cross-shard eventual consistency: the APIExport lookup by IdentityHash goes
+//     through the cache-server-fed informer. On a fresh shard the foreign APIExport
+//     may simply not have arrived yet; requeuing the APIBinding would hot-loop. The
+//     real feedback loop is indexers.IndexAPIBindingByAcceptedClaimedGroupResource,
+//     which re-enqueues the APIBinding when the missing APIExport/Schema appears.
+//   - Idempotent shared-target writes: ensurePermissionClaimBoundCRD writes into
+//     system:bound-crds, which every shard's apibinding controller writes into.
+//     AlreadyExists is expected, not a failure to surface on APIBinding status.
+//   - Decoupled from APIBinding readiness: this is a side effect on a different
+//     object. The BoundResources path gates Ready; failing the whole reconcile here
+//     would taint status for an unrelated concern.
+//   - Ordering with permissionclaimlabel is event-driven, not synchronously gated:
+//     that controller re-triggers on CRD/APIBinding events, so "materialiser must
+//     succeed first" is achieved by event ordering, not by error propagation here.
+func (r *permissionClaimMaterialiserReconciler) reconcile(ctx context.Context, apiBinding *apisv1alpha2.APIBinding) (reconcileStatus, error) {
+	logger := klog.FromContext(ctx)
+
+	for _, claim := range apiBinding.Spec.PermissionClaims {
+		if claim.State != apisv1alpha2.ClaimAccepted {
+			continue
+		}
+		// An empty identity hash means the claim targets a built-in or local resource
+		// (e.g. core configmaps/secrets) whose informer is always available.
+		if claim.IdentityHash == "" {
+			continue
+		}
+
+		exports, err := r.controller.getAPIExportsByIdentity(claim.IdentityHash)
+		if err != nil {
+			logger.V(2).Info("error looking up APIExports by identity for permission claim",
+				"identity", claim.IdentityHash, "group", claim.Group, "resource", claim.Resource, "err", err.Error())
+			continue
+		}
+		if len(exports) == 0 {
+			logger.V(4).Info("no APIExport found for permission claim identity",
+				"identity", claim.IdentityHash, "group", claim.Group, "resource", claim.Resource)
+			continue
+		}
+
+		// Pick a deterministic export. Multiple exports may share the same identity
+		// hash (the apiexport reconciler treats this as same-owner same-schema).
+		sort.Slice(exports, func(i, j int) bool {
+			a, b := exports[i], exports[j]
+			ka := logicalcluster.From(a).String() + "/" + a.Name
+			kb := logicalcluster.From(b).String() + "/" + b.Name
+			return ka < kb
+		})
+
+		var producerSchema *apisv1alpha1.APIResourceSchema
+		for _, exp := range exports {
+			for _, res := range exp.Spec.Resources {
+				if res.Group != claim.Group || res.Name != claim.Resource {
+					continue
+				}
+				sch, err := r.getAPIResourceSchema(logicalcluster.From(exp), res.Schema)
+				if err != nil {
+					continue
+				}
+				producerSchema = sch
+				break
+			}
+			if producerSchema != nil {
+				break
+			}
+		}
+		if producerSchema == nil {
+			logger.V(4).Info("no APIResourceSchema found for permission claim",
+				"identity", claim.IdentityHash, "group", claim.Group, "resource", claim.Resource)
+			continue
+		}
+
+		if err := r.ensurePermissionClaimBoundCRD(ctx, producerSchema); err != nil {
+			logger.V(2).Info("error ensuring bound CRD for permission claim",
+				"schema", producerSchema.Name, "err", err.Error())
+			continue
+		}
+	}
+
+	return reconcileStatusContinue, nil
+}
+
+// ensurePermissionClaimBoundCRD creates the bound CRD for the given APIResourceSchema in
+// system:bound-crds if it does not already exist. It is idempotent and safe to call from
+// any shard's apibinding controller. The CRD is named by the schema UID so that
+// concurrent creators converge on the same object.
+func (r *permissionClaimMaterialiserReconciler) ensurePermissionClaimBoundCRD(ctx context.Context, sch *apisv1alpha1.APIResourceSchema) error {
+	name := BoundCRDName(sch)
+
+	if _, err := r.getCRD(SystemBoundCRDsClusterName, name); err == nil {
+		// Already there. Recreation only happens via the regular Resources path; here
+		// we merely need it to exist so the local DDSIF discovers it.
+		if !r.deletedCRDTracker.Has(name) {
+			return nil
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	crd, err := GenerateBoundCRD(sch)
+	if err != nil {
+		return err
+	}
+	if _, err := r.createCRD(ctx, SystemBoundCRDsClusterName.Path(), crd); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	r.deletedCRDTracker.Remove(name)
+	return nil
+}
+
+// GenerateBoundCRD creates a CRD object from an APIResourceSchema for use in system:bound-crds.
+func GenerateBoundCRD(schema *apisv1alpha1.APIResourceSchema) (*apiextensionsv1.CustomResourceDefinition, error) {
 	crd := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: boundCRDName(schema),
+			Name: BoundCRDName(schema),
 			Annotations: map[string]string{
 				logicalcluster.AnnotationKey:            SystemBoundCRDsClusterName.String(),
 				apisv1alpha1.AnnotationBoundCRDKey:      "",
@@ -643,6 +812,7 @@ func generateCRD(schema *apisv1alpha1.APIResourceSchema) (*apiextensionsv1.Custo
 			DeprecationWarning:       version.DeprecationWarning,
 			Subresources:             &version.Subresources,
 			AdditionalPrinterColumns: version.AdditionalPrinterColumns,
+			SelectableFields:         version.SelectableFields,
 		}
 
 		var validation apiextensionsv1.CustomResourceValidation

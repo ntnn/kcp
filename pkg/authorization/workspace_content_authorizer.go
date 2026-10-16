@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,9 +33,10 @@ import (
 	"github.com/kcp-dev/logicalcluster/v3"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	corev1alpha1listers "github.com/kcp-dev/sdk/client/listers/core/v1alpha1"
+	rbacwrapper "github.com/kcp-dev/virtual-workspace-framework/pkg/wrappers/rbac"
 
 	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
-	rbacwrapper "github.com/kcp-dev/kcp/pkg/virtual/framework/wrappers/rbac"
+	"github.com/kcp-dev/kcp/pkg/authorization/shardpaths"
 )
 
 const (
@@ -81,6 +82,15 @@ type workspaceContentAuthorizer struct {
 func (a *workspaceContentAuthorizer) Authorize(ctx context.Context, attr authorizer.Attributes) (authorizer.Decision, string, error) {
 	cluster := genericapirequest.ClusterFrom(ctx)
 
+	// Shard-level non-resource URLs (e.g. /metrics) carry no workspace semantics.
+	// WithShardLevelPaths has either rejected the request already or scoped it to
+	// :root. Skip the verb=access gate so a minimally-privileged identity bound
+	// only to a NonResourceURLs rule (e.g. system:kcp:metrics-reader) can scrape
+	// without also being granted broader workspace access.
+	if !attr.IsResourceRequest() && shardpaths.Paths.Has(attr.GetPath()) {
+		return DelegateAuthorization("shard-level path", a.delegate).Authorize(ctx, attr)
+	}
+
 	// empty or system workspaces have no meaning in the context of authorizing workspace content.
 	// To access system workspaces, the user must be privileged such that authorization is skipped completely.
 	if cluster == nil || cluster.Name.Empty() || strings.HasPrefix(cluster.Name.String(), "system:") {
@@ -109,8 +119,43 @@ func (a *workspaceContentAuthorizer) Authorize(ctx context.Context, attr authori
 		return authorizer.DecisionNoOpinion, "error getting LogicalCluster", err
 	}
 
-	if logicalCluster.Status.Phase != corev1alpha1.LogicalClusterPhaseInitializing && logicalCluster.Status.Phase != corev1alpha1.LogicalClusterPhaseReady {
+	switch logicalCluster.Status.Phase {
+	case corev1alpha1.LogicalClusterPhaseInitializing,
+		corev1alpha1.LogicalClusterPhaseReady,
+		// Inactive: WithBlockInactiveLogicalClusters denies content access at the HTTP filter
+		// layer while permitting /openapi and the LogicalCluster resource itself, so the cluster
+		// can be reactivated. The authorizer must not also deny based on phase, otherwise the
+		// LC GET/UPDATE used to clear the inactive annotation is rejected.
+		corev1alpha1.LogicalClusterPhaseInactive,
+		// Terminating: registered terminator controllers are running and need to clean up content.
+		// Deleting: terminators are done; standard kube finalization (GC, namespace deletion,
+		// finalizer removal) still needs content access until the LogicalCluster object is gone.
+		corev1alpha1.LogicalClusterPhaseTerminating,
+		corev1alpha1.LogicalClusterPhaseDeleting:
+		// allowed
+	default: // Scheduling, Unavailable, Unknown, or any future phases are not allowed to access workspace content
 		return authorizer.DecisionNoOpinion, fmt.Sprintf("not permitted due to phase %q", logicalCluster.Status.Phase), nil
+	}
+
+	// Lifecycle synthetic groups (system:kcp:initializer:*, system:kcp:terminator:*)
+	// are injected by the initializing/terminating VW content proxies *after* they
+	// have evaluated the request against the WorkspaceType's
+	// initializer/terminator permissions. They cannot be self-asserted because the
+	// front-proxy drops them on ingress. Their presence is the authoritative
+	// "pre-authorized by VW" marker — delegating further would re-run RBAC against
+	// the caller's identity, which by design has no in-workspace permissions, so
+	// allow directly here.
+	//
+	// Only honor the synthetic group when the workspace is actually in a lifecycle
+	// phase (Initializing/Terminating/Deleting). For Ready workspaces a leftover
+	// lifecycle group on the caller must not grant unconditional access.
+	if HasLifecycleGroup(attr.GetUser().GetGroups()) {
+		switch logicalCluster.Status.Phase {
+		case corev1alpha1.LogicalClusterPhaseInitializing,
+			corev1alpha1.LogicalClusterPhaseTerminating,
+			corev1alpha1.LogicalClusterPhaseDeleting:
+			return authorizer.DecisionAllow, "lifecycle VW pre-authorized access", nil
+		}
 	}
 
 	switch {

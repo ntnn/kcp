@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The KCP Authors.
+Copyright 2022 The kcp Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package authorizer
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -29,8 +30,7 @@ import (
 
 	"github.com/kcp-dev/logicalcluster/v3"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
-
-	dynamiccontext "github.com/kcp-dev/kcp/pkg/virtual/framework/dynamic/context"
+	dynamiccontext "github.com/kcp-dev/virtual-workspace-framework/pkg/dynamic/context"
 )
 
 const (
@@ -46,6 +46,7 @@ var (
 )
 
 func TestBoundAPIAuthorizer(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name                  string
 		attr                  authorizer.Attributes
@@ -565,8 +566,560 @@ func TestBoundAPIAuthorizer(t *testing.T) {
 			},
 			expectedDecision: authorizer.DecisionAllow,
 		},
+		{
+			name: "create events.k8s.io event via permission claim for core/v1 events",
+			attr: &authorizer.AttributesRecord{
+				User:     &user.DefaultInfo{},
+				APIGroup: "events.k8s.io",
+				Resource: "events",
+				Verb:     "create",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "",
+											Resource: "events",
+										},
+										Verbs: []string{"create"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "events",
+								},
+								Verbs: []string{"create"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionAllow,
+		},
+		{
+			name: "create events.k8s.io event via permission claim when Status.APIExportClusterName is not yet set (path fallback)",
+			attr: &authorizer.AttributesRecord{
+				User:     &user.DefaultInfo{},
+				APIGroup: "events.k8s.io",
+				Resource: "events",
+				Verb:     "create",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				bindings := []*apisv1alpha2.APIBinding{
+					{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "bar",
+						},
+						Spec: apisv1alpha2.APIBindingSpec{
+							Reference: apisv1alpha2.BindingReference{
+								Export: &apisv1alpha2.ExportBindingReference{
+									Path: apiExportCluster,
+									Name: apiExportName,
+								},
+							},
+							PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+								{
+									ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+										PermissionClaim: apisv1alpha2.PermissionClaim{
+											GroupResource: apisv1alpha2.GroupResource{
+												Group:    "",
+												Resource: "events",
+											},
+											Verbs: []string{"create"},
+										},
+										Selector: apisv1alpha2.PermissionClaimSelector{
+											MatchAll: true,
+										},
+									},
+									State: apisv1alpha2.ClaimAccepted,
+								},
+							},
+						},
+					},
+				}
+				for _, b := range bindings {
+					if b.Spec.Reference.Export != nil && b.Spec.Reference.Export.Name == apiExportName {
+						if b.Status.APIExportClusterName == apiExportCluster {
+							return b, nil
+						}
+						if b.Status.APIExportClusterName == "" && b.Spec.Reference.Export.Path == apiExportCluster {
+							return b, nil
+						}
+					}
+				}
+				return nil, fmt.Errorf("no suitable binding found")
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "events",
+								},
+								Verbs: []string{"create"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionAllow,
+		},
+		{
+			name: "create token subresource claimed by both APIExport and APIBinding",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "",
+				Resource:    "serviceaccounts",
+				Subresource: "token",
+				Verb:        "create",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "",
+											Resource: "serviceaccounts/token",
+										},
+										Verbs: []string{"create"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "serviceaccounts/token",
+								},
+								Verbs: []string{"create"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionAllow,
+		},
+		{
+			name: "create token subresource denied when APIExport does not claim the subresource",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "",
+				Resource:    "serviceaccounts",
+				Subresource: "token",
+				Verb:        "create",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "",
+											Resource: "serviceaccounts",
+										},
+										Verbs: []string{"get", "create"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "serviceaccounts",
+								},
+								Verbs: []string{"get", "create"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionDeny,
+			expectedReason:   "failed to find suitable reason to allow access in APIBinding",
+		},
+		{
+			name: "create token subresource denied when APIBinding does not accept the subresource claim",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "",
+				Resource:    "serviceaccounts",
+				Subresource: "token",
+				Verb:        "create",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "",
+											Resource: "serviceaccounts",
+										},
+										Verbs: []string{"get"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "serviceaccounts",
+								},
+								Verbs: []string{"get"},
+							},
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "",
+									Resource: "serviceaccounts/token",
+								},
+								Verbs: []string{"create"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionDeny,
+			expectedReason:   "failed to find suitable reason to allow access in APIBinding",
+		},
+		{
+			// regression check for the status subresource that was/is implicit.
+			name: "update status subresource allowed by parent resource claim",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "foo",
+				Resource:    "bar",
+				Subresource: "status",
+				Verb:        "update",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "foo",
+											Resource: "bar",
+										},
+										Verbs: []string{"update"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "foo",
+									Resource: "bar",
+								},
+								Verbs: []string{"update"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionAllow,
+		},
+		{
+			name: "update status subresource allowed by explicitly accepted status claim",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "foo",
+				Resource:    "bar",
+				Subresource: "status",
+				Verb:        "update",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "foo",
+											Resource: "bar/status",
+										},
+										Verbs: []string{"update"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "foo",
+									Resource: "bar/status",
+								},
+								Verbs: []string{"update"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionAllow,
+		},
+		{
+			// once status is claimed explicitly it no longer inherits from the parent resource.
+			name: "update status subresource denied when status claim exists but is not accepted",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "foo",
+				Resource:    "bar",
+				Subresource: "status",
+				Verb:        "update",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "foo",
+											Resource: "bar",
+										},
+										Verbs: []string{"update"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "foo",
+									Resource: "bar",
+								},
+								Verbs: []string{"update"},
+							},
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "foo",
+									Resource: "bar/status",
+								},
+								Verbs: []string{"update"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionDeny,
+			expectedReason:   "failed to find suitable reason to allow access in APIBinding",
+		},
+		{
+			// a status claim for a different identity must not shadow parent claim inheritance.
+			name: "update status subresource allowed by parent claim when status claim has different identity",
+			attr: &authorizer.AttributesRecord{
+				User:        &user.DefaultInfo{},
+				APIGroup:    "foo",
+				Resource:    "bar",
+				Subresource: "status",
+				Verb:        "update",
+			},
+			apidomainKey: apidomainKey,
+			getAPIBindingByExport: func(clusterName, apiExportName, apiExportCluster string) (*apisv1alpha2.APIBinding, error) {
+				return &apisv1alpha2.APIBinding{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIBindingSpec{
+						PermissionClaims: []apisv1alpha2.AcceptablePermissionClaim{
+							{
+								ScopedPermissionClaim: apisv1alpha2.ScopedPermissionClaim{
+									PermissionClaim: apisv1alpha2.PermissionClaim{
+										GroupResource: apisv1alpha2.GroupResource{
+											Group:    "foo",
+											Resource: "bar",
+										},
+										IdentityHash: "identity-a",
+										Verbs:        []string{"update"},
+									},
+									Selector: apisv1alpha2.PermissionClaimSelector{
+										MatchAll: true,
+									},
+								},
+								State: apisv1alpha2.ClaimAccepted,
+							},
+						},
+					},
+				}, nil
+			},
+			getAPIExport: func(clusterName, apiExportName string) (*apisv1alpha2.APIExport, error) {
+				return &apisv1alpha2.APIExport{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "bar",
+					},
+					Spec: apisv1alpha2.APIExportSpec{
+						PermissionClaims: []apisv1alpha2.PermissionClaim{
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "foo",
+									Resource: "bar",
+								},
+								IdentityHash: "identity-a",
+								Verbs:        []string{"update"},
+							},
+							{
+								GroupResource: apisv1alpha2.GroupResource{
+									Group:    "foo",
+									Resource: "bar/status",
+								},
+								IdentityHash: "identity-b",
+								Verbs:        []string{"update"},
+							},
+						},
+					},
+				}, nil
+			},
+			expectedDecision: authorizer.DecisionAllow,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			lc, _ := logicalcluster.NewPath(tc.apidomainKey).Name()
 			ctx := request.WithCluster(context.Background(), request.Cluster{Name: lc})
 			ctx = dynamiccontext.WithAPIDomainKey(ctx, dynamiccontext.APIDomainKey(tc.apidomainKey))
@@ -582,7 +1135,7 @@ func TestBoundAPIAuthorizer(t *testing.T) {
 			if err != nil {
 				errString = err.Error()
 			}
-			require.Equal(t, errString, tc.expectedErr)
+			require.Equal(t, tc.expectedErr, errString)
 			require.Equal(t, tc.expectedDecision, dec)
 			require.Equal(t, tc.expectedReason, reason)
 		})
