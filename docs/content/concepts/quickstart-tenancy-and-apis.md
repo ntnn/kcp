@@ -474,8 +474,11 @@ Q: How should we understand an `APIExport` `identityHash`?
 A: Unlike with CRDs, a kcp instance might have many `APIResourceSchemas` of the same Group/Version/Kind, and users need
 some way of securely distinguishing them.
 
-Each `APIExport` is allocated a randomized private secret - this is currently just a large random number - and a public
-identity - just a SHA256 hash of the private secret - which securely identifies this `APIExport` from others.
+Each `APIExport` has a private identity secret and a stable public identity in `status.identityHash`.
+The public identity is initially derived from the first secret for compatibility, but is not recomputed when an
+accepted key changes. Separate SHA256 key fingerprints in `status.identityKeyHashes` verify possession of an
+accepted secret. Exports sharing an accepted key can share the same public identity.
+Users cannot assign an identity or change its accepted key fingerprints through status updates.
 
 This is important because an `APIExport` makes service endpoints available to interact with all instances of a particular `APIResourceShema`, and we want to make sure that users are clear on which service provider `APIExports` they are trusting and only the owners of those `APIExport` have access to their resources via the service endpoints.
 

@@ -37,6 +37,7 @@ import (
 
 	virtualworkspacesoptions "github.com/kcp-dev/kcp/cmd/virtual-workspaces/options"
 	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
+	"github.com/kcp-dev/kcp/pkg/identity"
 	"github.com/kcp-dev/kcp/pkg/logging"
 	apiexportbuilder "github.com/kcp-dev/kcp/pkg/virtual/apiexport/builder"
 )
@@ -98,6 +99,7 @@ func (c *controller) reconcile(ctx context.Context, apiExport *apisv1alpha2.APIE
 			"%v",
 			err,
 		)
+		return err
 	}
 
 	// Ensure the APIExportEndpointSlice exists
@@ -199,13 +201,12 @@ func (c *controller) updateOrVerifyIdentitySecretHash(ctx context.Context, clust
 		return err
 	}
 
-	if apiExport.Status.IdentityHash == "" {
-		apiExport.Status.IdentityHash = hash
+	id, hashes, err := identity.Verify(apiExport.Status.IdentityHash, apiExport.Status.IdentityKeyHashes, hash, c.lookupIdentity)
+	if err != nil {
+		return err
 	}
-
-	if apiExport.Status.IdentityHash != hash {
-		return fmt.Errorf("hash mismatch: identity secret hash %q must match status.identityHash %q", hash, apiExport.Status.IdentityHash)
-	}
+	apiExport.Status.IdentityHash = id
+	apiExport.Status.IdentityKeyHashes = hashes
 
 	conditions.MarkTrue(apiExport, apisv1alpha2.APIExportIdentityValid)
 

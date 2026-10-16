@@ -155,9 +155,19 @@ const (
 
 // CachedResourceStatus defines the observed state of CachedResource.
 type CachedResourceStatus struct {
-	// IdentityHash is a hash of the identity configuration
+	// IdentityHash is the stable identity of this CachedResource, assigned once and
+	// immutable thereafter. For backwards compatibility, it defaults to the
+	// SHA-256 hash of the initial API identity key, but does not change when the key changes.
+	//
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
+
+	// IdentityKeyHashes is the set of SHA-256 fingerprints of the API identity keys.
+	// Unlike identityHash, these fingerprints can change when the keys change.
+	//
+	// +optional
+	// +listType=set
+	IdentityKeyHashes []string `json:"identityKeyHashes,omitempty"`
 
 	// ResourceCount is the number of resources that match the label selector
 	// +optional

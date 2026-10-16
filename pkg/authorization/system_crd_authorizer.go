@@ -24,6 +24,7 @@ import (
 
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
+	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
 )
 
 // SystemCRDAuthorizer protects the system CRDs from users who are admins in their workspaces.
@@ -49,6 +50,10 @@ func (a *SystemCRDAuthorizer) Authorize(ctx context.Context, attr authorizer.Att
 			return authorizer.DecisionDeny, "apibinding status updates not permitted", nil
 		case attr.GetResource() == "apiexports" && attr.GetSubresource() == "status":
 			return authorizer.DecisionDeny, "apiexport status updates not permitted", nil
+		}
+	case attr.GetAPIGroup() == cachev1alpha1.SchemeGroupVersion.Group:
+		if attr.GetResource() == "cachedresources" && attr.GetSubresource() == "status" {
+			return authorizer.DecisionDeny, "cachedresource status updates not permitted", nil
 		}
 	}
 

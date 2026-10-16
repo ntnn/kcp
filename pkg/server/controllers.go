@@ -1121,6 +1121,8 @@ func (s *Server) installAPIExportController(ctx context.Context, config *rest.Co
 		kubeClusterClient,
 		s.KubeSharedInformerFactory.Core().V1().Namespaces(),
 		s.KubeSharedInformerFactory.Core().V1().Secrets(),
+		s.KcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer(),
+		s.CacheKcpSharedInformerFactory.Apis().V1alpha2().APIExports().Informer(),
 	)
 	if err != nil {
 		return err
@@ -1751,6 +1753,8 @@ func (s *Server) installCacheController(ctx context.Context, config *rest.Config
 		s.CacheKcpSharedInformerFactory,
 		cachedResourceInformer,
 		cachedResourceEndpointSliceInformer,
+		cachedResourceInformer.Informer(),
+		s.CacheKcpSharedInformerFactory.Cache().V1alpha1().CachedResources().Informer(),
 	)
 	if err != nil {
 		return err

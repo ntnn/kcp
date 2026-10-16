@@ -66,8 +66,14 @@ func NewController(
 	kubeClusterClient kcpkubernetesclientset.ClusterInterface,
 	namespaceInformer kcpcorev1informers.NamespaceClusterInformer,
 	secretInformer kcpcorev1informers.SecretClusterInformer,
+	identityInformers ...cache.SharedIndexInformer,
 ) (*controller, error) {
+	lookupIdentity, err := indexers.NewIdentityLookup(identityInformers...)
+	if err != nil {
+		return nil, err
+	}
 	c := &controller{
+		lookupIdentity: lookupIdentity,
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{
@@ -197,6 +203,7 @@ type controller struct {
 	kubeClusterClient kcpkubernetesclientset.ClusterInterface
 
 	listAPIExports          func() ([]*apisv1alpha2.APIExport, error)
+	lookupIdentity          func(string) (string, error)
 	listAPIExportsForSecret func(secret *corev1.Secret) ([]*apisv1alpha2.APIExport, error)
 	getAPIExport            func(clusterName logicalcluster.Name, name string) (*apisv1alpha2.APIExport, error)
 

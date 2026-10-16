@@ -26,10 +26,11 @@ import (
 // CachedResourceStatusApplyConfiguration represents a declarative configuration of the CachedResourceStatus type for use
 // with apply.
 type CachedResourceStatusApplyConfiguration struct {
-	IdentityHash   *string                                `json:"identityHash,omitempty"`
-	ResourceCounts *ResourceCountApplyConfiguration       `json:"resourceCounts,omitempty"`
-	Phase          *cachev1alpha1.CachedResourcePhaseType `json:"phase,omitempty"`
-	Conditions     *conditionsv1alpha1.Conditions         `json:"conditions,omitempty"`
+	IdentityHash      *string                                `json:"identityHash,omitempty"`
+	IdentityKeyHashes []string                               `json:"identityKeyHashes,omitempty"`
+	ResourceCounts    *ResourceCountApplyConfiguration       `json:"resourceCounts,omitempty"`
+	Phase             *cachev1alpha1.CachedResourcePhaseType `json:"phase,omitempty"`
+	Conditions        *conditionsv1alpha1.Conditions         `json:"conditions,omitempty"`
 }
 
 // CachedResourceStatusApplyConfiguration constructs a declarative configuration of the CachedResourceStatus type for use with
@@ -43,6 +44,16 @@ func CachedResourceStatus() *CachedResourceStatusApplyConfiguration {
 // If called multiple times, the IdentityHash field is set to the value of the last call.
 func (b *CachedResourceStatusApplyConfiguration) WithIdentityHash(value string) *CachedResourceStatusApplyConfiguration {
 	b.IdentityHash = &value
+	return b
+}
+
+// WithIdentityKeyHashes adds the given value to the IdentityKeyHashes field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the IdentityKeyHashes field.
+func (b *CachedResourceStatusApplyConfiguration) WithIdentityKeyHashes(values ...string) *CachedResourceStatusApplyConfiguration {
+	for i := range values {
+		b.IdentityKeyHashes = append(b.IdentityKeyHashes, values[i])
+	}
 	return b
 }
 

@@ -18,8 +18,6 @@ package apiexport
 
 import (
 	"context"
-	"crypto/sha256"
-	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +27,7 @@ import (
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 
 	"github.com/kcp-dev/kcp/pkg/crypto"
+	"github.com/kcp-dev/kcp/pkg/identity"
 )
 
 func GenerateIdentitySecret(ctx context.Context, ns string, apiExportName string) (*corev1.Secret, error) {
@@ -54,12 +53,5 @@ func GenerateIdentitySecret(ctx context.Context, ns string, apiExportName string
 }
 
 func IdentityHash(secret *corev1.Secret) (string, error) {
-	key := secret.Data[apisv1alpha1.SecretKeyAPIExportIdentity]
-	if len(key) == 0 {
-		return "", fmt.Errorf("secret is missing data.%s", apisv1alpha1.SecretKeyAPIExportIdentity)
-	}
-
-	hashBytes := sha256.Sum256(key)
-	hash := fmt.Sprintf("%x", hashBytes)
-	return hash, nil
+	return identity.KeyHash(secret)
 }

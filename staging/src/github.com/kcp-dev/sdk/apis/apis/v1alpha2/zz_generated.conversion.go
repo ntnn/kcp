@@ -534,6 +534,7 @@ func autoConvert_v1alpha1_APIExportSpec_To_v1alpha2_APIExportSpec(in *v1alpha1.A
 
 func autoConvert_v1alpha2_APIExportStatus_To_v1alpha1_APIExportStatus(in *APIExportStatus, out *v1alpha1.APIExportStatus, s conversion.Scope) error {
 	out.IdentityHash = in.IdentityHash
+	out.IdentityKeyHashes = *(*[]string)(unsafe.Pointer(&in.IdentityKeyHashes))
 	out.Conditions = *(*conditionsv1alpha1.Conditions)(unsafe.Pointer(&in.Conditions))
 	out.VirtualWorkspaces = *(*[]v1alpha1.VirtualWorkspace)(unsafe.Pointer(&in.VirtualWorkspaces))
 	return nil
@@ -546,6 +547,7 @@ func Convert_v1alpha2_APIExportStatus_To_v1alpha1_APIExportStatus(in *APIExportS
 
 func autoConvert_v1alpha1_APIExportStatus_To_v1alpha2_APIExportStatus(in *v1alpha1.APIExportStatus, out *APIExportStatus, s conversion.Scope) error {
 	out.IdentityHash = in.IdentityHash
+	out.IdentityKeyHashes = *(*[]string)(unsafe.Pointer(&in.IdentityKeyHashes))
 	out.Conditions = *(*conditionsv1alpha1.Conditions)(unsafe.Pointer(&in.Conditions))
 	out.VirtualWorkspaces = *(*[]VirtualWorkspace)(unsafe.Pointer(&in.VirtualWorkspaces))
 	return nil

@@ -264,9 +264,18 @@ spec:
                 type: array
               identityHash:
                 description: |-
-                  identityHash is the hash of the API identity key of this APIExport. This value
-                  is immutable as soon as it is set.
+                  identityHash is the stable identity of this APIExport, assigned once and
+                  immutable thereafter. For backwards compatibility, it defaults to the
+                  SHA-256 hash of the initial API identity key, but does not change when the key changes.
                 type: string
+              identityKeyHashes:
+                description: |-
+                  identityKeyHashes is the set of SHA-256 fingerprints of the API identity keys.
+                  Unlike identityHash, these fingerprints can change when the keys change.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               virtualWorkspaces:
                 description: |-
                   virtualWorkspaces contains all APIExport virtual workspace URLs.
@@ -584,9 +593,18 @@ spec:
                 type: array
               identityHash:
                 description: |-
-                  identityHash is the hash of the API identity key of this APIExport. This value
-                  is immutable as soon as it is set.
+                  identityHash is the stable identity of this APIExport, assigned once and
+                  immutable thereafter. For backwards compatibility, it defaults to the
+                  SHA-256 hash of the initial API identity key, but does not change when the key changes.
                 type: string
+              identityKeyHashes:
+                description: |-
+                  identityKeyHashes is the set of SHA-256 fingerprints of the API identity keys.
+                  Unlike identityHash, these fingerprints can change when the keys change.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               virtualWorkspaces:
                 description: |-
                   virtualWorkspaces contains all APIExport virtual workspace URLs.

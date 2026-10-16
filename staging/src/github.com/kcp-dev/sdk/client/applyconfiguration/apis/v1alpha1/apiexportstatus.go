@@ -26,6 +26,7 @@ import (
 // with apply.
 type APIExportStatusApplyConfiguration struct {
 	IdentityHash      *string                              `json:"identityHash,omitempty"`
+	IdentityKeyHashes []string                             `json:"identityKeyHashes,omitempty"`
 	Conditions        *conditionsv1alpha1.Conditions       `json:"conditions,omitempty"`
 	VirtualWorkspaces []VirtualWorkspaceApplyConfiguration `json:"virtualWorkspaces,omitempty"`
 }
@@ -41,6 +42,16 @@ func APIExportStatus() *APIExportStatusApplyConfiguration {
 // If called multiple times, the IdentityHash field is set to the value of the last call.
 func (b *APIExportStatusApplyConfiguration) WithIdentityHash(value string) *APIExportStatusApplyConfiguration {
 	b.IdentityHash = &value
+	return b
+}
+
+// WithIdentityKeyHashes adds the given value to the IdentityKeyHashes field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the IdentityKeyHashes field.
+func (b *APIExportStatusApplyConfiguration) WithIdentityKeyHashes(values ...string) *APIExportStatusApplyConfiguration {
+	for i := range values {
+		b.IdentityKeyHashes = append(b.IdentityKeyHashes, values[i])
+	}
 	return b
 }
 

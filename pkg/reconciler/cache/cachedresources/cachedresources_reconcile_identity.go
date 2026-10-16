@@ -18,17 +18,17 @@ package cachedresources
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/kcp-dev/logicalcluster/v3"
-	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
 	conditionsv1alpha1 "github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1"
 	"github.com/kcp-dev/sdk/apis/third_party/conditions/util/conditions"
+
+	identityutil "github.com/kcp-dev/kcp/pkg/identity"
 )
 
 // identity creates identity secret for the published resource and computes hash of the secret.
@@ -38,6 +38,7 @@ type identity struct {
 	createIdentitySecret        func(ctx context.Context, clusterName logicalcluster.Path, defaultSecretNamespace, name string) error
 
 	secretNamespace string
+	lookupIdentity  func(string) (string, error)
 }
 
 func (r *identity) reconcile(ctx context.Context, cachedResource *cachev1alpha1.CachedResource) (reconcileStatus, error) {
@@ -119,25 +120,16 @@ func (r *identity) updateOrVerifyIdentitySecretHash(ctx context.Context, cluster
 		return err
 	}
 
-	if cachedResource.Status.IdentityHash == "" {
-		cachedResource.Status.IdentityHash = hash
+	id, hashes, err := identityutil.Verify(cachedResource.Status.IdentityHash, cachedResource.Status.IdentityKeyHashes, hash, r.lookupIdentity)
+	if err != nil {
+		return err
 	}
-
-	if cachedResource.Status.IdentityHash != hash {
-		return fmt.Errorf("hash mismatch: identity secret hash %q must match status.identityHash %q", hash, cachedResource.Status.IdentityHash)
-	}
+	cachedResource.Status.IdentityHash = id
+	cachedResource.Status.IdentityKeyHashes = hashes
 
 	return nil
 }
 
-// TODO: This is copy from apiexport controller. We should move it to a shared location.
 func IdentityHash(secret *corev1.Secret) (string, error) {
-	key := secret.Data[apisv1alpha1.SecretKeyAPIExportIdentity]
-	if len(key) == 0 {
-		return "", fmt.Errorf("secret is missing data.%s", apisv1alpha1.SecretKeyAPIExportIdentity)
-	}
-
-	hashBytes := sha256.Sum256(key)
-	hash := fmt.Sprintf("%x", hashBytes)
-	return hash, nil
+	return identityutil.KeyHash(secret)
 }

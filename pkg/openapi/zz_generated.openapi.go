@@ -992,9 +992,29 @@ func schema_sdk_apis_apis_v1alpha1_APIExportStatus(ref common.ReferenceCallback)
 				Properties: map[string]spec.Schema{
 					"identityHash": {
 						SchemaProps: spec.SchemaProps{
-							Description: "identityHash is the hash of the API identity key of this APIExport. This value is immutable as soon as it is set.",
+							Description: "identityHash is the stable identity of this APIExport, assigned once and immutable thereafter. For backwards compatibility, it defaults to the SHA-256 hash of the initial API identity key, but does not change when the key changes.",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"identityKeyHashes": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "identityKeyHashes is the set of SHA-256 fingerprints of the API identity keys. Unlike identityHash, these fingerprints can change when the keys change.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 					"conditions": {
@@ -2291,9 +2311,29 @@ func schema_sdk_apis_apis_v1alpha2_APIExportStatus(ref common.ReferenceCallback)
 				Properties: map[string]spec.Schema{
 					"identityHash": {
 						SchemaProps: spec.SchemaProps{
-							Description: "identityHash is the hash of the API identity key of this APIExport. This value is immutable as soon as it is set.",
+							Description: "identityHash is the stable identity of this APIExport, assigned once and immutable thereafter. For backwards compatibility, it defaults to the SHA-256 hash of the initial API identity key, but does not change when the key changes.",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"identityKeyHashes": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "identityKeyHashes is the set of SHA-256 fingerprints of the API identity keys. Unlike identityHash, these fingerprints can change when the keys change.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 					"conditions": {
@@ -3476,9 +3516,29 @@ func schema_sdk_apis_cache_v1alpha1_CachedResourceStatus(ref common.ReferenceCal
 				Properties: map[string]spec.Schema{
 					"identityHash": {
 						SchemaProps: spec.SchemaProps{
-							Description: "IdentityHash is a hash of the identity configuration",
+							Description: "IdentityHash is the stable identity of this CachedResource, assigned once and immutable thereafter. For backwards compatibility, it defaults to the SHA-256 hash of the initial API identity key, but does not change when the key changes.",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"identityKeyHashes": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "IdentityKeyHashes is the set of SHA-256 fingerprints of the API identity keys. Unlike identityHash, these fingerprints can change when the keys change.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 					"resourceCounts": {

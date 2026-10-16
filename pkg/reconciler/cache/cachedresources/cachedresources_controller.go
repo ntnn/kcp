@@ -44,6 +44,7 @@ import (
 	cacheinformers "github.com/kcp-dev/sdk/client/informers/externalversions/cache/v1alpha1"
 	cachev1alpha1listers "github.com/kcp-dev/sdk/client/listers/cache/v1alpha1"
 
+	"github.com/kcp-dev/kcp/pkg/indexers"
 	"github.com/kcp-dev/kcp/pkg/informer"
 	"github.com/kcp-dev/kcp/pkg/logging"
 	replicationcontroller "github.com/kcp-dev/kcp/pkg/reconciler/cache/cachedresources/replication"
@@ -80,9 +81,15 @@ func NewController(
 
 	cachedResourceInformer cacheinformers.CachedResourceClusterInformer,
 	cachedResourceEndpointSliceInformer cacheinformers.CachedResourceEndpointSliceClusterInformer,
+	identityInformers ...cache.SharedIndexInformer,
 ) (*Controller, error) {
+	lookupIdentity, err := indexers.NewIdentityLookup(identityInformers...)
+	if err != nil {
+		return nil, err
+	}
 	c := &Controller{
-		shardName: shardName,
+		lookupIdentity: lookupIdentity,
+		shardName:      shardName,
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.DefaultTypedControllerRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{
@@ -178,6 +185,7 @@ type Controller struct {
 	commit func(ctx context.Context, new, old *CachedResourceResource) error
 
 	secretNamespace string
+	lookupIdentity  func(string) (string, error)
 
 	getNamespace    func(clusterName logicalcluster.Name, name string) (*corev1.Namespace, error)
 	createNamespace func(ctx context.Context, clusterName logicalcluster.Path, ns *corev1.Namespace) error

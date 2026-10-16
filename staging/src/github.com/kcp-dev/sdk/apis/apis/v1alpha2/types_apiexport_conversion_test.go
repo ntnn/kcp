@@ -34,6 +34,12 @@ func TestConvertV1Alpha2APIExports(t *testing.T) {
 			Spec: APIExportSpec{},
 		},
 		{
+			Status: APIExportStatus{
+				IdentityHash:      "stable-identity",
+				IdentityKeyHashes: []string{"initial-key-hash", "rotated-key-hash"},
+			},
+		},
+		{
 			Spec: APIExportSpec{
 				Resources: []ResourceSchema{{
 					Group:  "bar",
@@ -160,6 +166,12 @@ func TestConvertV1Alpha1APIExports(t *testing.T) {
 	testcases := []apisv1alpha1.APIExport{
 		{
 			Spec: apisv1alpha1.APIExportSpec{},
+		},
+		{
+			Status: apisv1alpha1.APIExportStatus{
+				IdentityHash:      "stable-identity",
+				IdentityKeyHashes: []string{"initial-key-hash", "rotated-key-hash"},
+			},
 		},
 		{
 			Spec: apisv1alpha1.APIExportSpec{

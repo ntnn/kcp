@@ -55,7 +55,7 @@ func createAttr(cachedResource *cachev1alpha1.CachedResource) admission.Attribut
 func updateAttr(cachedResource *cachev1alpha1.CachedResource) admission.Attributes {
 	return admission.NewAttributesRecord(
 		helpers.ToUnstructuredOrDie(cachedResource),
-		nil,
+		helpers.ToUnstructuredOrDie(cachedResource),
 		cachev1alpha1.Kind("CachedResource").WithVersion("v1alpha1"),
 		"",
 		cachedResource.Name,

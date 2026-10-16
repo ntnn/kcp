@@ -35,6 +35,7 @@ import (
 	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
 	kcpinformers "github.com/kcp-dev/sdk/client/informers/externalversions"
 
+	"github.com/kcp-dev/kcp/pkg/admission/helpers"
 	"github.com/kcp-dev/kcp/pkg/indexers"
 	cachedresourcesreconciler "github.com/kcp-dev/kcp/pkg/reconciler/cache/cachedresources"
 	"github.com/kcp-dev/kcp/pkg/reconciler/dynamicrestmapper"
@@ -54,7 +55,7 @@ func Register(plugins *admission.Plugins) {
 	plugins.Register(PluginName,
 		func(_ io.Reader) (admission.Interface, error) {
 			p := &CachedResourceAdmission{
-				Handler: admission.NewHandler(admission.Create),
+				Handler: admission.NewHandler(admission.Create, admission.Update),
 			}
 			p.listCachedResourcesByGVR = func(cluster logicalcluster.Name, gvr schema.GroupVersionResource) ([]*cachev1alpha1.CachedResource, error) {
 				return indexers.ByIndex[*cachev1alpha1.CachedResource](
@@ -105,6 +106,9 @@ func (adm *CachedResourceAdmission) ValidateInitialization() error {
 func (adm *CachedResourceAdmission) Validate(ctx context.Context, a admission.Attributes, _ admission.ObjectInterfaces) error {
 	if a.GetResource().GroupResource() != cachev1alpha1.Resource("cachedresources") || a.GetKind().GroupKind() != cachev1alpha1.Kind("CachedResource") {
 		return nil
+	}
+	if err := helpers.ValidateIdentityStatus(a); err != nil {
+		return err
 	}
 	if a.GetOperation() != admission.Create {
 		return nil

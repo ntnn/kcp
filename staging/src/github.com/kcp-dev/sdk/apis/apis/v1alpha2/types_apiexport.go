@@ -329,11 +329,19 @@ func (p GroupResource) GetResource() string {
 
 // APIExportStatus defines the observed state of APIExport.
 type APIExportStatus struct {
-	// identityHash is the hash of the API identity key of this APIExport. This value
-	// is immutable as soon as it is set.
+	// identityHash is the stable identity of this APIExport, assigned once and
+	// immutable thereafter. For backwards compatibility, it defaults to the
+	// SHA-256 hash of the initial API identity key, but does not change when the key changes.
 	//
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
+
+	// identityKeyHashes is the set of SHA-256 fingerprints of the API identity keys.
+	// Unlike identityHash, these fingerprints can change when the keys change.
+	//
+	// +optional
+	// +listType=set
+	IdentityKeyHashes []string `json:"identityKeyHashes,omitempty"`
 
 	// conditions is a list of conditions that apply to the APIExport.
 	//

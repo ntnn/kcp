@@ -192,8 +192,19 @@ spec:
                   type: object
                 type: array
               identityHash:
-                description: IdentityHash is a hash of the identity configuration
+                description: |-
+                  IdentityHash is the stable identity of this CachedResource, assigned once and
+                  immutable thereafter. For backwards compatibility, it defaults to the
+                  SHA-256 hash of the initial API identity key, but does not change when the key changes.
                 type: string
+              identityKeyHashes:
+                description: |-
+                  IdentityKeyHashes is the set of SHA-256 fingerprints of the API identity keys.
+                  Unlike identityHash, these fingerprints can change when the keys change.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               phase:
                 default: Initializing
                 description: Phase of the workspace (Initializing, Ready, Unavailable).

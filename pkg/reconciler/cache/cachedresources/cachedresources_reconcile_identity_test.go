@@ -270,6 +270,48 @@ func TestReconcileIdentity(t *testing.T) {
 		},
 	}
 
+	t.Run("key membership", func(t *testing.T) {
+		secret := &corev1.Secret{Data: map[string][]byte{"key": []byte("new-key")}}
+		hash, err := IdentityHash(secret)
+		require.NoError(t, err)
+		for _, tt := range []struct {
+			name, id, found, want string
+			hashes                []string
+			wantErr               bool
+		}{
+			{name: "legacy migration", id: hash, want: hash},
+			{name: "legacy foreign key", id: "old-key", wantErr: true},
+			{name: "adopt rotated identity", found: "stable", want: "stable"},
+			{name: "accepted key change", id: "stable", hashes: []string{"old-key", hash}, want: "stable"},
+			{name: "foreign key", id: "stable", hashes: []string{"other-key"}, wantErr: true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				resource := &cachev1alpha1.CachedResource{
+					Spec: cachev1alpha1.CachedResourceSpec{Identity: &cachev1alpha1.Identity{SecretRef: &corev1.SecretReference{Name: "key"}}},
+					Status: cachev1alpha1.CachedResourceStatus{
+						IdentityHash: tt.id, IdentityKeyHashes: tt.hashes,
+					},
+				}
+				r := &identity{
+					getSecret: func(context.Context, logicalcluster.Name, string, string) (*corev1.Secret, error) {
+						return secret, nil
+					},
+					lookupIdentity: func(string) (string, error) { return tt.found, nil },
+				}
+				err := r.updateOrVerifyIdentitySecretHash(context.Background(), "cluster", resource, "")
+				if tt.wantErr {
+					require.Error(t, err)
+					require.Equal(t, tt.id, resource.Status.IdentityHash)
+					require.Equal(t, tt.hashes, resource.Status.IdentityKeyHashes)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, tt.want, resource.Status.IdentityHash)
+				require.Contains(t, resource.Status.IdentityKeyHashes, hash)
+			})
+		}
+	})
+
 	for testName, tt := range tests {
 		t.Run(testName, func(t *testing.T) {
 			status, err := tt.reconciler.reconcile(context.Background(), tt.CachedResource)

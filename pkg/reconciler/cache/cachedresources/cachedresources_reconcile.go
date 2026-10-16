@@ -78,6 +78,7 @@ func (c *Controller) reconcile(ctx context.Context, cluster logicalcluster.Name,
 			getSecret:                   c.getSecret,
 			createIdentitySecret:        c.createIdentitySecret,
 			secretNamespace:             c.secretNamespace,
+			lookupIdentity:              c.lookupIdentity,
 		},
 		&endpointSlice{
 			getEndpointSlice:    c.getEndpointSlice,

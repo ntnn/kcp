@@ -101,6 +101,7 @@ func TestReconcile(t *testing.T) {
 			secretExists: false,
 
 			wantVerifyFailure: true,
+			wantError:         true,
 		},
 		"identity verification fails when hash from secret's key differs with APIExport's hash": {
 			secretRefSet:                         true,
@@ -109,6 +110,7 @@ func TestReconcile(t *testing.T) {
 			secretHashDoesntMatchAPIExportStatus: true,
 
 			wantVerifyFailure: true,
+			wantError:         true,
 		},
 		"able to fix identity verification by returning to secret with correct key/hash": {
 			secretRefSet:                true,
@@ -167,6 +169,48 @@ func TestReconcile(t *testing.T) {
 			listShardsError:          errors.New("foo"),
 		},
 	}
+
+	t.Run("key membership", func(t *testing.T) {
+		secret := &corev1.Secret{Data: map[string][]byte{"key": []byte("new-key")}}
+		hash, err := IdentityHash(secret)
+		require.NoError(t, err)
+		for _, tt := range []struct {
+			name, id, found, want string
+			hashes                []string
+			wantErr               bool
+		}{
+			{name: "legacy migration", id: hash, want: hash},
+			{name: "legacy foreign key", id: "old-key", wantErr: true},
+			{name: "adopt rotated identity", found: "stable", want: "stable"},
+			{name: "accepted key change", id: "stable", hashes: []string{"old-key", hash}, want: "stable"},
+			{name: "foreign key", id: "stable", hashes: []string{"other-key"}, wantErr: true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				export := &apisv1alpha2.APIExport{
+					Spec: apisv1alpha2.APIExportSpec{Identity: &apisv1alpha2.Identity{SecretRef: &corev1.SecretReference{Name: "key"}}},
+					Status: apisv1alpha2.APIExportStatus{
+						IdentityHash: tt.id, IdentityKeyHashes: tt.hashes,
+					},
+				}
+				c := &controller{
+					getSecret: func(context.Context, logicalcluster.Name, string, string) (*corev1.Secret, error) {
+						return secret, nil
+					},
+					lookupIdentity: func(string) (string, error) { return tt.found, nil },
+				}
+				err := c.updateOrVerifyIdentitySecretHash(context.Background(), "cluster", export)
+				if tt.wantErr {
+					require.Error(t, err)
+					require.Equal(t, tt.id, export.Status.IdentityHash)
+					require.Equal(t, tt.hashes, export.Status.IdentityKeyHashes)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, tt.want, export.Status.IdentityHash)
+				require.Contains(t, export.Status.IdentityKeyHashes, hash)
+			})
+		}
+	})
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

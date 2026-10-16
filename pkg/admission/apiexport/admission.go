@@ -32,6 +32,7 @@ import (
 	apisv1alpha1 "github.com/kcp-dev/sdk/apis/apis/v1alpha1"
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 
+	"github.com/kcp-dev/kcp/pkg/admission/helpers"
 	builtinapiexport "github.com/kcp-dev/kcp/pkg/virtual/apiexport/schemas/builtin"
 )
 
@@ -68,6 +69,9 @@ var _ = admission.ValidationInterface(&APIExportAdmission{})
 func (e *APIExportAdmission) Validate(ctx context.Context, a admission.Attributes, _ admission.ObjectInterfaces) (err error) {
 	if a.GetResource().GroupResource() != apisv1alpha2.Resource("apiexports") || a.GetKind().GroupKind() != apisv1alpha2.Kind("APIExport") {
 		return nil
+	}
+	if err := helpers.ValidateIdentityStatus(a); err != nil {
+		return err
 	}
 
 	u, ok := a.GetObject().(*unstructured.Unstructured)
