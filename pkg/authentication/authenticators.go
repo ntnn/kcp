@@ -27,27 +27,41 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/kcp-dev/kcp/pkg/index"
+	"github.com/kcp-dev/kcp/pkg/server/proxy"
 )
 
-func NewStandaloneWorkspaceAuthenticator(clusterIndex *index.State, authIndex AuthenticatorIndex) authenticator.Request {
+func NewStandaloneWorkspaceAuthenticator(clusterIndex index.Index, authIndex AuthenticatorIndex) authenticator.Request {
 	return authenticator.RequestFunc(func(req *http.Request) (*authenticator.Response, bool, error) {
-		clusterName, err := request.ClusterNameFrom(req.Context())
-		if err != nil {
-			klog.FromContext(req.Context()).V(4).Info("standalone workspace authenticator skipped: request has no cluster context", "path", req.URL.Path, "err", err)
-			return nil, false, nil
+		ctx := req.Context()
+		wsType := proxy.WorkspaceTypeFrom(ctx)
+		if wsType.Empty() {
+			// TODO(ntnn): Requests that are passed directly into the
+			// authn/authz chain are missing the workspace resolution
+			// from the http handler chain.
+			// This impacts e.g. the crafted TokenReviews that are build
+			// in the kcp kube fork, which only contain the clusterID.
+			//
+			// To still handle these correctly the same workspace
+			// resolution as in the http handler chain is done here to
+			// get the correct WorkspaceType.
+			clusterName, err := request.ClusterNameFrom(ctx)
+			if err != nil {
+				klog.FromContext(ctx).V(4).Info("standalone workspace authenticator skipped: request has no cluster context", "path", req.URL.Path, "err", err)
+				return nil, false, nil
+			}
+			resolved, err := proxy.Resolve(ctx, clusterIndex, clusterName.Path())
+			if err != nil {
+				klog.FromContext(ctx).V(4).Info("standalone workspace authenticator skipped: cluster not resolved", "cluster", clusterName, "err", err)
+				return nil, false, nil
+			}
+			wsType = proxy.WorkspaceTypeFrom(resolved)
 		}
-
-		result, found := clusterIndex.Lookup(clusterName.Path())
-		if !found {
-			return nil, false, nil
-		}
-
 		// workspacemounts have no type
-		if result.Type.Empty() {
+		if wsType.Empty() {
 			return nil, false, nil
 		}
 
-		reqAuthenticator, ok := authIndex.Lookup(result.Type)
+		reqAuthenticator, ok := authIndex.Lookup(wsType)
 		if !ok {
 			return nil, false, nil
 		}
