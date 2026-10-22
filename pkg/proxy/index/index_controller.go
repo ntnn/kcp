@@ -302,10 +302,6 @@ func (c *Controller) Lookup(path logicalcluster.Path) (index.Result, bool) {
 	return c.state.Lookup(path)
 }
 
-func (c *Controller) LookupURL(path logicalcluster.Path) (index.Result, bool) {
-	return c.state.LookupURL(path)
-}
-
 func (c *Controller) BaseURL(shardName string) (string, bool) {
 	return c.state.BaseURL(shardName)
 }

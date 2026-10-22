@@ -52,10 +52,6 @@ func (f *fakeIndex) Lookup(path logicalcluster.Path) (index.Result, bool) {
 	return f.result, f.found
 }
 
-func (f *fakeIndex) LookupURL(path logicalcluster.Path) (index.Result, bool) {
-	return f.result, f.found
-}
-
 func (f *fakeIndex) RecentlyMigrated(cluster logicalcluster.Name) bool {
 	return f.recentlyMigrated
 }
