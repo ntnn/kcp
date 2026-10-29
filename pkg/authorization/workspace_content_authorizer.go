@@ -94,12 +94,6 @@ func (a *workspaceContentAuthorizer) Authorize(ctx context.Context, attr authori
 		return DelegateAuthorization("deep SAR request", a.delegate).Authorize(ctx, attr)
 	}
 
-	// always let logical-cluster-admins through
-	effGroups := rbacregistryvalidation.EffectiveGroups(ctx, attr.GetUser())
-	if effGroups.Has(bootstrap.SystemLogicalClusterAdmin) {
-		return DelegateAuthorization("logical cluster admin access", a.delegate).Authorize(ctx, attr)
-	}
-
 	// check the workspace even exists
 	logicalCluster, err := a.getLogicalCluster(cluster.Name)
 	if err != nil {

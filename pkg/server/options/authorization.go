@@ -226,6 +226,10 @@ func (s *Authorization) ApplyTo(ctx context.Context, config *genericapiserver.Co
 		bypass = append(bypass, a)
 	}
 
+	// The logical cluster management identities operate on logical clusters themselves - in
+	// every phase and before any content exists.
+	bypass = append(bypass, authz.NewDecorator("bypass-logicalclustermanagement", authz.NewLogicalClusterManagementBypassAuthorizer(bootstrapAuth)).AddAuditLogging().AddAnonymization())
+
 	// Allow the synthetic intializing and terminating pre-authorized requests through.
 	bypass = append(bypass, authz.NewLifecycleGroupsAuthorizer(getLogicalCluster))
 
