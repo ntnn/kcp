@@ -77,6 +77,7 @@ func NewAuthentication() *Authentication {
 			bootstrap.SystemLogicalClusterAdmin,
 			bootstrap.SystemKcpInitializerGroupPrefix + "*",
 			bootstrap.SystemKcpTerminatorGroupPrefix + "*",
+			bootstrap.SystemKcpOwnerImpersonationGroup,
 		},
 	}
 	auth.BuiltInOptions.ServiceAccounts.Issuers = []string{"https://kcp.default.svc"}

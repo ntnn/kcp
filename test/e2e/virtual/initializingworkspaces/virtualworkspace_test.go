@@ -56,6 +56,7 @@ import (
 	kcptestinghelpers "github.com/kcp-dev/sdk/testing/helpers"
 
 	"github.com/kcp-dev/kcp/pkg/authorization"
+	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
 	"github.com/kcp-dev/kcp/pkg/virtual/initializingworkspaces"
 	"github.com/kcp-dev/kcp/test/e2e/fixtures/authfixtures"
 	"github.com/kcp-dev/kcp/test/e2e/framework"
@@ -361,11 +362,12 @@ func TestInitializingWorkspacesVirtualWorkspaceAccess(t *testing.T) {
 		})
 	}
 
-	t.Log("Ensure that LIST calls through the virtual workspace eventually show the correct values")
+	t.Log("Ensure that the initializing workspaces have a logical cluster assigned")
 	for _, wsName := range wsNames {
 		require.EventuallyWithT(t, func(c *assert.CollectT) {
-			_, err := sourceKcpClusterClient.CoreV1alpha1().Cluster(wsPath.Join(wsName)).LogicalClusters().Get(ctx, corev1alpha1.LogicalClusterName, metav1.GetOptions{})
-			require.NoError(c, err, "got %#v error getting logicalcluster %q, expected success", err, wsPath.Join(wsName))
+			ws, err := sourceKcpClusterClient.Cluster(wsPath).TenancyV1alpha1().Workspaces().Get(ctx, wsName, metav1.GetOptions{})
+			require.NoError(c, err, "error getting workspace %q", wsName)
+			require.NotEmpty(c, ws.Spec.Cluster, "workspace %q has no logical cluster assigned", wsName)
 		}, wait.ForeverTestTimeout, 100*time.Millisecond)
 	}
 
@@ -973,9 +975,17 @@ func TestInitializingWorkspacesServiceAccountOwnedWorkspace(t *testing.T) {
 	// Confirm the LogicalCluster.Spec.CreatedBy is indeed the SA: this is the
 	// identity that the pre-fix Mode-2 path would have impersonated, and which
 	// would have failed because the SA's scope makes it unusable in the new
-	// cluster.
+	// cluster. An initializing cluster serves no content, so this reads the
+	// control-plane object as a logical cluster administrator.
+	lcAdminConfig := rest.AddUserAgent(rest.CopyConfig(sourceConfig), t.Name()+"-lc-admin")
+	lcAdminConfig.Impersonate = rest.ImpersonationConfig{
+		UserName: bootstrap.SystemExternalLogicalClusterAdmin,
+		Groups:   []string{bootstrap.SystemExternalLogicalClusterAdmin, "system:authenticated"},
+	}
+	lcAdminKcpClient, err := kcpclientset.NewForConfig(lcAdminConfig)
+	require.NoError(t, err)
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		lc, err := sourceKcpClusterClient.Cluster(wsClusterName.Path()).CoreV1alpha1().LogicalClusters().Get(ctx, corev1alpha1.LogicalClusterName, metav1.GetOptions{})
+		lc, err := lcAdminKcpClient.Cluster(wsClusterName.Path()).CoreV1alpha1().LogicalClusters().Get(ctx, corev1alpha1.LogicalClusterName, metav1.GetOptions{})
 		require.NoError(c, err)
 		require.NotNil(c, lc.Spec.CreatedBy)
 		require.Equal(c, saSubjectName, lc.Spec.CreatedBy.Username,

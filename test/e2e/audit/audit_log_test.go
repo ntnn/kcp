@@ -84,6 +84,7 @@ func TestAuditLogs(t *testing.T) {
 		"request.auth.kcp.io/grant-content",
 		"request.auth.kcp.io/grant-bootstrap",
 		"request.auth.kcp.io/gate-requiredgroups",
+		"request.auth.kcp.io/gate-logicalclusterphase",
 		"request.auth.kcp.io/gate-systemcrd",
 		"request.auth.kcp.io/gate-maxpermissionpolicy",
 	} {

@@ -68,6 +68,13 @@ const (
 	// SystemKcpTerminatorGroupPrefix is the group prefix used by the terminating virtual
 	// workspace's content proxy. See SystemKcpInitializerGroupPrefix for semantics.
 	SystemKcpTerminatorGroupPrefix = "system:kcp:terminator:"
+	// SystemKcpOwnerImpersonationGroup is the group the initializing and terminating virtual
+	// workspaces add when they proxy content as the logical cluster's createdBy identity
+	// instead of the caller's (their owner-impersonation fallback). Clients cannot self-assert
+	// it: the front-proxy drops it on ingress and the impersonation filter only lets a caller
+	// assert a special group it already holds. Seeing it therefore means a lifecycle proxy
+	// put it there.
+	SystemKcpOwnerImpersonationGroup = "system:kcp:owner-impersonation"
 )
 
 const (

@@ -56,7 +56,9 @@ var (
 		authorizationbootstrap.SystemExternalLogicalClusterAdmin: privileged,
 		authorizationbootstrap.SystemKcpWorkspaceBootstrapper:    privileged,
 		authorizationbootstrap.SystemKcpAdminGroup:               privileged,
-		user.AllAuthenticated:                                    authenticated,
+		// injected by the lifecycle virtual workspaces, never claimable by clients
+		authorizationbootstrap.SystemKcpOwnerImpersonationGroup: privileged,
+		user.AllAuthenticated: authenticated,
 	}
 )
 

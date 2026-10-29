@@ -72,3 +72,15 @@ func (a *logicalClusterManagementBypassAuthorizer) Authorize(ctx context.Context
 
 	return authorizer.DecisionAllow, "logical cluster management: " + reason, nil
 }
+
+// bootstrapPolicyAllows reports whether the bootstrap policy allows the request.
+func bootstrapPolicyAllows(ctx context.Context, bootstrapPolicy authorizer.Authorizer, attr authorizer.Attributes) (bool, string, error) {
+	dec, reason, err := bootstrapPolicy.Authorize(ctx, attr)
+	if err != nil {
+		return false, "error checking bootstrap policy", err
+	}
+	if dec != authorizer.DecisionAllow {
+		return false, "not covered by the bootstrap policy", nil
+	}
+	return true, reason, nil
+}

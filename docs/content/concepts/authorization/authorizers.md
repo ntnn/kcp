@@ -68,6 +68,7 @@ The following authorizers work together to implement RBAC in kcp:
 | Authorizer                             | Description                                                                                |
 |----------------------------------------|--------------------------------------------------------------------------------------------|
 | Workspace content authorizer           | validates that the user has `access` permission to the workspace                           |
+| Logical cluster phase authorizer       | denies content access while the logical cluster is in a phase that forbids it              |
 | Required groups authorizer             | validates that the user is in the annotation-based list of groups required for a workspace |
 | System CRD authorizer             | prevents undesired updates to certain core resources, like the status subresource on APIBindings |
 | Maximal permission policy authorizer   | validates the maximal permission policy RBAC policy in the API exporter workspace          |
@@ -90,6 +91,27 @@ by system identities.
 Service accounts of the accessed workspace itself are exempt from this check; service accounts
 from other workspaces (as well as tokens scoped to another workspace) are subject to it like
 any other user.
+
+#### Logical Cluster Phase Authorizer
+
+Content of a logical cluster is reachable through the normal authorization chain only while its
+`LogicalCluster` object is in `Ready` phase. Every other phase - `Scheduling`, `Initializing`,
+`Inactive`, `Terminating`, `Deleting`, `Unavailable` and any unknown phase - is denied, no matter
+which grant allowed the request.
+
+What legitimately operates on a cluster in another phase is admitted by a bypass authorizer in
+front of the chain:
+
+| Bypass | why it exists |
+|---|---|
+| `system:kcp:logical-cluster-admin`, `system:kcp:external-logical-cluster-admin` | kcp manages logical clusters themselves, in every phase and before content exists. Bounded by the bootstrap policy. |
+| `system:kcp:initializer:*`, `system:kcp:terminator:*` | initializers and terminators the cluster registered, see Lifecycle Synthetic Groups below. |
+| `system:kcp:owner-impersonation` | the lifecycle virtual workspaces' owner-impersonation fallback. Only together with the identity recorded in `spec.createdBy`, so the fallback cannot be asserted by a client. |
+| `system:kcp:tenancy:workspace-bootstrapper` | kcp bootstraps the RBAC and default APIBindings of an `Initializing` cluster before it can serve them through the regular chain. |
+| `logicalclusters/cluster` of an `Inactive` or `Deleting` cluster, plus `/openapi` of an `Inactive` one | an inactive cluster is reactivated and a deleting one finalizes through its own object: whoever added a finalizer has to be able to remove it. Bounded by the bootstrap policy. |
+
+This authorizer is a gate: a grant from RBAC or the authorization webhook cannot undo the denial.
+It is skipped for deep subject access reviews and for empty and `system:` logical clusters.
 
 #### Workspace Content Authorizer
 
@@ -131,14 +153,8 @@ roleRef:
   name: cluster-admin
 ```
 
-By default, workspaces are only accessible to a subject if they are in `Ready` phase. Workspaces that are initializing
-can be accessed only by subjects who are granted `admin` verb on the `workspaces/content` resource in the
-parent workspace.
-
-The authorizer also permits content access while the workspace is in the `Terminating` and `Deleting` phases so
-that terminator controllers and standard kube finalization (garbage collection, namespace deletion, finalizer
-removal) can complete cleanup. Permission is otherwise unchanged: subjects still need a matching binding inside
-the workspace.
+By default, workspaces are only accessible to a subject if they are in `Ready` phase. The phase
+itself is enforced by the logical cluster phase authorizer, see above.
 
 ServiceAccounts declared within a workspace don't have access to content of initializing workspaces.
 
@@ -149,6 +165,7 @@ groups attached to the controller's identity:
 
 * `system:kcp:initializer:<initializer-path>` (e.g. `system:kcp:initializer:root:tenant`)
 * `system:kcp:terminator:<terminator-path>` (e.g. `system:kcp:terminator:root:tenant`)
+* `system:kcp:owner-impersonation`, used by the owner-impersonation fallback below
 
 The `<initializer-path>` / `<terminator-path>` segment is the fully qualified path of the
 WorkspaceType the controller is associated with (workspace path joined with the WST
@@ -160,10 +177,18 @@ and terminator controllers with scoped `initializerPermissions` / `terminatorPer
 [Workspace Types](../workspaces/workspace-types.md#lifecycle-permissions)) to act with their own identity instead
 of impersonating the workspace owner.
 
-These groups cannot be self-asserted by clients: the front-proxy's `--authentication-drop-groups` defaults strip
-both prefixes (`system:kcp:initializer:*` and `system:kcp:terminator:*`) from every incoming request before any
+If the WorkspaceType declares no lifecycle permissions, the proxies fall back to impersonating the
+identity the `LogicalCluster` recorded in `spec.createdBy`, and add `system:kcp:owner-impersonation`
+on top of it. That group is only meaningful to the logical cluster phase authorizer, and only
+combined with a matching `spec.createdBy` identity.
+
+These groups cannot be self-asserted by clients: the front-proxy's `--authentication-drop-groups`
+defaults strip them (`system:kcp:initializer:*`, `system:kcp:terminator:*`,
+`system:kcp:owner-impersonation`) from every incoming request before any
 routing happens. The only code paths that can inject them are the VW content proxies, which run inside the
 front-proxy process and add the group **after** the in-process RBAC evaluation has already allowed the request.
+The same groups are registered as special in the impersonation filter, so a caller may only impersonate a group
+it already holds.
 
 ##### Cross-Workspace
 
@@ -352,6 +377,8 @@ The authorizers are evaluated in four fixed groups:
 1. **Bypass**: These let e.g. system identities pass the authorization
    checks and grant access to the paths listed in
    `--authorization-always-allow-paths` for e.g. metrics endpoints.
+   The logical cluster management identities are admitted here for the
+   requests the bootstrap policy grants them.
 2. **Pre-gate**: Basic checks validating if a request is valid in the
    first place, e.g. whether the logical cluster a request is made for
    exists.
@@ -361,7 +388,8 @@ The authorizers are evaluated in four fixed groups:
 4. **Gate**: Final checks that may restrict access that was granted by
    either RBAC or the authorization webhook.
    This applies the filter for the required-groups annotation on
-   workspaces and the maximal permission policy of providers.
+   workspaces, the phase of the logical cluster and the maximal
+   permission policy of providers.
 
 `--authorization-order` only selects and orders the grant authorizers. The bypass, pre-gate
 and gate authorizers always run in their fixed position, so an authorization webhook can

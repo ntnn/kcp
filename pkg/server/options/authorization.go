@@ -226,12 +226,15 @@ func (s *Authorization) ApplyTo(ctx context.Context, config *genericapiserver.Co
 		bypass = append(bypass, a)
 	}
 
-	// The logical cluster management identities operate on logical clusters themselves - in
-	// every phase and before any content exists.
-	bypass = append(bypass, authz.NewDecorator("bypass-logicalclustermanagement", authz.NewLogicalClusterManagementBypassAuthorizer(bootstrapAuth)).AddAuditLogging().AddAnonymization())
-
-	// Allow the synthetic intializing and terminating pre-authorized requests through.
-	bypass = append(bypass, authz.NewLifecycleGroupsAuthorizer(getLogicalCluster))
+	// what operates on a logical cluster that is not Ready:
+	// - the synthetic initializing and terminating identities,
+	// - the lifecycle virtual workspaces proxying content as the creator of the logical cluster,
+	// - kcp bootstrapping a logical cluster before it turns Ready.
+	bypass = append(bypass,
+		authz.NewLifecycleGroupsAuthorizer(getLogicalCluster),
+		authz.NewDecorator("bypass-ownerimpersonation", authz.NewOwnerImpersonationBypassAuthorizer(getLogicalCluster)).AddAuditLogging().AddAnonymization(),
+		authz.NewDecorator("bypass-bootstrapper", authz.NewWorkspaceBootstrapperBypassAuthorizer(getLogicalCluster)).AddAuditLogging().AddAnonymization(),
+	)
 
 	// pre-gates run before any grant
 	preGate := authz.NewDecorator("pregate-existence", authz.NewLogicalClusterExistenceAuthorizer(getLogicalCluster)).AddAuditLogging().AddAnonymization().AddReasonAnnotation()
@@ -248,6 +251,18 @@ func (s *Authorization) ApplyTo(ctx context.Context, config *genericapiserver.Co
 		case authorizerRBAC:
 			// bootstrap rules defined once for every workspace
 			bootstrapAuth, bootstrapRules := authz.NewBootstrapPolicyAuthorizer(kubeInformers)
+
+			// - the logical cluster management identities operate on logical clusters themselves,
+			//   in every phase and before any content exists,
+			// - inactive clusters are reactivated and deleting ones finalize, both through their own
+			//   LogicalCluster object.
+			// Both are bounded by the bootstrap policy, here undecorated so the grant is not
+			// annotated twice.
+			bypass = append(bypass,
+				authz.NewDecorator("bypass-logicalclustermanagement", authz.NewLogicalClusterManagementBypassAuthorizer(bootstrapAuth)).AddAuditLogging().AddAnonymization(),
+				authz.NewDecorator("bypass-logicalclusterselfmanagement", authz.NewLogicalClusterSelfManagementBypassAuthorizer(getLogicalCluster, bootstrapAuth)).AddAuditLogging().AddAnonymization(),
+			)
+
 			bootstrapAuth = authz.NewDecorator("grant-bootstrap", bootstrapAuth).AddAuditLogging().AddAnonymization().AddReasonAnnotation()
 
 			// resolves RBAC resources in the workspace
@@ -267,7 +282,7 @@ func (s *Authorization) ApplyTo(ctx context.Context, config *genericapiserver.Co
 			// of default permissions given even to system:authenticated (like access to discovery) - this authorizer allows
 			// kcp to make workspaces entirely invisible to users that have not been given access, by making system:authenticated
 			// mean nothing unless they also have `verb=access` on `/`.
-			rbacAccess := authz.NewWorkspaceContentAuthorizer(kubeInformers, globalKubeInformers, getLogicalCluster)(rbacAuth)
+			rbacAccess := authz.NewWorkspaceContentAuthorizer(kubeInformers, globalKubeInformers)(rbacAuth)
 			rbacAccess = authz.NewDecorator("grant-content", rbacAccess).AddAuditLogging().AddAnonymization().AddReasonAnnotation()
 
 			grants = append(grants, rbacAccess)
@@ -322,6 +337,11 @@ func (s *Authorization) ApplyTo(ctx context.Context, config *genericapiserver.Co
 	// protect status updates to apiexport and apibinding
 	gates = authz.NewSystemCRDAuthorizer(gates)
 	gates = authz.NewDecorator("gate-systemcrd", gates).AddAuditLogging().AddAnonymization().AddReasonAnnotation()
+
+	// a logical cluster has to be in a phase that permits access to its content, no matter
+	// which grant allowed the request
+	gates = authz.NewLogicalClusterPhaseAuthorizer(getLogicalCluster)(gates)
+	gates = authz.NewDecorator("gate-logicalclusterphase", gates).AddAuditLogging().AddAnonymization().AddReasonAnnotation()
 
 	// workspaces are annotated to list the groups required on users wishing to access the workspace -
 	// this is mostly useful when adding a core set of groups to an org workspace and having them inherited

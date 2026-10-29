@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	controlplaneapiserver "k8s.io/kubernetes/pkg/controlplane/apiserver"
@@ -30,10 +29,8 @@ import (
 
 	kcpkubernetesinformers "github.com/kcp-dev/client-go/informers"
 	rbacv1listers "github.com/kcp-dev/client-go/listers/rbac/v1"
-	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 	rbacwrapper "github.com/kcp-dev/virtual-workspace-framework/pkg/wrappers/rbac"
 
-	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
 	"github.com/kcp-dev/kcp/pkg/authorization/shardpaths"
 )
 
@@ -41,7 +38,7 @@ const (
 	WorkspaceAccessNotPermittedReason = "workspace access not permitted"
 )
 
-func NewWorkspaceContentAuthorizer(localInformers, globalInformers kcpkubernetesinformers.SharedInformerFactory, getLogicalCluster LogicalClusterGetter) func(delegate authorizer.Authorizer) authorizer.Authorizer {
+func NewWorkspaceContentAuthorizer(localInformers, globalInformers kcpkubernetesinformers.SharedInformerFactory) func(delegate authorizer.Authorizer) authorizer.Authorizer {
 	return func(delegate authorizer.Authorizer) authorizer.Authorizer {
 		return &workspaceContentAuthorizer{
 			localClusterRoleLister:        localInformers.Rbac().V1().ClusterRoles().Lister(),
@@ -49,8 +46,6 @@ func NewWorkspaceContentAuthorizer(localInformers, globalInformers kcpkubernetes
 
 			globalClusterRoleLister:        globalInformers.Rbac().V1().ClusterRoles().Lister(),
 			globalClusterRoleBindingLister: globalInformers.Rbac().V1().ClusterRoleBindings().Lister(),
-
-			getLogicalCluster: getLogicalCluster,
 
 			delegate: delegate,
 		}
@@ -63,8 +58,6 @@ type workspaceContentAuthorizer struct {
 
 	globalClusterRoleBindingLister rbacv1listers.ClusterRoleBindingClusterLister
 	globalClusterRoleLister        rbacv1listers.ClusterRoleClusterLister
-
-	getLogicalCluster LogicalClusterGetter
 
 	delegate authorizer.Authorizer
 }
@@ -92,33 +85,6 @@ func (a *workspaceContentAuthorizer) Authorize(ctx context.Context, attr authori
 
 	if IsDeepSubjectAccessReviewFrom(ctx, attr) {
 		return DelegateAuthorization("deep SAR request", a.delegate).Authorize(ctx, attr)
-	}
-
-	// check the workspace even exists
-	logicalCluster, err := a.getLogicalCluster(cluster.Name)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			return authorizer.DecisionDeny, "LogicalCluster not found", nil
-		}
-		return authorizer.DecisionNoOpinion, "error getting LogicalCluster", err
-	}
-
-	switch logicalCluster.Status.Phase {
-	case corev1alpha1.LogicalClusterPhaseInitializing,
-		corev1alpha1.LogicalClusterPhaseReady,
-		// Inactive: WithBlockInactiveLogicalClusters denies content access at the HTTP filter
-		// layer while permitting /openapi and the LogicalCluster resource itself, so the cluster
-		// can be reactivated. The authorizer must not also deny based on phase, otherwise the
-		// LC GET/UPDATE used to clear the inactive annotation is rejected.
-		corev1alpha1.LogicalClusterPhaseInactive,
-		// Terminating: registered terminator controllers are running and need to clean up content.
-		// Deleting: terminators are done; standard kube finalization (GC, namespace deletion,
-		// finalizer removal) still needs content access until the LogicalCluster object is gone.
-		corev1alpha1.LogicalClusterPhaseTerminating,
-		corev1alpha1.LogicalClusterPhaseDeleting:
-		// allowed
-	default: // Scheduling, Unavailable, Unknown, or any future phases are not allowed to access workspace content
-		return authorizer.DecisionNoOpinion, fmt.Sprintf("not permitted due to phase %q", logicalCluster.Status.Phase), nil
 	}
 
 	switch {

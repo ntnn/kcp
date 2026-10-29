@@ -55,6 +55,7 @@ import (
 
 	rootphase0 "github.com/kcp-dev/kcp/config/root-phase0"
 	"github.com/kcp-dev/kcp/pkg/authorization"
+	"github.com/kcp-dev/kcp/pkg/authorization/bootstrap"
 	"github.com/kcp-dev/kcp/pkg/authorization/delegated"
 	"github.com/kcp-dev/kcp/pkg/indexers"
 	"github.com/kcp-dev/kcp/pkg/server/requestinfo"
@@ -335,11 +336,15 @@ func BuildVirtualWorkspace(
 					extra[k] = v
 				}
 
+				// the synthetic group marks the request as proxied with the creator's identity,
+				// so the phase authorizer can tell it apart from a plain owner request
+				groups := append([]string{bootstrap.SystemKcpOwnerImpersonationGroup}, info.Groups...)
+
 				thisCfg := rest.CopyConfig(cfg)
 				thisCfg.Impersonate = rest.ImpersonationConfig{
 					UserName: info.Username,
 					UID:      info.UID,
-					Groups:   info.Groups,
+					Groups:   groups,
 					Extra:    extra,
 				}
 				authenticatingTransport, err := rest.TransportFor(thisCfg)

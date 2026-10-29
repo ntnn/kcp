@@ -33,7 +33,6 @@ import (
 	kcpkubernetesinformers "github.com/kcp-dev/client-go/informers"
 	kcpfakeclient "github.com/kcp-dev/client-go/kubernetes/fake"
 	"github.com/kcp-dev/logicalcluster/v3"
-	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
 )
 
 func newServiceAccountWithCluster(name string, cluster string, groups ...string) *user.DefaultInfo {
@@ -78,8 +77,8 @@ func TestWorkspaceContentAuthorizer(t *testing.T) {
 
 			requestedWorkspace: "root:unknown",
 			requestingUser:     &user.DefaultInfo{Name: "user-access"},
-			wantDecision:       authorizer.DecisionDeny,
-			wantReason:         "LogicalCluster not found",
+			wantDecision:       authorizer.DecisionNoOpinion,
+			wantReason:         "no verb=access permission on /",
 		},
 		{
 			testName: "workspace without parent",
@@ -166,14 +165,6 @@ func TestWorkspaceContentAuthorizer(t *testing.T) {
 			wantReason:         "delegating due to local service account access",
 		},
 		{
-			testName: "service account of same workspace is not allowed access to scheduling workspace",
-
-			requestedWorkspace: "root:scheduling",
-			requestingUser:     newServiceAccountWithCluster("somebody", "root:scheduling", "system:authenticated"),
-			wantDecision:       authorizer.DecisionNoOpinion,
-			wantReason:         "not permitted due to phase \"Scheduling\"",
-		},
-		{
 			testName: "service account of same workspace is allowed on initializing workspace",
 
 			requestedWorkspace: "root:initializing",
@@ -182,14 +173,14 @@ func TestWorkspaceContentAuthorizer(t *testing.T) {
 			wantReason:         "delegating due to local service account access",
 		},
 		{
-			testName: "system:kcp:logical-cluster-admin can always pass with exception if scoped",
+			testName: "system:kcp:logical-cluster-admin needs verb=access like everyone else",
 
 			requestedWorkspace: "root:non-existent",
 			requestingUser: &user.DefaultInfo{Name: "lcluster-admin", Extra: map[string][]string{
 				"authentication.kcp.io/scopes": {"cluster:other"},
 			}, Groups: []string{"system:kcp:logical-cluster-admin"}},
-			wantDecision: authorizer.DecisionDeny,
-			wantReason:   "LogicalCluster not found",
+			wantDecision: authorizer.DecisionNoOpinion,
+			wantReason:   "no verb=access permission on /",
 		},
 		{
 			testName: "permitted user is granted access to initializing workspace",
@@ -355,16 +346,8 @@ func TestWorkspaceContentAuthorizer(t *testing.T) {
 			}
 			cache.WaitForCacheSync(ctx.Done(), syncs...)
 
-			getLogicalCluster := stubLogicalClusterGetter(
-				newLogicalCluster(logicalcluster.Name("root:authenticated"), corev1alpha1.LogicalClusterPhaseReady),
-				newLogicalCluster(logicalcluster.Name("root:ready"), corev1alpha1.LogicalClusterPhaseReady),
-				newLogicalCluster(logicalcluster.Name("root:scheduling"), corev1alpha1.LogicalClusterPhaseScheduling),
-				newLogicalCluster(logicalcluster.Name("root:initializing"), corev1alpha1.LogicalClusterPhaseInitializing),
-				newLogicalCluster(logicalcluster.Name("rootwithoutparent"), corev1alpha1.LogicalClusterPhaseReady),
-			)
-
 			recordingAuthorizer := &recordingAuthorizer{decision: authorizer.DecisionAllow, reason: "allowed"}
-			w := NewWorkspaceContentAuthorizer(local, global, getLogicalCluster)(recordingAuthorizer)
+			w := NewWorkspaceContentAuthorizer(local, global)(recordingAuthorizer)
 
 			requestedCluster := request.Cluster{
 				Name: logicalcluster.Name(tt.requestedWorkspace),
