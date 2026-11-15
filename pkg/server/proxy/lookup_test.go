@@ -233,6 +233,7 @@ func TestWithClusterResolver(t *testing.T) {
 		{Path: "/services/singleton/{cluster}"},
 		{Path: "/services/org/clusters/{cluster}"},
 		{Path: "/services/plain"},
+		{Path: "/"},
 	}
 
 	tests := map[string]struct {
@@ -280,6 +281,11 @@ func TestWithClusterResolver(t *testing.T) {
 		"unmatched goes to delegate": {
 			url:     "/healthz",
 			wantURL: "/healthz",
+		},
+		"root mapping with /clusters/x": {
+			url:         "/foo/clusters/" + wsWorkspacePath + "/api/v1",
+			wantCluster: &request.Cluster{Name: wsClusterID},
+			wantURL:     "/foo/clusters/" + wsWorkspacePath + "/api/v1",
 		},
 	}
 
