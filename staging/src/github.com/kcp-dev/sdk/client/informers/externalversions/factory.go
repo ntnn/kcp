@@ -36,6 +36,7 @@ import (
 	kcpapis "github.com/kcp-dev/sdk/client/informers/externalversions/apis"
 	kcpexternalversionscache "github.com/kcp-dev/sdk/client/informers/externalversions/cache"
 	kcpcore "github.com/kcp-dev/sdk/client/informers/externalversions/core"
+	kcpforest "github.com/kcp-dev/sdk/client/informers/externalversions/forest"
 	kcpinternalinterfaces "github.com/kcp-dev/sdk/client/informers/externalversions/internalinterfaces"
 	kcpmigration "github.com/kcp-dev/sdk/client/informers/externalversions/migration"
 	kcptenancy "github.com/kcp-dev/sdk/client/informers/externalversions/tenancy"
@@ -286,6 +287,7 @@ type SharedInformerFactory interface {
 	Apis() kcpapis.ClusterInterface
 	Cache() kcpexternalversionscache.ClusterInterface
 	Core() kcpcore.ClusterInterface
+	Forest() kcpforest.ClusterInterface
 	Migration() kcpmigration.ClusterInterface
 	Tenancy() kcptenancy.ClusterInterface
 	Topology() kcptopology.ClusterInterface
@@ -305,6 +307,10 @@ func (f *sharedInformerFactory) Cache() kcpexternalversionscache.ClusterInterfac
 
 func (f *sharedInformerFactory) Core() kcpcore.ClusterInterface {
 	return kcpcore.New(f, f.tweakListOptions)
+}
+
+func (f *sharedInformerFactory) Forest() kcpforest.ClusterInterface {
+	return kcpforest.New(f, f.tweakListOptions)
 }
 
 func (f *sharedInformerFactory) Migration() kcpmigration.ClusterInterface {
@@ -467,6 +473,7 @@ type SharedScopedInformerFactory interface {
 	Apis() kcpapis.Interface
 	Cache() kcpexternalversionscache.Interface
 	Core() kcpcore.Interface
+	Forest() kcpforest.Interface
 	Migration() kcpmigration.Interface
 	Tenancy() kcptenancy.Interface
 	Topology() kcptopology.Interface
@@ -486,6 +493,10 @@ func (f *sharedScopedInformerFactory) Cache() kcpexternalversionscache.Interface
 
 func (f *sharedScopedInformerFactory) Core() kcpcore.Interface {
 	return kcpcore.NewScoped(f, f.namespace, f.tweakListOptions)
+}
+
+func (f *sharedScopedInformerFactory) Forest() kcpforest.Interface {
+	return kcpforest.NewScoped(f, f.namespace, f.tweakListOptions)
 }
 
 func (f *sharedScopedInformerFactory) Migration() kcpmigration.Interface {

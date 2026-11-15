@@ -30,6 +30,7 @@ import (
 	v1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	forestv1alpha1 "github.com/kcp-dev/sdk/apis/forest/v1alpha1"
 	migrationv1alpha1 "github.com/kcp-dev/sdk/apis/migration/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	conditionsv1alpha1 "github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1"
@@ -40,6 +41,7 @@ import (
 	applyconfigurationcachev1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/cache/v1alpha1"
 	applyconfigurationconditionsv1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/conditions/v1alpha1"
 	applyconfigurationcorev1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/core/v1alpha1"
+	applyconfigurationforestv1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/forest/v1alpha1"
 	internal "github.com/kcp-dev/sdk/client/applyconfiguration/internal"
 	applyconfigurationmetav1 "github.com/kcp-dev/sdk/client/applyconfiguration/meta/v1"
 	applyconfigurationmigrationv1alpha1 "github.com/kcp-dev/sdk/client/applyconfiguration/migration/v1alpha1"
@@ -218,6 +220,14 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationcorev1alpha1.ShardSpecApplyConfiguration{}
 	case corev1alpha1.SchemeGroupVersion.WithKind("ShardStatus"):
 		return &applyconfigurationcorev1alpha1.ShardStatusApplyConfiguration{}
+
+		// Group=forest.tenancy.kcp.io, Version=v1alpha1
+	case forestv1alpha1.SchemeGroupVersion.WithKind("LogicalRoot"):
+		return &applyconfigurationforestv1alpha1.LogicalRootApplyConfiguration{}
+	case forestv1alpha1.SchemeGroupVersion.WithKind("LogicalRootSpec"):
+		return &applyconfigurationforestv1alpha1.LogicalRootSpecApplyConfiguration{}
+	case forestv1alpha1.SchemeGroupVersion.WithKind("LogicalRootStatus"):
+		return &applyconfigurationforestv1alpha1.LogicalRootStatusApplyConfiguration{}
 
 		// Group=meta.k8s.io, Version=v1
 	case v1.SchemeGroupVersion.WithKind("Condition"):

@@ -33,6 +33,7 @@ import (
 	v1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	cachev1alpha1 "github.com/kcp-dev/sdk/apis/cache/v1alpha1"
 	corev1alpha1 "github.com/kcp-dev/sdk/apis/core/v1alpha1"
+	forestv1alpha1 "github.com/kcp-dev/sdk/apis/forest/v1alpha1"
 	migrationv1alpha1 "github.com/kcp-dev/sdk/apis/migration/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/apis/tenancy/v1alpha1"
 	conditionsv1alpha1 "github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1"
@@ -134,6 +135,10 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		corev1alpha1.ShardResourceLimits{}.OpenAPIModelName():                         schema_sdk_apis_core_v1alpha1_ShardResourceLimits(ref),
 		corev1alpha1.ShardSpec{}.OpenAPIModelName():                                   schema_sdk_apis_core_v1alpha1_ShardSpec(ref),
 		corev1alpha1.ShardStatus{}.OpenAPIModelName():                                 schema_sdk_apis_core_v1alpha1_ShardStatus(ref),
+		forestv1alpha1.LogicalRoot{}.OpenAPIModelName():                               schema_sdk_apis_forest_v1alpha1_LogicalRoot(ref),
+		forestv1alpha1.LogicalRootList{}.OpenAPIModelName():                           schema_sdk_apis_forest_v1alpha1_LogicalRootList(ref),
+		forestv1alpha1.LogicalRootSpec{}.OpenAPIModelName():                           schema_sdk_apis_forest_v1alpha1_LogicalRootSpec(ref),
+		forestv1alpha1.LogicalRootStatus{}.OpenAPIModelName():                         schema_sdk_apis_forest_v1alpha1_LogicalRootStatus(ref),
 		migrationv1alpha1.EtcdEntry{}.OpenAPIModelName():                              schema_sdk_apis_migration_v1alpha1_EtcdEntry(ref),
 		migrationv1alpha1.LogicalClusterDump{}.OpenAPIModelName():                     schema_sdk_apis_migration_v1alpha1_LogicalClusterDump(ref),
 		migrationv1alpha1.LogicalClusterDumpSpec{}.OpenAPIModelName():                 schema_sdk_apis_migration_v1alpha1_LogicalClusterDumpSpec(ref),
@@ -4397,6 +4402,212 @@ func schema_sdk_apis_core_v1alpha1_ShardStatus(ref common.ReferenceCallback) com
 		},
 		Dependencies: []string{
 			conditionsv1alpha1.Condition{}.OpenAPIModelName(), "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_sdk_apis_forest_v1alpha1_LogicalRoot(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "LogicalRoot is the root of a workspace tree outside of the root workspace. It is backed by a logical cluster with a generated name.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ObjectMeta{}.OpenAPIModelName()),
+						},
+					},
+					"spec": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(forestv1alpha1.LogicalRootSpec{}.OpenAPIModelName()),
+						},
+					},
+					"status": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(forestv1alpha1.LogicalRootStatus{}.OpenAPIModelName()),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			forestv1alpha1.LogicalRootSpec{}.OpenAPIModelName(), forestv1alpha1.LogicalRootStatus{}.OpenAPIModelName(), v1.ObjectMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_sdk_apis_forest_v1alpha1_LogicalRootList(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "LogicalRootList is a list of LogicalRoots.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"kind": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"apiVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"metadata": {
+						SchemaProps: spec.SchemaProps{
+							Default: map[string]interface{}{},
+							Ref:     ref(v1.ListMeta{}.OpenAPIModelName()),
+						},
+					},
+					"items": {
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(forestv1alpha1.LogicalRoot{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"metadata", "items"},
+			},
+		},
+		Dependencies: []string{
+			forestv1alpha1.LogicalRoot{}.OpenAPIModelName(), v1.ListMeta{}.OpenAPIModelName()},
+	}
+}
+
+func schema_sdk_apis_forest_v1alpha1_LogicalRootSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "LogicalRootSpec holds the desired state of the LogicalRoot.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"rootPath": {
+						SchemaProps: spec.SchemaProps{
+							Description: "rootPath is an alias for the first path segment of the tree. When empty the tree is addressed by status.clusterName.\n\nLogical cluster names take precedence over root paths. Root paths are not claimed across shards. Setting it requires the LogicalRootAllowCustomNames feature gate.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"type": {
+						SchemaProps: spec.SchemaProps{
+							Description: "type is the WorkspaceType of the root logical cluster. It must not allow a parent. When empty the type root in the root workspace is used.",
+							Ref:         ref(tenancyv1alpha1.WorkspaceTypeReference{}.OpenAPIModelName()),
+						},
+					},
+					"location": {
+						SchemaProps: spec.SchemaProps{
+							Description: "location constrains the shards the root logical cluster can be scheduled to. When empty an arbitrary shard is chosen.",
+							Ref:         ref(tenancyv1alpha1.WorkspaceLocation{}.OpenAPIModelName()),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			tenancyv1alpha1.WorkspaceLocation{}.OpenAPIModelName(), tenancyv1alpha1.WorkspaceTypeReference{}.OpenAPIModelName()},
+	}
+}
+
+func schema_sdk_apis_forest_v1alpha1_LogicalRootStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "LogicalRootStatus communicates the observed state of the LogicalRoot.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"clusterName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "clusterName is the generated name of the root logical cluster.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"phase": {
+						SchemaProps: spec.SchemaProps{
+							Description: "phase of the root logical cluster (Scheduling, Initializing, Ready).",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"URL": {
+						SchemaProps: spec.SchemaProps{
+							Description: "URL is the address under which the root logical cluster can be reached.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"conditions": {
+						SchemaProps: spec.SchemaProps{
+							Description: "conditions is the current processing state of the LogicalRoot.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref(conditionsv1alpha1.Condition{}.OpenAPIModelName()),
+									},
+								},
+							},
+						},
+					},
+					"initializers": {
+						SchemaProps: spec.SchemaProps{
+							Description: "initializers must be cleared by a controller before the root logical cluster is ready.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Type:   []string{"string"},
+										Format: "",
+									},
+								},
+							},
+						},
+					},
+					"terminators": {
+						SchemaProps: spec.SchemaProps{
+							Description: "terminators must be cleared by a controller before the root logical cluster is deleted.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Type:   []string{"string"},
+										Format: "",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			conditionsv1alpha1.Condition{}.OpenAPIModelName()},
 	}
 }
 

@@ -33,6 +33,7 @@ import (
 	apisv1alpha2 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/apis/v1alpha2"
 	cachev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/cache/v1alpha1"
 	corev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/core/v1alpha1"
+	forestv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/forest/v1alpha1"
 	migrationv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/migration/v1alpha1"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/tenancy/v1alpha1"
 	topologyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/cluster/typed/topology/v1alpha1"
@@ -41,6 +42,7 @@ import (
 	typedapisv1alpha2 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/apis/v1alpha2"
 	typedcachev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/cache/v1alpha1"
 	typedcorev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/core/v1alpha1"
+	typedforestv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/forest/v1alpha1"
 	typedmigrationv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/migration/v1alpha1"
 	typedtenancyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/tenancy/v1alpha1"
 	typedtopologyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/topology/v1alpha1"
@@ -54,6 +56,7 @@ type ClusterInterface interface {
 	ApisV1alpha2() apisv1alpha2.ApisV1alpha2ClusterInterface
 	CacheV1alpha1() cachev1alpha1.CacheV1alpha1ClusterInterface
 	CoreV1alpha1() corev1alpha1.CoreV1alpha1ClusterInterface
+	ForestV1alpha1() forestv1alpha1.ForestV1alpha1ClusterInterface
 	MigrationV1alpha1() migrationv1alpha1.MigrationV1alpha1ClusterInterface
 	TenancyV1alpha1() tenancyv1alpha1.TenancyV1alpha1ClusterInterface
 	TopologyV1alpha1() topologyv1alpha1.TopologyV1alpha1ClusterInterface
@@ -68,6 +71,7 @@ type ClusterClientset struct {
 	apisV1alpha2      *apisv1alpha2.ApisV1alpha2ClusterClient
 	cacheV1alpha1     *cachev1alpha1.CacheV1alpha1ClusterClient
 	coreV1alpha1      *corev1alpha1.CoreV1alpha1ClusterClient
+	forestV1alpha1    *forestv1alpha1.ForestV1alpha1ClusterClient
 	migrationV1alpha1 *migrationv1alpha1.MigrationV1alpha1ClusterClient
 	tenancyV1alpha1   *tenancyv1alpha1.TenancyV1alpha1ClusterClient
 	topologyV1alpha1  *topologyv1alpha1.TopologyV1alpha1ClusterClient
@@ -104,6 +108,11 @@ func (c *ClusterClientset) CacheV1alpha1() cachev1alpha1.CacheV1alpha1ClusterInt
 // CoreV1alpha1 retrieves the CoreV1alpha1ClusterClient.
 func (c *ClusterClientset) CoreV1alpha1() corev1alpha1.CoreV1alpha1ClusterInterface {
 	return c.coreV1alpha1
+}
+
+// ForestV1alpha1 retrieves the ForestV1alpha1ClusterClient.
+func (c *ClusterClientset) ForestV1alpha1() forestv1alpha1.ForestV1alpha1ClusterInterface {
+	return c.forestV1alpha1
 }
 
 // MigrationV1alpha1 retrieves the MigrationV1alpha1ClusterClient.
@@ -158,6 +167,10 @@ func (c *scopedClientset) CacheV1alpha1() typedcachev1alpha1.CacheV1alpha1Interf
 
 func (c *scopedClientset) CoreV1alpha1() typedcorev1alpha1.CoreV1alpha1Interface {
 	return c.clientset.coreV1alpha1.Cluster(c.clusterPath)
+}
+
+func (c *scopedClientset) ForestV1alpha1() typedforestv1alpha1.ForestV1alpha1Interface {
+	return c.clientset.forestV1alpha1.Cluster(c.clusterPath)
 }
 
 func (c *scopedClientset) MigrationV1alpha1() typedmigrationv1alpha1.MigrationV1alpha1Interface {
@@ -234,6 +247,10 @@ func NewForConfigAndClient(c *rest.Config, httpClient *http.Client) (*ClusterCli
 	if err != nil {
 		return nil, err
 	}
+	cs.forestV1alpha1, err = forestv1alpha1.NewForConfigAndClient(&configShallowCopy, httpClient)
+	if err != nil {
+		return nil, err
+	}
 	cs.migrationV1alpha1, err = migrationv1alpha1.NewForConfigAndClient(&configShallowCopy, httpClient)
 	if err != nil {
 		return nil, err
@@ -272,6 +289,7 @@ func New(c *rest.Config) *ClusterClientset {
 	cs.apisV1alpha2 = apisv1alpha2.NewForConfigOrDie(c)
 	cs.cacheV1alpha1 = cachev1alpha1.NewForConfigOrDie(c)
 	cs.coreV1alpha1 = corev1alpha1.NewForConfigOrDie(c)
+	cs.forestV1alpha1 = forestv1alpha1.NewForConfigOrDie(c)
 	cs.migrationV1alpha1 = migrationv1alpha1.NewForConfigOrDie(c)
 	cs.tenancyV1alpha1 = tenancyv1alpha1.NewForConfigOrDie(c)
 	cs.topologyV1alpha1 = topologyv1alpha1.NewForConfigOrDie(c)

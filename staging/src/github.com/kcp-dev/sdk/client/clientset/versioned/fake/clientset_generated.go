@@ -38,6 +38,8 @@ import (
 	fakecachev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/cache/v1alpha1/fake"
 	corev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/core/v1alpha1"
 	fakecorev1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/core/v1alpha1/fake"
+	forestv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/forest/v1alpha1"
+	fakeforestv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/forest/v1alpha1/fake"
 	migrationv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/migration/v1alpha1"
 	fakemigrationv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/migration/v1alpha1/fake"
 	tenancyv1alpha1 "github.com/kcp-dev/sdk/client/clientset/versioned/typed/tenancy/v1alpha1"
@@ -174,6 +176,11 @@ func (c *Clientset) CacheV1alpha1() cachev1alpha1.CacheV1alpha1Interface {
 // CoreV1alpha1 retrieves the CoreV1alpha1Client
 func (c *Clientset) CoreV1alpha1() corev1alpha1.CoreV1alpha1Interface {
 	return &fakecorev1alpha1.FakeCoreV1alpha1{Fake: &c.Fake}
+}
+
+// ForestV1alpha1 retrieves the ForestV1alpha1Client
+func (c *Clientset) ForestV1alpha1() forestv1alpha1.ForestV1alpha1Interface {
+	return &fakeforestv1alpha1.FakeForestV1alpha1{Fake: &c.Fake}
 }
 
 // MigrationV1alpha1 retrieves the MigrationV1alpha1Client
