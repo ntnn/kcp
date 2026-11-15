@@ -29,6 +29,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/client-go/tools/cache"
@@ -190,10 +191,12 @@ func (o *workspacetypeExists) Admit(ctx context.Context, a admission.Attributes,
 }
 
 func (o *workspacetypeExists) resolveTypeRef(workspacePath logicalcluster.Path, ref tenancyv1alpha1.WorkspaceTypeReference) (*tenancyv1alpha1.WorkspaceType, error) {
-	return resolveWorkspaceTypeReference(workspacePath, ref, o.getType)
+	return ResolveWorkspaceTypeReference(workspacePath, ref, o.getType)
 }
 
-func resolveWorkspaceTypeReference(workspacePath logicalcluster.Path, ref tenancyv1alpha1.WorkspaceTypeReference, getter func(logicalcluster.Path, string) (*tenancyv1alpha1.WorkspaceType, error)) (*tenancyv1alpha1.WorkspaceType, error) {
+// ResolveWorkspaceTypeReference returns the WorkspaceType ref points to.
+// A reference without a path is looked up in workspacePath, its ancestors and the root workspace.
+func ResolveWorkspaceTypeReference(workspacePath logicalcluster.Path, ref tenancyv1alpha1.WorkspaceTypeReference, getter func(logicalcluster.Path, string) (*tenancyv1alpha1.WorkspaceType, error)) (*tenancyv1alpha1.WorkspaceType, error) {
 	if ref.Path != "" {
 		wt, err := getter(logicalcluster.NewPath(ref.Path), string(ref.Name))
 		if err != nil {
@@ -301,19 +304,8 @@ func (o *workspacetypeExists) Validate(ctx context.Context, a admission.Attribut
 				return admission.NewForbidden(a, fmt.Errorf("unable to determine access to workspace type %q", ws.Spec.Type))
 			}
 
-			useAttr := authorizer.AttributesRecord{
-				User:            a.GetUserInfo(),
-				Verb:            "use",
-				APIGroup:        tenancyv1alpha1.SchemeGroupVersion.Group,
-				APIVersion:      tenancyv1alpha1.SchemeGroupVersion.Version,
-				Resource:        "workspacetypes",
-				Name:            alias.Name,
-				ResourceRequest: true,
-			}
-			if decision, _, err := authz.Authorize(ctx, useAttr); err != nil {
-				return admission.NewForbidden(a, fmt.Errorf("unable to determine access to workspace type %s:%s: %w", canonicalPathFrom(alias), alias.Name, err))
-			} else if decision != authorizer.DecisionAllow {
-				return admission.NewForbidden(a, fmt.Errorf("unable to use workspace type %s:%s: missing verb='use' permission on workspacetype", canonicalPathFrom(alias), alias.Name))
+			if err := AuthorizeUse(ctx, authz, a.GetUserInfo(), alias); err != nil {
+				return admission.NewForbidden(a, err)
 			}
 
 			if err := apibindingadmission.CheckDefaultAPIBindingsAccess(ctx, a.GetUserInfo(), logicalcluster.From(alias), alias.Spec.DefaultAPIBindings, o.getLogicalCluster, newAuthorizer); err != nil {
@@ -357,6 +349,28 @@ func (o *workspacetypeExists) Validate(ctx context.Context, a admission.Attribut
 		}
 	}
 
+	return nil
+}
+
+// AuthorizeUse checks that u has the use verb on the WorkspaceType.
+// authz must authorize against the logical cluster of the WorkspaceType.
+func AuthorizeUse(ctx context.Context, authz authorizer.Authorizer, u user.Info, wt *tenancyv1alpha1.WorkspaceType) error {
+	useAttr := authorizer.AttributesRecord{
+		User:            u,
+		Verb:            "use",
+		APIGroup:        tenancyv1alpha1.SchemeGroupVersion.Group,
+		APIVersion:      tenancyv1alpha1.SchemeGroupVersion.Version,
+		Resource:        "workspacetypes",
+		Name:            wt.Name,
+		ResourceRequest: true,
+	}
+	decision, _, err := authz.Authorize(ctx, useAttr)
+	if err != nil {
+		return fmt.Errorf("unable to determine access to workspace type %s:%s: %w", canonicalPathFrom(wt), wt.Name, err)
+	}
+	if decision != authorizer.DecisionAllow {
+		return fmt.Errorf("unable to use workspace type %s:%s: missing verb='use' permission on workspacetype", canonicalPathFrom(wt), wt.Name)
+	}
 	return nil
 }
 
@@ -481,7 +495,7 @@ func (r *transitiveTypeResolver) resolve(wt *tenancyv1alpha1.WorkspaceType, seen
 
 	ret := make([]*tenancyv1alpha1.WorkspaceType, 0, len(wt.Spec.Extend.With))
 	for _, baseTypeRef := range wt.Spec.Extend.With {
-		baseType, err := resolveWorkspaceTypeReference(canonicalPathFrom(wt), baseTypeRef, r.getter)
+		baseType, err := ResolveWorkspaceTypeReference(canonicalPathFrom(wt), baseTypeRef, r.getter)
 		if err != nil {
 			return nil, fmt.Errorf("unable to find inherited workspace type %s", baseTypeRef.Name)
 		}
