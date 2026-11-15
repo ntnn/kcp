@@ -97,6 +97,7 @@ mkdir -p ${SDK_PKG}/client/{clientset,applyconfiguration,listers,informers}
   github.com/kcp-dev/sdk/apis/cache/v1alpha1 \
   github.com/kcp-dev/sdk/apis/admin/v1alpha1 \
   github.com/kcp-dev/sdk/apis/migration/v1alpha1 \
+  github.com/kcp-dev/sdk/apis/forest/v1alpha1 \
   github.com/kcp-dev/sdk/apis/topology/v1alpha1 \
   github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1 \
   k8s.io/apimachinery/pkg/apis/meta/v1 \
@@ -115,6 +116,7 @@ mkdir -p ${SDK_PKG}/client/{clientset,applyconfiguration,listers,informers}
   --input github.com/kcp-dev/sdk/apis/cache/v1alpha1 \
   --input github.com/kcp-dev/sdk/apis/admin/v1alpha1 \
   --input github.com/kcp-dev/sdk/apis/migration/v1alpha1 \
+  --input github.com/kcp-dev/sdk/apis/forest/v1alpha1 \
   --input-base="" \
   --apply-configuration-package=github.com/kcp-dev/sdk/client/applyconfiguration \
   --clientset-name "versioned"
@@ -193,6 +195,7 @@ go install "${OPENAPI_PKG}"/cmd/openapi-gen
   github.com/kcp-dev/sdk/apis/cache/v1alpha1 \
   github.com/kcp-dev/sdk/apis/admin/v1alpha1 \
   github.com/kcp-dev/sdk/apis/migration/v1alpha1 \
+  github.com/kcp-dev/sdk/apis/forest/v1alpha1 \
   github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1
 
 "$GOPATH"/bin/openapi-gen \
@@ -208,6 +211,7 @@ go install "${OPENAPI_PKG}"/cmd/openapi-gen
   github.com/kcp-dev/sdk/apis/cache/v1alpha1 \
   github.com/kcp-dev/sdk/apis/admin/v1alpha1 \
   github.com/kcp-dev/sdk/apis/migration/v1alpha1 \
+  github.com/kcp-dev/sdk/apis/forest/v1alpha1 \
   github.com/kcp-dev/sdk/apis/third_party/conditions/apis/conditions/v1alpha1 \
   k8s.io/apimachinery/pkg/apis/meta/v1 \
   k8s.io/apimachinery/pkg/runtime \
