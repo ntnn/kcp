@@ -65,6 +65,16 @@ const (
 	// alpha: v0.1
 	// Enables migrating logical clusters between shards.
 	LogicalClusterMigration featuregate.Feature = "LogicalClusterMigration"
+
+	// owner: @ntnn
+	// alpha: v0.1
+	// Enables the LogicalRoot API and controller to create workspace trees outside of root.
+	LogicalRoots featuregate.Feature = "LogicalRoots"
+
+	// owner: @ntnn
+	// alpha: v0.1
+	// Allows setting spec.rootPath on LogicalRoots.
+	LogicalRootAllowCustomNames featuregate.Feature = "LogicalRootAllowCustomNames"
 )
 
 // Re-export upstream feature gates used by kcp server logic so callers import
@@ -160,6 +170,12 @@ var defaultVersionedGenericControlPlaneFeatureGates = map[featuregate.Feature]fe
 	},
 	LogicalClusterMigration: {
 		{Version: version.MustParse("1.32"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	LogicalRoots: {
+		{Version: version.MustParse("1.37"), Default: false, PreRelease: featuregate.Alpha},
+	},
+	LogicalRootAllowCustomNames: {
+		{Version: version.MustParse("1.37"), Default: false, PreRelease: featuregate.Alpha},
 	},
 	// StorageVersionAPI mirrors the upstream k8s gate; kcp keeps it Alpha/off-by-default.
 	// Must be listed here so kcp's feature gate machinery tracks it and exposes it via --feature-gates.
