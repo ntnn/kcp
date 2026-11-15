@@ -58,6 +58,7 @@ import (
 	"github.com/kcp-dev/kcp/pkg/admission/kubequota"
 	"github.com/kcp-dev/kcp/pkg/admission/logicalcluster"
 	"github.com/kcp-dev/kcp/pkg/admission/logicalclusterfinalizer"
+	"github.com/kcp-dev/kcp/pkg/admission/logicalroot"
 	kcpmutatingadmissionpolicy "github.com/kcp-dev/kcp/pkg/admission/mutatingadmissionpolicy"
 	kcpmutatingwebhook "github.com/kcp-dev/kcp/pkg/admission/mutatingwebhook"
 	workspacenamespacelifecycle "github.com/kcp-dev/kcp/pkg/admission/namespacelifecycle"
@@ -86,6 +87,7 @@ var AllOrderedPlugins = beforeWebhooks(
 	shard.PluginName,
 	workspacetype.PluginName,
 	workspacetypeexists.PluginName,
+	logicalroot.PluginName,
 	logicalcluster.PluginName,
 	apiexport.PluginName,
 	apibinding.PluginName,
@@ -129,6 +131,7 @@ func RegisterAllKcpAdmissionPlugins(plugins *admission.Plugins) {
 	shard.Register(plugins)
 	workspacetype.Register(plugins)
 	workspacetypeexists.Register(plugins)
+	logicalroot.Register(plugins)
 	logicalcluster.Register(plugins)
 	apiresourceschema.Register(plugins)
 	apiexport.Register(plugins)
@@ -166,6 +169,7 @@ var defaultOnPluginsInKcp = sets.New[string](
 	shard.PluginName,
 	workspacetype.PluginName,
 	workspacetypeexists.PluginName,
+	logicalroot.PluginName,
 	logicalcluster.PluginName,
 	apiresourceschema.PluginName,
 	apiexport.PluginName,
